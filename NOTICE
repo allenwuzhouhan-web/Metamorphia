@@ -1,0 +1,20 @@
+Metamorphia - NOTICE
+
+Metamorphia is a continuation of Omni (previously named DynamicIsland).
+This product includes software derived from the boring.notch project,
+modified and adapted first for Omni and now for Metamorphia. The boring.notch
+project is licensed under the GNU General Public License v3.0.
+
+See the LICENSE file for the full GPL v3 text.
+
+--
+
+MetamorphiaAgentKit Skills subsystem
+
+The SKILL.md discovery pattern used by MetamorphiaAgentKit's Skills
+subsystem (Packages/MetamorphiaAgentKit/Sources/MetamorphiaAgentKit/Skills
+and Packages/MetamorphiaExecutors/Sources/MetamorphiaExecutors/Resources/Skills)
+is inspired by the openclaw project (https://github.com/openclaw/openclaw),
+which is licensed under the MIT License. The skill guides bundled with
+Metamorphia are original works written against Metamorphia's native AppleScript,
+shell, and web tools; they are not copied from openclaw.

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(touch /Users/allenwu/.claude/orchestrate/history.jsonl)",
+      "Read(//Users/allenwu/.claude/orchestrate/**)"
+    ]
+  }
+}

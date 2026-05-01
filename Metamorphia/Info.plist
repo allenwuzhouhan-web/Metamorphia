@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!--
+		Global arbitrary-loads is OFF. Every public-internet request must be
+		HTTPS (all first-party endpoints — Anthropic, OpenAI, DeepSeek,
+		DuckDuckGo, Open-Meteo — already are).
+
+		Local networking (loopback, .local mDNS) is allowed so local LLM
+		proxies (Ollama on http://localhost:11434) and MCP servers running on
+		the user's machine keep working. Local-network HTTP isn't an ATS
+		bypass in the same sense — the exposure is already bounded by the
+		firewall — and this is the pragmatic setting for a developer-oriented
+		AI agent that frequently connects to local tooling.
+		-->
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Metamorphia needs audio capture permission to display the real-time music waveform visualizer.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Metamorphia needs screen recording permission to capture screenshots for the AI assistant feature.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Metamorphia needs microphone access to transcribe your voice commands to the AI agent.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Metamorphia uses speech recognition to transcribe your voice commands to the AI agent on-device when available.</string>
+	<key>NSSystemAdministrationUsageDescription</key>
+	<string>Metamorphia needs administrator access for tools that modify system-level settings.</string>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict/>
+	</array>
+	<key>NSServices</key>
+	<array>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Analyze with Metamorphia</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>analyzeFileService</string>
+			<key>NSPortName</key>
+			<string>Metamorphia</string>
+			<key>NSSendTypes</key>
+			<array>
+				<string>public.file-url</string>
+				<string>NSFilenamesPboardType</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Ask Metamorphia about Selection</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>askWithTextService</string>
+			<key>NSPortName</key>
+			<string>Metamorphia</string>
+			<key>NSSendTypes</key>
+			<array>
+				<string>public.plain-text</string>
+				<string>public.utf8-plain-text</string>
+				<string>NSStringPboardType</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

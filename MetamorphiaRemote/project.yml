@@ -1,0 +1,36 @@
+name: MetamorphiaRemote
+options:
+  bundleIdPrefix: com.johannendersmith
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "16.0"
+  developmentLanguage: en
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: 9Y64TRM77N
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.9"
+
+packages:
+  MetamorphiaRemoteKit:
+    path: ../Packages/MetamorphiaRemoteKit
+
+targets:
+  MetamorphiaRemote:
+    type: application
+    platform: iOS
+    sources:
+      - MetamorphiaRemote
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.johannendersmith.metamorphia.remote
+        INFOPLIST_GENERATION_MODE: GeneratedFile
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: "YES"
+        CODE_SIGN_ENTITLEMENTS: MetamorphiaRemote/MetamorphiaRemote.entitlements
+    dependencies:
+      - package: MetamorphiaRemoteKit
+    entitlements:
+      path: MetamorphiaRemote/MetamorphiaRemote.entitlements

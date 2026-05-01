@@ -1,0 +1,356 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1577F069DDEF711B87DBA5FE /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B1E1684887F1844103D0F2D /* HomeView.swift */; };
+		8EC3EFF358181C8545481FCF /* MetamorphiaRemoteKit in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAE055F73EC4C3EE4E3DE0F /* MetamorphiaRemoteKit */; };
+		9C0CE3BEAD8369DC286F392A /* MetamorphiaRemoteShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11B37B50D237FEB5B86E7219 /* MetamorphiaRemoteShortcuts.swift */; };
+		9EB14313DC9FE7F81CE5F22C /* MetamorphiaRemoteApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 783AE2EC8F73CCB227940E66 /* MetamorphiaRemoteApp.swift */; };
+		B3D4BF12351DD86472A8743C /* Intents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 189A8C95359A5868E6CEAC4C /* Intents.swift */; };
+		BEF380DB50F6817F7B2CEB32 /* CommandSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DA28C1B94AF5F0CEF267C21 /* CommandSender.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		018D68F8E163A66BDDA67198 /* MetamorphiaRemote.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MetamorphiaRemote.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		0B1E1684887F1844103D0F2D /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		11B37B50D237FEB5B86E7219 /* MetamorphiaRemoteShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetamorphiaRemoteShortcuts.swift; sourceTree = "<group>"; };
+		189A8C95359A5868E6CEAC4C /* Intents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Intents.swift; sourceTree = "<group>"; };
+		5678AD9A11A6DF3199E30DD3 /* MetamorphiaRemote.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MetamorphiaRemote.entitlements; sourceTree = "<group>"; };
+		783AE2EC8F73CCB227940E66 /* MetamorphiaRemoteApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetamorphiaRemoteApp.swift; sourceTree = "<group>"; };
+		7DA28C1B94AF5F0CEF267C21 /* CommandSender.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandSender.swift; sourceTree = "<group>"; };
+		CF7ABC7018CC33E1E23D66A7 /* MetamorphiaRemoteKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = MetamorphiaRemoteKit; path = ../Packages/MetamorphiaRemoteKit; sourceTree = SOURCE_ROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A195EEFA70FFF0D871C9BD64 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8EC3EFF358181C8545481FCF /* MetamorphiaRemoteKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		64D1034936B875239743FD5A = {
+			isa = PBXGroup;
+			children = (
+				7567F899B6379ABD5D5B3A24 /* MetamorphiaRemote */,
+				E7143F1DB2E6156B7C06005F /* Packages */,
+				A4BCB4FFA0F13CA2274222C9 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		7567F899B6379ABD5D5B3A24 /* MetamorphiaRemote */ = {
+			isa = PBXGroup;
+			children = (
+				7DA28C1B94AF5F0CEF267C21 /* CommandSender.swift */,
+				0B1E1684887F1844103D0F2D /* HomeView.swift */,
+				189A8C95359A5868E6CEAC4C /* Intents.swift */,
+				5678AD9A11A6DF3199E30DD3 /* MetamorphiaRemote.entitlements */,
+				783AE2EC8F73CCB227940E66 /* MetamorphiaRemoteApp.swift */,
+				11B37B50D237FEB5B86E7219 /* MetamorphiaRemoteShortcuts.swift */,
+			);
+			path = MetamorphiaRemote;
+			sourceTree = "<group>";
+		};
+		A4BCB4FFA0F13CA2274222C9 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				018D68F8E163A66BDDA67198 /* MetamorphiaRemote.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		E7143F1DB2E6156B7C06005F /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				CF7ABC7018CC33E1E23D66A7 /* MetamorphiaRemoteKit */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		82032F0C39478222C31F357E /* MetamorphiaRemote */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 275FB5F50B426BEE454D0D66 /* Build configuration list for PBXNativeTarget "MetamorphiaRemote" */;
+			buildPhases = (
+				BABFC3FE20EEC407057DCB5D /* Sources */,
+				A195EEFA70FFF0D871C9BD64 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = MetamorphiaRemote;
+			packageProductDependencies = (
+				0DAE055F73EC4C3EE4E3DE0F /* MetamorphiaRemoteKit */,
+			);
+			productName = MetamorphiaRemote;
+			productReference = 018D68F8E163A66BDDA67198 /* MetamorphiaRemote.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		96AFA3DBDFB4727EB738A574 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					82032F0C39478222C31F357E = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 72153C3836E110B7C232CE25 /* Build configuration list for PBXProject "MetamorphiaRemote" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 64D1034936B875239743FD5A;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				B38C8A7F5E946D8861F7C3A4 /* XCLocalSwiftPackageReference "../Packages/MetamorphiaRemoteKit" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = A4BCB4FFA0F13CA2274222C9 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				82032F0C39478222C31F357E /* MetamorphiaRemote */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		BABFC3FE20EEC407057DCB5D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BEF380DB50F6817F7B2CEB32 /* CommandSender.swift in Sources */,
+				1577F069DDEF711B87DBA5FE /* HomeView.swift in Sources */,
+				B3D4BF12351DD86472A8743C /* Intents.swift in Sources */,
+				9EB14313DC9FE7F81CE5F22C /* MetamorphiaRemoteApp.swift in Sources */,
+				9C0CE3BEAD8369DC286F392A /* MetamorphiaRemoteShortcuts.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		3166045D860F58E155E49A0E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 9Y64TRM77N;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.9;
+			};
+			name = Debug;
+		};
+		3FE7484008D51EF11707C070 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 9Y64TRM77N;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.9;
+			};
+			name = Release;
+		};
+		B040842089C207D558D227AB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = MetamorphiaRemote/MetamorphiaRemote.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = S37R6658V6;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_GENERATION_MODE = GeneratedFile;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.johannendersmith.metamorphia.remote;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		E77A5971E5D8C26A236BE523 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = MetamorphiaRemote/MetamorphiaRemote.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = S37R6658V6;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_GENERATION_MODE = GeneratedFile;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.johannendersmith.metamorphia.remote;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		275FB5F50B426BEE454D0D66 /* Build configuration list for PBXNativeTarget "MetamorphiaRemote" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B040842089C207D558D227AB /* Debug */,
+				E77A5971E5D8C26A236BE523 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		72153C3836E110B7C232CE25 /* Build configuration list for PBXProject "MetamorphiaRemote" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3166045D860F58E155E49A0E /* Debug */,
+				3FE7484008D51EF11707C070 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		B38C8A7F5E946D8861F7C3A4 /* XCLocalSwiftPackageReference "../Packages/MetamorphiaRemoteKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/MetamorphiaRemoteKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		0DAE055F73EC4C3EE4E3DE0F /* MetamorphiaRemoteKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MetamorphiaRemoteKit;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 96AFA3DBDFB4727EB738A574 /* Project object */;
+}
