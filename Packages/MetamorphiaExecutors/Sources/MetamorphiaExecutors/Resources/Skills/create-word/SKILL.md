@@ -1,6 +1,6 @@
 ---
-name: create-word
-description: Generate a Pages (.pages) document via AppleScript — write title, headings, body paragraphs, save to disk. Use when the user says "write a document about X", "draft a memo", "create a Pages doc".
+name: create-pages
+description: Generate an Apple Pages (.pages) document via AppleScript. Use only when the user explicitly asks for Pages, iWork, or a .pages file. For Microsoft Word, .docx, report, memo, letter, table of contents, headers/footers, or polished Office documents, prefer the word-docx skill.
 emoji: doc.text
 os: macOS
 requirements: Pages.app installed, run_applescript
@@ -8,7 +8,7 @@ requirements: Pages.app installed, run_applescript
 
 # Create Pages Document
 
-Pages is the Apple iWork word processor. Less scriptable than Keynote, but enough to create a styled document with title, headings, and body paragraphs. (For a true `.docx`, see the Microsoft Word section below.)
+Pages is the Apple iWork word processor. Less scriptable than Keynote, but enough to create a styled document with title, headings, and body paragraphs. For a true Microsoft Word document, use `word-docx` instead of Pages export unless the user explicitly wants the iWork route.
 
 ## Workflow
 
@@ -64,7 +64,7 @@ tell application "Pages"
 end tell
 ```
 
-This is the only way to produce a `.docx` from Metamorphia today — there's no native tool for direct `.docx` writing. The export preserves text, basic styles, and lists.
+This is an iWork fallback, not the preferred Word path. Use `word-docx` for Office-first work.
 
 ## Composing with other skills
 

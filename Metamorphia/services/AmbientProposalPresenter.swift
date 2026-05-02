@@ -233,24 +233,21 @@ public final class AmbientProposalPresenter {
     /// FeedbackLoopSuppressor → PerceptionBudget).
     ///
     /// Each path is narrow on purpose: proposals are suggestions, not
-    /// scripts. When a lowering fails (no default button in the dialog,
-    /// empty clipboard for paste-link), we bail silently — the user can
-    /// always do the action manually and the loop's novelty gate keeps us
-    /// from surfacing the same failed proposal again for 15 minutes.
+    /// scripts. When a lowering fails (empty clipboard for paste-link), we
+    /// bail silently — the user can always do the action manually and the
+    /// loop's novelty gate keeps us from surfacing the same failed proposal
+    /// again for 15 minutes.
     public static func runDefaultAction(for proposal: Proposal) async {
         switch proposal.goal {
         case .pasteLink:
             await runPasteLink()
-        case .respondToDialog:
-            await runRespondToDialog()
-        case .joinMeeting, .saveDownload, .replyToMessage:
-            // These three proposals open a follow-up surface rather than
+        case .replyToMessage:
+            _ = await ConversationContinuationService.shared.runDraftReviewAndPlace()
+        case .joinMeeting, .saveDownload:
+            // These proposals open a follow-up surface rather than
             // synthesizing a keystroke: join-meeting could open the
             // calendar event's URL, save-download could spawn a "Move to
-            // …" panel, reply-to-message could open the command bar with
-            // a draft seeded. Until that UI exists, acceptance is a
-            // silent no-op — the proposal's goal is still worthwhile
-            // because the user saw and acknowledged the reminder.
+            // …" panel. Until that UI exists, acceptance is a silent no-op.
             await runNoOp(goal: proposal.goal)
         }
     }
@@ -279,17 +276,6 @@ public final class AmbientProposalPresenter {
             // Cursor path declined (Accessibility permission missing, etc.)
             // — leave the card acceptance silent; the user sees no paste
             // and forms their own conclusion about the state of the app.
-        }
-    }
-
-    private static func runRespondToDialog() async {
-        // Press Return on whatever the focused app considers its default
-        // button. This is exactly what a user pressing Return would do;
-        // if no default button exists, the key stroke is a no-op.
-        do {
-            try GestureExecutor.keyPress(.enter)
-        } catch {
-            // Same failure mode as paste-link — silent.
         }
     }
 

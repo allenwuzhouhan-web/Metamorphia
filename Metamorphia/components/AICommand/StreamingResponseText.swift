@@ -107,50 +107,19 @@ struct CommandBarFlowLayout: Layout {
     }
 }
 
-/// Single tool-call pill. Renders the tool name, a completion indicator,
-/// and a symbol derived from the tool name. Moved from NotchCommandBarView
-/// (T3) and promoted to internal so TranscriptView can use it.
+/// Single tool-call indicator. Tool calls intentionally render as fixed-size
+/// icons only; labels can wrap badly when a run emits many calls at once.
 struct ToolPillView: View {
     let pill: AICommandViewModel.ToolCallPill
 
     var body: some View {
-        if isMemoryRecallTool(pill.toolName) {
-            memoryRecallIcon
-        } else {
-            labeledToolPill
-        }
-    }
-
-    private var labeledToolPill: some View {
-        HStack(spacing: 4) {
-            Image(systemName: toolSymbol(for: pill.toolName))
-                .font(.system(size: 9))
-            Text(pill.toolName)
-                .font(.system(size: 10, weight: .medium))
-            if !pill.isComplete {
-                ProgressView().controlSize(.mini).tint(.white.opacity(0.7))
-            }
-        }
-        .foregroundStyle(.white.opacity(0.72))
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(Color.white.opacity(0.07), in: Capsule())
-    }
-
-    private var memoryRecallIcon: some View {
-        Image(systemName: "memorychip")
+        Image(systemName: toolSymbol(for: pill.toolName))
             .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(.white.opacity(0.72))
+            .foregroundStyle(foregroundColor)
             .frame(width: 22, height: 18)
-            .background(Color.white.opacity(0.07), in: Capsule())
-            .accessibilityLabel("Recalling memory")
-            .help("Recalling memory")
-    }
-
-    private func isMemoryRecallTool(_ toolName: String) -> Bool {
-        let normalized = toolName.lowercased()
-        return normalized == "recall_memory"
-            || (normalized.contains("recall") && normalized.contains("memor"))
+            .background(backgroundColor, in: Capsule())
+            .accessibilityLabel(accessibilityLabel)
+            .help(accessibilityLabel)
     }
 
     private func toolSymbol(for toolName: String) -> String {
@@ -169,5 +138,22 @@ struct ToolPillView: View {
         case let n where n.contains("apple"): return "applescript"
         default: return "wrench.and.screwdriver"
         }
+    }
+
+    private var foregroundColor: Color {
+        guard pill.isComplete else { return .white.opacity(0.72) }
+        return pill.isSuccess ? .green.opacity(0.72) : .orange.opacity(0.78)
+    }
+
+    private var backgroundColor: Color {
+        guard pill.isComplete else { return Color.white.opacity(0.07) }
+        return pill.isSuccess ? Color.green.opacity(0.10) : Color.orange.opacity(0.12)
+    }
+
+    private var accessibilityLabel: String {
+        if pill.isComplete {
+            return pill.isSuccess ? "\(pill.toolName) completed" : "\(pill.toolName) failed"
+        }
+        return "\(pill.toolName) running"
     }
 }

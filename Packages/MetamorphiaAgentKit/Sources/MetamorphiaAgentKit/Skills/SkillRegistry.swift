@@ -35,7 +35,7 @@ public final class SkillRegistry: @unchecked Sendable {
 
             let folderID = entry.lastPathComponent
             do {
-                let skill = try SkillParser.parse(id: folderID, markdown: markdown)
+                let skill = try SkillParser.parse(id: folderID, markdown: markdown, sourceDirectory: entry)
                 loaded.append(skill)
             } catch {
                 print("[SkillRegistry] Failed to parse \(folderID): \(error)")

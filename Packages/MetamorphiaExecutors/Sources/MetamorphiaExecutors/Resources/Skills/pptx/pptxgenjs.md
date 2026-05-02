@@ -8,11 +8,11 @@ Use this path when the user wants a complete new PowerPoint deck and there is no
 node -e "require('pptxgenjs'); console.log('pptxgenjs ok')"
 ```
 
-If the dependency is missing, ask before installing. Do not silently fetch network dependencies.
+If the dependency is missing, ask before installing. Do not silently fetch network dependencies. Do not write check-or-install commands such as `node -e ... || npm install ...`.
 
 ## Authoring Pattern
 
-Create a single JavaScript generator file in the working directory, run it, then QA the resulting `.pptx`.
+Create one JavaScript generator file in the working directory, run it, then QA the resulting `.pptx`. Keep the generator compact; for complex decks, generate a first pass, inspect, then patch or regenerate rather than sending an oversized one-shot script.
 
 ```javascript
 const pptxgen = require("pptxgenjs");
@@ -89,7 +89,6 @@ function card(slide, x, y, w, h, heading, copy) {
   body(slide, copy, x + 0.18, y + 0.58, w - 0.36, h - 0.76, { color: C.muted, size: 12 });
 }
 
-// Example slide
 {
   const slide = pptx.addSlide();
   slide.background = { color: C.primary };
@@ -104,12 +103,12 @@ function card(slide, x, y, w, h, heading, copy) {
   });
 }
 
-await pptx.writeFile({ fileName: "output.pptx" });
+pptx.writeFile({ fileName: "output.pptx" });
 ```
 
 ## Layout Guidance
 
-Use different slide structures:
+Use varied slide structures:
 
 - Title: dark or high-contrast hero, one visual motif.
 - Agenda: 3-5 cards or numbered rows.
@@ -119,9 +118,12 @@ Use different slide structures:
 
 Keep slide elements inside a 0.5 inch margin. Use `fit: "shrink"` on text boxes that may wrap, but still size boxes conservatively.
 
-## Notes
+## Common Pitfalls
 
 - Set `margin: 0` for titles and precise alignment.
 - Prefer shapes and simple diagrams over long bullets.
 - Use image paths only when files exist locally.
+- Use `charSpacing`, not `letterSpacing`.
+- Do not use negative shadow offsets.
+- Do not use typed bullet characters when using PptxGenJS bullet options.
 - Add speaker notes only if requested.

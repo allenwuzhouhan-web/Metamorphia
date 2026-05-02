@@ -70,6 +70,55 @@ public struct LoadSkillTool: ToolDefinition {
             let suggestionList = suggestions.map { "  - \($0.id)" }.joined(separator: "\n")
             return "Skill '\(id)' not found. Did you mean:\n\(suggestionList)"
         }
-        return skill.body + "\n\n---\nThis was instructional content, not a completion. Proceed to carry out the user's request by calling the tools described above. Do not stop here."
+        return render(skill: skill) + "\n\n---\nThis was instructional content, not a completion. Proceed to carry out the user's request by calling the tools described above. Do not stop here."
+    }
+
+    private func render(skill: Skill) -> String {
+        var out = skill.body
+        guard let directory = skill.sourceDirectory else { return out }
+
+        let supportFiles = listSupportFiles(in: directory)
+        if !supportFiles.isEmpty {
+            out += "\n\n---\n## Metamorphia Skill Support Files\n"
+            out += "This skill was loaded from `\(directory.path)`. When commands reference `scripts/...`, `templates/...`, or adjacent guides, use paths relative to that directory or absolute paths under that directory.\n\n"
+            out += "Bundled support files:\n"
+            for file in supportFiles {
+                out += "- `\(file)`\n"
+            }
+        }
+
+        let adjacentMarkdown = supportFiles.filter {
+            $0.hasSuffix(".md") && !$0.contains("/")
+        }.sorted()
+
+        for relativePath in adjacentMarkdown {
+            let url = directory.appendingPathComponent(relativePath)
+            guard let markdown = try? String(contentsOf: url, encoding: .utf8),
+                  !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { continue }
+            out += "\n\n---\n## Bundled Guide: \(relativePath)\n\n"
+            out += markdown
+        }
+
+        return out
+    }
+
+    private func listSupportFiles(in directory: URL) -> [String] {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        var files: [String] = []
+        for case let url as URL in enumerator {
+            let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
+            guard values?.isRegularFile == true else { continue }
+            let relative = String(url.path.dropFirst(directory.path.count + 1))
+            guard relative != "SKILL.md" else { continue }
+            files.append(relative)
+        }
+        return files.sorted()
     }
 }

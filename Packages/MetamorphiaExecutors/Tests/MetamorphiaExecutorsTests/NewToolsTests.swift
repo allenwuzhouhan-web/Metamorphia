@@ -178,6 +178,50 @@ final class NewToolsTests: XCTestCase {
         }
     }
 
+    // MARK: - Skills
+
+    func testLoadSkillIncludesAdjacentGuidesAndSupportPaths() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SkillToolTests-\(UUID().uuidString)")
+        let folder = tmp.appendingPathComponent("office")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        try """
+        ---
+        name: office-test
+        description: Test office skill.
+        ---
+
+        # Office Test
+
+        Body refers to guide.md.
+        """.write(to: folder.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+        try "# Guide\n\nUse helper scripts carefully.\n".write(
+            to: folder.appendingPathComponent("guide.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("scripts"), withIntermediateDirectories: true)
+        try "print('ok')\n".write(
+            to: folder.appendingPathComponent("scripts/helper.py"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let registry = SkillRegistry()
+        XCTAssertEqual(registry.loadSkills(from: tmp), 1)
+
+        let result = try await LoadSkillTool(registry: registry)
+            .execute(arguments: try json(["id": "office-test"]))
+
+        XCTAssertTrue(result.contains("Body refers to guide.md."))
+        XCTAssertTrue(result.contains("Metamorphia Skill Support Files"))
+        XCTAssertTrue(result.contains("guide.md"))
+        XCTAssertTrue(result.contains("scripts/helper.py"))
+        XCTAssertTrue(result.contains("Use helper scripts carefully."))
+    }
+
     // MARK: - Helpers
 
     private func json(_ dict: [String: Any]) throws -> String {

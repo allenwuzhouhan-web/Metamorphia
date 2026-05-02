@@ -254,7 +254,7 @@ struct TranscriptView: View {
 
     @ViewBuilder
     private func toolPillStack(_ pills: [AICommandViewModel.ToolCallPill]) -> some View {
-        HStack(spacing: 6) {
+        CommandBarFlowLayout(spacing: 6, lineSpacing: 5) {
             ForEach(pills) { pill in
                 ToolPillView(pill: pill)
             }

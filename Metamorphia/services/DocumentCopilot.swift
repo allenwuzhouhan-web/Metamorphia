@@ -195,23 +195,37 @@ enum DocumentCopilot {
         let descriptor = await Task.detached(priority: .userInitiated) {
             frontmostDocumentDescriptor(bundleID: bundleID)
         }.value
-        guard let descriptor,
-              let path = descriptor.path,
-              let url = sanitizedFileURL(path: path) else {
-            return nil
-        }
-        guard let extracted = await FileContentExtractor.shared.extract(from: url) else {
-            return nil
+
+        if let descriptor,
+           let path = descriptor.path,
+           let url = sanitizedFileURL(path: path),
+           let extracted = await FileContentExtractor.shared.extract(from: url) {
+            return ResolvedDocumentContext(
+                title: descriptor.title.isEmpty ? extracted.name : descriptor.title,
+                kind: resolvedKind,
+                sourceDescription: candidate.sourceDescription,
+                filePath: url.path,
+                extractedText: extracted.extractedText,
+                usesAttachmentText: false
+            )
         }
 
-        return ResolvedDocumentContext(
-            title: descriptor.title.isEmpty ? extracted.name : descriptor.title,
-            kind: resolvedKind,
-            sourceDescription: candidate.sourceDescription,
-            filePath: url.path,
-            extractedText: extracted.extractedText,
-            usesAttachmentText: false
-        )
+        if resolvedKind == .presentation,
+           let snapshot = await PowerPointCopilot.captureDeckReviewSnapshot() {
+            let sourceDescription = snapshot.filePath == nil
+                ? "Open \(candidate.appName) deck"
+                : candidate.sourceDescription
+            return ResolvedDocumentContext(
+                title: snapshot.presentationTitle,
+                kind: .presentation,
+                sourceDescription: sourceDescription,
+                filePath: snapshot.filePath,
+                extractedText: snapshot.extractedText,
+                usesAttachmentText: false
+            )
+        }
+
+        return nil
     }
 
     private static func resolveAttachedContext(

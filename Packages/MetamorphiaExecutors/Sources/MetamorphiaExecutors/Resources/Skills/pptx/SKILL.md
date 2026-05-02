@@ -1,12 +1,12 @@
 ---
 name: pptx
-description: "Use this skill whenever a .pptx file, PowerPoint deck, slide deck, slides, presentation, pitch deck, template, layout, speaker notes, or comments are involved as input or output. Use for creating complete PowerPoint decks from scratch, reading or extracting content from .pptx files, editing existing presentations, combining or splitting decks, and converting decks for QA."
+description: Use this skill whenever a PowerPoint file, .pptx deck, slide deck, presentation, pitch deck, template, speaker notes, or slide comments are involved as input or output. Use for creating complete PowerPoint decks from scratch, reading or extracting deck content, editing existing presentations, combining/splitting decks, and rendering decks for QA. For Keynote-only output, use create-ppt instead.
 emoji: rectangle.on.rectangle
 os: macOS
-requirements: "python3, optional markitdown[pptx], optional pptxgenjs, optional LibreOffice/soffice and pdftoppm for rendering"
+requirements: python3; optional markitdown[pptx], pptxgenjs, LibreOffice/soffice, pdftoppm
 ---
 
-# PPTX Skill
+# PowerPoint PPTX Skill
 
 Use this for PowerPoint-first work. The older `create-ppt` skill is Keynote-only and writes `.key`; prefer this skill whenever the user says PowerPoint, ppt, pptx, deck, slides, slide deck, pitch deck, or presentation unless they explicitly ask for Keynote.
 
@@ -15,9 +15,13 @@ Use this for PowerPoint-first work. The older `create-ppt` skill is Keynote-only
 | Task | Path |
 | --- | --- |
 | Read or analyze deck content | `python3 -m markitdown input.pptx` when installed; otherwise unzip and inspect `ppt/slides/*.xml` |
-| Edit an existing deck/template | Read `editing.md` |
-| Create a complete deck from scratch | Read `pptxgenjs.md` |
+| Create a complete deck from scratch | Use `pptxgenjs` when available; see bundled `pptxgenjs.md` |
+| Edit an existing deck/template | Preserve the template; see bundled `editing.md` |
 | Visual QA | Render to PDF/images, inspect, fix, and re-render affected slides |
+
+Metamorphia loads adjacent guides with this skill. If commands refer to support files, use the support directory shown by `load_skill`, not the current user document directory.
+
+Ask before installing missing dependencies. Do not silently fetch network packages. Never combine a dependency check with an install fallback in one command. Use a check-only command first; if it fails, either use an installed fallback such as `python-pptx`/AppleScript or ask the user before installing.
 
 ## Reading Content
 
@@ -33,17 +37,17 @@ unzip -q presentation.pptx -d /tmp/pptx-unpacked
 find /tmp/pptx-unpacked/ppt/slides -name 'slide*.xml' -print
 ```
 
-For quick text extraction without extra dependencies, parse the slide XML and decode XML entities. Keep slide order by sorting `slide1.xml`, `slide2.xml`, etc. naturally.
+For quick text extraction without extra dependencies, parse slide XML and decode XML entities. Keep slide order by sorting `slide1.xml`, `slide2.xml`, etc. naturally.
 
 ## Creating Complete Decks
 
-For a new deck, prefer `pptxgenjs` when available because it writes real `.pptx` files directly and supports layouts, shapes, images, tables, notes, and speaker-friendly typography. Read `pptxgenjs.md` before authoring.
+For a new deck, prefer `pptxgenjs` when available because it writes real `.pptx` files directly and supports layouts, shapes, images, tables, notes, and speaker-friendly typography. Read the bundled `pptxgenjs.md` before authoring.
 
 Do not create plain title-and-bullet slides throughout. Every slide should include a visual element: shape system, icon, diagram, chart, stat callout, timeline, image, or structured cards.
 
 ## Editing Existing Decks
 
-For template reuse or precise updates, read `editing.md`. The safe workflow is:
+For template reuse or precise updates, read the bundled `editing.md`. The safe workflow is:
 
 1. Inspect deck text and layout.
 2. Render thumbnails or PDF images if possible.

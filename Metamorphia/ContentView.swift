@@ -398,7 +398,9 @@ struct ContentView: View {
             mainLayout
                 .conditionalModifier(!useModernCloseAnimation) { view in
                     let hoverAnimation = Animation.bouncy.speed(1.2)
-                    let notchStateAnimation = Animation.spring.speed(1.2)
+                    let notchStateAnimation = vm.notchTransitionStyle == .commandBarCollapse
+                        ? MetamorphiaViewModel.commandBarCollapseAnimation
+                        : Animation.spring.speed(1.2)
                     return view
                         .animation(hoverAnimation, value: isHovering)
                         .animation(notchStateAnimation, value: vm.notchState)
@@ -409,7 +411,9 @@ struct ContentView: View {
                     let hoverAnimation = Animation.bouncy.speed(1.2)
                     let openAnimation = Animation.spring(response: 0.42, dampingFraction: 0.8, blendDuration: 0)
                     let closeAnimation = Animation.spring(response: 0.45, dampingFraction: 1.0, blendDuration: 0)
-                    let notchAnimation = vm.notchState == .open ? openAnimation : closeAnimation
+                    let notchAnimation = vm.notchTransitionStyle == .commandBarCollapse
+                        ? MetamorphiaViewModel.commandBarCollapseAnimation
+                        : (vm.notchState == .open ? openAnimation : closeAnimation)
                     return view
                         .animation(hoverAnimation, value: isHovering)
                         .animation(notchAnimation, value: vm.notchState)

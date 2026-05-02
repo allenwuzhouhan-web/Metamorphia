@@ -27,9 +27,11 @@ class MetamorphiaViewModel: NSObject, ObservableObject {
 
     let animationLibrary: MetamorphiaAnimations = .init()
     let animation: Animation?
+    static let commandBarCollapseAnimation = Animation.smooth(duration: 0.32)
 
     @Published var contentType: ContentType = .normal
     @Published private(set) var notchState: NotchState = .closed
+    @Published private(set) var notchTransitionStyle: NotchTransitionStyle = .standard
 
     @Published var dragDetectorTargeting: Bool = false
     @Published var dropZoneTargeting: Bool = false
@@ -325,6 +327,7 @@ class MetamorphiaViewModel: NSObject, ObservableObject {
     }
 
     func open() {
+        notchTransitionStyle = .standard
         let targetSize = calculateDynamicNotchSize()
         let paddedSize = addShadowPadding(to: targetSize, isMinimalistic: Defaults[.enableMinimalisticUI])
 
@@ -416,6 +419,7 @@ class MetamorphiaViewModel: NSObject, ObservableObject {
     /// going through a full close/open cycle.
     func refreshOpenSize(animated: Bool = true) {
         guard notchState == .open else { return }
+        notchTransitionStyle = .standard
         let targetSize = calculateDynamicNotchSize()
         if let delegate = AppDelegate.shared {
             delegate.ensureWindowSize(
@@ -446,6 +450,7 @@ class MetamorphiaViewModel: NSObject, ObservableObject {
     // snap.
 
     func minimize() {
+        notchTransitionStyle = .standard
         // Don't touch `coordinator.currentView` — the user is coming back
         // here, and mounting/unmounting the command bar would also cancel
         // the TextField focus and throw away the streaming response.
@@ -467,6 +472,7 @@ class MetamorphiaViewModel: NSObject, ObservableObject {
     }
 
     func restore() {
+        notchTransitionStyle = .standard
         let targetSize = calculateDynamicNotchSize()
         withAnimation(animationLibrary.animation) {
             notchSize = targetSize
@@ -483,12 +489,9 @@ class MetamorphiaViewModel: NSObject, ObservableObject {
     }
 
     func close() {
+        notchTransitionStyle = .standard
         let targetSize = getClosedNotchSize(screen: screen)
-        notchSize = targetSize
-        closedNotchSize = targetSize
-        notchState = .closed
-        resetScrollGestureSuppression()
-        resetAutoCloseSuppression()
+        applyClosedState(targetSize: targetSize)
 
         // Set the current view to shelf if it contains files and the user enables openShelfByDefault
         // Otherwise, if the user has not enabled openLastShelfByDefault, set the view to home
@@ -499,14 +502,33 @@ class MetamorphiaViewModel: NSObject, ObservableObject {
         }
     }
 
+    func closeForCommandBarCollapse(completion: @escaping () -> Void) {
+        let targetSize = getClosedNotchSize(screen: screen)
+        notchTransitionStyle = .commandBarCollapse
+        withAnimation(Self.commandBarCollapseAnimation) {
+            applyClosedState(targetSize: targetSize)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.34) { [weak self] in
+            guard let self else { return }
+            self.notchTransitionStyle = .standard
+            completion()
+        }
+    }
+
+    private func applyClosedState(targetSize: CGSize) {
+        notchSize = targetSize
+        closedNotchSize = targetSize
+        notchState = .closed
+        resetScrollGestureSuppression()
+        resetAutoCloseSuppression()
+    }
+
     func closeForLockScreen() {
+        notchTransitionStyle = .standard
         let targetSize = getClosedNotchSize(screen: screen)
         withAnimation(.none) {
-            notchSize = targetSize
-            closedNotchSize = targetSize
-            notchState = .closed
-            resetScrollGestureSuppression()
-            resetAutoCloseSuppression()
+            applyClosedState(targetSize: targetSize)
         }
     }
 

@@ -75,7 +75,7 @@ This is a manual map-reduce — slower than one shot but avoids dropping the sec
 
 ## Composing with other skills
 
-- After `summarize-document`: pipe the summary into `create-word` to write a one-pager, or `apple-notes` to save as a note.
+- After `summarize-document`: pipe the summary into `word-docx` to write a one-pager, or `apple-notes` to save as a note.
 - With `deep-research`: use the document as one source among several and cite it alongside web sources.
 
 ## Gotchas

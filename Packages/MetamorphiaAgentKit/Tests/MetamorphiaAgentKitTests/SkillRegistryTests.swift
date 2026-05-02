@@ -120,5 +120,6 @@ final class SkillRegistryTests: XCTestCase {
         XCTAssertEqual(registry.count, 2)
         XCTAssertNotNil(registry.skill(named: "alpha"))
         XCTAssertNotNil(registry.skill(named: "beta"))
+        XCTAssertEqual(registry.skill(named: "alpha")?.sourceDirectory?.lastPathComponent, "alpha")
     }
 }

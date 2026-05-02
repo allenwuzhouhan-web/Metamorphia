@@ -39,6 +39,8 @@ public enum AppProfileSeeds {
         SeedEntry(bundleID: "com.microsoft.Excel",           name: "Microsoft Excel",        axCoverage: 0.82),
         SeedEntry(bundleID: "com.microsoft.Powerpoint",      name: "Microsoft PowerPoint",   axCoverage: 0.80),
         SeedEntry(bundleID: "com.tinyspeck.slackmacgap",     name: "Slack",                  axCoverage: 0.88),
+        SeedEntry(bundleID: "com.tencent.xinWeChat",        name: "WeChat",                 axCoverage: 0.82),
+        SeedEntry(bundleID: "com.tencent.WeChat",           name: "WeChat",                 axCoverage: 0.82),
         SeedEntry(bundleID: "us.zoom.xos",                   name: "Zoom",                   axCoverage: 0.85),
         SeedEntry(bundleID: "com.google.Chrome",             name: "Google Chrome",          axCoverage: 0.92),
         SeedEntry(bundleID: "company.thebrowser.Browser",    name: "Arc",                    axCoverage: 0.92),

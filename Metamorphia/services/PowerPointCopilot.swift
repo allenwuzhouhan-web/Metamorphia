@@ -19,6 +19,14 @@ struct PowerPointDesignRoute {
     let deckRestoreData: [PowerPointRestoreData]
 }
 
+struct PowerPointDeckReviewSnapshot: Sendable, Hashable {
+    let presentationTitle: String
+    let filePath: String?
+    let slideCount: Int
+    let activeSlideIndex: Int
+    let extractedText: String
+}
+
 struct PowerPointShapeSnapshot: Sendable, Hashable {
     let name: String
     let text: String
@@ -225,6 +233,180 @@ enum PowerPointCopilot {
         } catch {
             return .failure("I couldn’t update PowerPoint formatting: \(error.localizedDescription)")
         }
+    }
+
+    static func captureDeckReviewSnapshot() async -> PowerPointDeckReviewSnapshot? {
+        let deck: PowerPointDeckContext
+        do {
+            let payload = try await runAppleScriptViaOSAScript(
+                deckCaptureScript,
+                timeoutSeconds: max(automationTimeoutSeconds, 18)
+            )
+            switch parseDeckPayload(payload) {
+            case .success(let captured):
+                deck = captured
+            case .failure:
+                return nil
+            }
+        } catch {
+            return nil
+        }
+
+        let extractedText = deckReviewText(for: deck)
+        guard !extractedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        return PowerPointDeckReviewSnapshot(
+            presentationTitle: deck.presentationTitle,
+            filePath: deck.filePath,
+            slideCount: deck.slideCount,
+            activeSlideIndex: deck.activeSlideIndex,
+            extractedText: extractedText
+        )
+    }
+
+    private static func runAppleScriptViaOSAScript(
+        _ script: String,
+        timeoutSeconds: TimeInterval
+    ) async throws -> String {
+        let scriptURL = FileManager.default
+            .temporaryDirectory
+            .appendingPathComponent("metamorphia-ppt-review-\(UUID().uuidString).applescript")
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: scriptURL) }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let process = Process()
+            let stdout = Pipe()
+            let stderr = Pipe()
+            let lock = NSLock()
+            var stdoutData = Data()
+            var stderrData = Data()
+            var didResume = false
+
+            func resumeOnce(_ result: Result<String, Error>) {
+                lock.lock()
+                guard !didResume else {
+                    lock.unlock()
+                    return
+                }
+                didResume = true
+                lock.unlock()
+
+                switch result {
+                case .success(let output):
+                    continuation.resume(returning: output)
+                case .failure(let error):
+                    continuation.resume(throwing: error)
+                }
+            }
+
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = [scriptURL.path]
+            process.standardOutput = stdout
+            process.standardError = stderr
+            stdout.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                guard !chunk.isEmpty else { return }
+                lock.lock()
+                stdoutData.append(chunk)
+                lock.unlock()
+            }
+            stderr.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                guard !chunk.isEmpty else { return }
+                lock.lock()
+                stderrData.append(chunk)
+                lock.unlock()
+            }
+            process.terminationHandler = { process in
+                stdout.fileHandleForReading.readabilityHandler = nil
+                stderr.fileHandleForReading.readabilityHandler = nil
+                let finalStdout = stdout.fileHandleForReading.readDataToEndOfFile()
+                let finalStderr = stderr.fileHandleForReading.readDataToEndOfFile()
+                lock.lock()
+                stdoutData.append(finalStdout)
+                stderrData.append(finalStderr)
+                let output = String(data: stdoutData, encoding: .utf8) ?? ""
+                let errorText = String(data: stderrData, encoding: .utf8) ?? ""
+                lock.unlock()
+                if process.terminationStatus == 0 {
+                    resumeOnce(.success(output))
+                } else {
+                    resumeOnce(.failure(NSError(
+                        domain: "PowerPointAutomation",
+                        code: Int(process.terminationStatus),
+                        userInfo: [NSLocalizedDescriptionKey: errorText.isEmpty ? "osascript failed" : errorText]
+                    )))
+                }
+            }
+
+            do {
+                try process.run()
+            } catch {
+                resumeOnce(.failure(error))
+                return
+            }
+
+            Task.detached(priority: .userInitiated) {
+                let nanoseconds = UInt64(max(timeoutSeconds, 0.1) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                lock.lock()
+                let alreadyResumed = didResume
+                lock.unlock()
+                guard !alreadyResumed else { return }
+                if process.isRunning {
+                    process.terminate()
+                }
+                resumeOnce(.failure(NSError(
+                    domain: "PowerPointAutomation",
+                    code: 408,
+                    userInfo: [NSLocalizedDescriptionKey: "osascript timed out after \(timeoutSeconds) seconds"]
+                )))
+            }
+        }
+    }
+
+    private static func parseDeckPayload(_ payload: String) -> PowerPointDeckCaptureResult {
+        guard !payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failure("PowerPoint did not report an active deck. Click the slide canvas in PowerPoint, then ask again.")
+        }
+        guard let data = payload.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return .failure("PowerPoint returned deck data Metamorphia could not parse.")
+        }
+        let presentationTitle = object["presentationTitle"] as? String ?? ""
+        let filePath = normalizedOptionalString(object["filePath"] as? String)
+        let activeSlideIndex = object["activeSlideIndex"] as? Int ?? 1
+        let slideCount = object["slideCount"] as? Int ?? 0
+        let rawSlides = object["slides"] as? [[String: Any]] ?? []
+        let slides = rawSlides.compactMap { slideObject -> PowerPointSlideContext? in
+            let slideIndex = slideObject["slideIndex"] as? Int ?? 0
+            guard slideIndex > 0 else { return nil }
+            let rawShapes = slideObject["shapes"] as? [[String: Any]] ?? []
+            let shapes = rawShapes.compactMap(parseShape).sorted {
+                if abs($0.top - $1.top) > 8 { return $0.top < $1.top }
+                return $0.left < $1.left
+            }
+            return PowerPointSlideContext(
+                presentationTitle: presentationTitle,
+                filePath: filePath,
+                slideIndex: slideIndex,
+                slideTitle: normalizedOptionalString(slideObject["slideTitle"] as? String),
+                shapes: shapes
+            )
+        }
+        guard !presentationTitle.isEmpty, slideCount > 0, !slides.isEmpty else {
+            return .failure("PowerPoint did not return editable deck structure. Make sure the deck is open and active.")
+        }
+        return .success(PowerPointDeckContext(
+            presentationTitle: presentationTitle,
+            filePath: filePath,
+            activeSlideIndex: activeSlideIndex,
+            slideCount: slideCount,
+            slides: slides
+        ))
     }
 
     static func prepareRewriteRoute(prompt: String) async -> PowerPointRewritePreparation {
@@ -2046,6 +2228,52 @@ enum PowerPointCopilot {
             totalCharacters += cost
         }
         return selected
+    }
+
+    private static func deckReviewText(for deck: PowerPointDeckContext) -> String {
+        var lines: [String] = [
+            "Presentation: \(deck.presentationTitle)",
+            "Slide count: \(deck.slideCount)",
+            "Active slide: \(deck.activeSlideIndex)"
+        ]
+        var totalCharacters = lines.joined(separator: "\n").count
+
+        for slide in deck.slides {
+            let slideTitle = slide.slideTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let titleSuffix: String
+            if let slideTitle, !slideTitle.isEmpty {
+                titleSuffix = ": \(slideTitle)"
+            } else {
+                titleSuffix = ""
+            }
+            let header = "\nSlide \(slide.slideIndex)\(titleSuffix)"
+            guard totalCharacters + header.count <= maxPromptCharacters || lines.count <= 3 else {
+                lines.append("\n[Additional slides omitted for prompt size.]")
+                break
+            }
+
+            lines.append(header)
+            totalCharacters += header.count
+
+            for shape in slide.shapes {
+                let text = shape.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { continue }
+                let normalized = text.components(separatedBy: .newlines)
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n")
+                let capped = promptText(normalized)
+                let shapeLine = "- \(shape.role.rawValue) #\(shape.index): \(capped)"
+                guard totalCharacters + shapeLine.count <= maxPromptCharacters || lines.count <= 4 else {
+                    lines.append("[Remaining slide text omitted for prompt size.]")
+                    return lines.joined(separator: "\n")
+                }
+                lines.append(shapeLine)
+                totalCharacters += shapeLine.count
+            }
+        }
+
+        return lines.joined(separator: "\n")
     }
 
     private static func promptText(_ text: String) -> String {

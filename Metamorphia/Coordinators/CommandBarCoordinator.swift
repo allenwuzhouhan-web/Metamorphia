@@ -6,11 +6,11 @@ import os.log
 /// Drives the AI Command Bar by reusing the *existing* notch infrastructure.
 /// `summon()` opens the notch (uses `MetamorphiaViewModel.open()` →
 /// `MetamorphiaAnimations.animation` = `.spring(.bouncy(duration: 0.4))`)
-/// and switches the active tab to `.commandBar`. `dismiss()` restores the
-/// previous tab and calls `close()` so the notch shrinks via the same spring.
+/// and switches the active tab to `.commandBar`. `dismiss()` lets the command
+/// bar collapse first, then restores the previous tab after the close settles.
 ///
-/// No separate window, no custom animation curves — the bar inherits the
-/// notch's open/close behavior end-to-end.
+/// No separate window — the bar inherits the notch's open behavior, with a
+/// calmer close profile so dismissal reads more like the music surface.
 ///
 /// Activation paths both route here:
 ///   - `⌘⇧Space` global hotkey → `toggle()`
@@ -63,6 +63,12 @@ public final class CommandBarCoordinator {
     /// available. Cleared and replayed in the `viewModel` didSet.
     private var pendingSummon: Bool = false
 
+    /// The app that was frontmost before Metamorphia activated the command
+    /// bar. Command-bar workflows that operate on "this chat" use this to
+    /// keep targeting the user's prior conversation instead of the command
+    /// bar itself.
+    public private(set) var lastExternalAppName: String?
+
     private var cancellables = Set<AnyCancellable>()
 
     private init() {}
@@ -108,6 +114,11 @@ public final class CommandBarCoordinator {
         }
         NSLog("🔔 [Metamorphia/CommandBar] summon proceeding — notch state=\(vm.notchState == .open ? "open" : "closed")")
 
+        if let frontmost = NSWorkspace.shared.frontmostApplication,
+           frontmost.bundleIdentifier != Bundle.main.bundleIdentifier {
+            lastExternalAppName = frontmost.localizedName
+        }
+
         // Activate the app (#19) so the non-activating panel can become key
         // and the TextField can receive keystrokes. LSUIElement/accessory
         // apps don't auto-activate when their windows are ordered front —
@@ -150,25 +161,24 @@ public final class CommandBarCoordinator {
         makeNotchWindowKey(for: vm)
     }
 
-    /// Restore the prior tab and close the notch via the existing spring.
+    /// Collapse the command bar, then restore the prior tab after the close
+    /// finishes so the content does not swap while the notch is shrinking.
     public func dismiss() {
         guard let vm = resolveNotchViewModel() else {
             os_log(.error, log: Self.log, "dismiss() aborted: no MetamorphiaViewModel")
             return
         }
         let coord = MetamorphiaViewCoordinator.shared
+        let restoredView = previousView ?? NotchViews.home
+        previousView = nil
 
-        if let prior = previousView {
-            coord.currentView = prior
-            previousView = nil
-        } else {
-            coord.currentView = .home
+        vm.closeForCommandBarCollapse { [weak vm] in
+            guard let vm, vm.notchState == .closed else { return }
+            coord.currentView = restoredView
+
+            // Let the hide-until-hover offset resume on non-notch displays.
+            NotificationCenter.default.post(name: .commandBarDidDismiss, object: nil)
         }
-
-        vm.close()
-
-        // Let the hide-until-hover offset resume on non-notch displays.
-        NotificationCenter.default.post(name: .commandBarDidDismiss, object: nil)
     }
 
     /// Toggle with state resync (#17): if the current-view and the notch-state

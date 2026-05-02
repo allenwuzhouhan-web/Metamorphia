@@ -55,10 +55,6 @@ public enum ProposalGoal: String, Sendable, Hashable, Codable {
     /// Clipboard holds a URL and the user is focused in a text-input
     /// inside a messaging / chat / compose surface. Suggest pasting.
     case pasteLink
-    /// An AX dialog / sheet just opened with a default button. Surface
-    /// "Respond" so the user can accept the default without reaching for
-    /// Enter — useful on notification dialogs that steal focus mid-type.
-    case respondToDialog
     /// A `.meetingStarted` event fired and the user is still lingering on
     /// a calendar / browser tab. Surface a one-tap "Join now" so the user
     /// doesn't have to hunt for the meeting link.
@@ -248,15 +244,11 @@ public actor ProposalLoop {
         guard await gatesAllow(now: now) else { return }
 
         // Order matters — earlier goals win when their preconditions hold.
-        // paste-link outranks respond-to-dialog outranks join-meeting
-        // outranks save-download outranks reply-to-message. Rationale:
-        // paste-link has the highest user intent signal (explicit copy
-        // + app switch); reply-to-message is the broadest heuristic and
-        // therefore most likely to false-positive, so it's last.
+        // paste-link outranks join-meeting outranks save-download outranks
+        // reply-to-message. Rationale: paste-link has the highest user intent
+        // signal (explicit copy + app switch); reply-to-message is the broadest
+        // heuristic and therefore most likely to false-positive, so it's last.
         if let proposal = inferPasteLink(now: now) {
-            tryEmit(proposal, now: now); return
-        }
-        if let proposal = inferRespondToDialog(now: now) {
             tryEmit(proposal, now: now); return
         }
         if let proposal = inferJoinMeeting(now: now) {
@@ -310,40 +302,6 @@ public actor ProposalLoop {
             confidence: 0.72,
             surfacedAt: now
         )
-    }
-
-    /// Infer a respond-to-dialog proposal. This fires on the lightest
-    /// possible signal — the recent event buffer shows a window-opened
-    /// cadence consistent with a modal / sheet appearing. The actual
-    /// verify happens when the Whisper Card is accepted: the executor
-    /// re-reads the ScreenMap and invokes the default button via
-    /// `press(ref)`. If no default button is present at accept time the
-    /// batch's verify clause reports failure; the proposal was cheap.
-    private func inferRespondToDialog(now: Date) -> Proposal? {
-        // Today's signal set is coarse — we key off `.focusChanged` events
-        // whose payload's windowTitle carries a common dialog shape
-        // ("Alert", "Confirm", "Save As"). Richer signal (a dedicated
-        // `.dialogAppeared` ActivityEvent case, or a TriggerBus lane
-        // subscription for `.axWindowCreated`) lands in a follow-up.
-        let dialogTerms = ["alert", "confirm", "save as", "quit", "sign in"]
-        for entry in recentEvents.reversed() {
-            if case let .focusChanged(bundleID, appName, windowTitle, _, _) = entry.event {
-                let title = (windowTitle ?? "").lowercased()
-                if dialogTerms.contains(where: { title.contains($0) }) {
-                    let noveltyKey = "respondToDialog|\(bundleID)|\(title)"
-                    let appLabel = appName.isEmpty ? bundleID : appName
-                    return Proposal(
-                        goal: .respondToDialog,
-                        rationale: "Respond to \(appLabel) dialog?",
-                        primaryActionLabel: "Respond",
-                        noveltyKey: noveltyKey,
-                        confidence: 0.55,
-                        surfacedAt: now
-                    )
-                }
-            }
-        }
-        return nil
     }
 
     /// Join-meeting: a `.meetingStarted` event in the window, and the user
@@ -417,7 +375,8 @@ public actor ProposalLoop {
     private func inferReplyToMessage(now: Date) -> Proposal? {
         let chatBundles: Set<String> = [
             "com.tinyspeck.slackmacgap", "com.apple.MobileSMS", "com.hnc.Discord",
-            "com.whatsapp.WhatsApp", "com.microsoft.teams2"
+            "com.whatsapp.WhatsApp", "com.microsoft.teams2",
+            "com.tencent.xinWeChat", "com.tencent.WeChat", "com.tencent.xin"
         ]
         var lastHardwareSignalAt: Date?
         var focusedChatRecently: (bundleID: String, appName: String, at: Date)?
@@ -501,6 +460,9 @@ public actor ProposalLoop {
         "com.microsoft.teams2",
         "com.microsoft.Outlook",
         "com.whatsapp.WhatsApp",
+        "com.tencent.xinWeChat",
+        "com.tencent.WeChat",
+        "com.tencent.xin",
         "com.apple.Safari",
         "com.google.Chrome",
         "org.whispersystems.signal-desktop"

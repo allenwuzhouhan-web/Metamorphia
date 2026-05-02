@@ -1,6 +1,6 @@
 ---
-name: create-excel
-description: Generate a Numbers (.numbers) spreadsheet via AppleScript — create sheets, populate cells, add formulas, save to disk. Use when the user says "make a spreadsheet", "create a budget", "build a table of X".
+name: create-numbers
+description: Generate an Apple Numbers (.numbers) spreadsheet via AppleScript. Use only when the user explicitly asks for Numbers, iWork, or a .numbers file. For Excel, .xlsx, workbook, CSV cleanup, formulas, charts, or spreadsheet deliverables, prefer the excel-xlsx skill.
 emoji: tablecells
 os: macOS
 requirements: Numbers.app installed, run_applescript
@@ -8,7 +8,7 @@ requirements: Numbers.app installed, run_applescript
 
 # Create Numbers Spreadsheet
 
-Numbers is the Apple iWork spreadsheet. Strong AppleScript support for cell values and formulas. (For a true `.xlsx`, see the Microsoft Excel section below.)
+Numbers is the Apple iWork spreadsheet. Strong AppleScript support for cell values and formulas. For a true Excel workbook, use `excel-xlsx` instead of exporting from Numbers unless the user explicitly wants the iWork route.
 
 ## Workflow
 
@@ -91,7 +91,7 @@ tell application "Numbers"
 end tell
 ```
 
-This is the only way to produce a `.xlsx` from Metamorphia today. Formulas are preserved; some Numbers-specific features (categories, smart filters) may downgrade.
+This is an iWork fallback, not the preferred Excel path. Use `excel-xlsx` for Office-first work.
 
 ## Composing with other skills
 

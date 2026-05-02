@@ -24,7 +24,7 @@ A `generate_audio` tool — an executor that can take a script and emit a `.m4a`
 
 If the user asked to create a podcast, tell them this skill is a stub and offer one of:
 
-1. **Generate just the script** as text or a `create-word` document — they can record it themselves later.
+1. **Generate just the script** as text or a `word-docx` document — they can record it themselves later.
 2. **Quick-and-dirty TTS** via `say -v Samantha -o /tmp/draft.aiff "<script text>"` if the user is okay with the built-in macOS voice as a draft.
 3. **Wait** until the real `generate_audio` tool ships. The Metamorphia maintainer specifically asked to be reminded to build this tool.
 

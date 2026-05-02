@@ -44,7 +44,7 @@ Keep citations dense — every non-obvious claim should trace back to a numbered
 ## Composing with other skills
 
 - Pair with `summarize-document` if the user already has the source files and just wants synthesis.
-- Pair with `create-word` or `pptx` if they want the report delivered in a document or slide deck, not chat.
+- Pair with `word-docx` or `pptx` if they want the report delivered in a document or slide deck, not chat.
 - Pair with `orchestrate` when sub-questions are large enough to fan out as parallel sub-agents.
 
 ## Gotchas

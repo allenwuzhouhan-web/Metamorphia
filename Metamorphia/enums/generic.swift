@@ -74,6 +74,11 @@ public enum NotchState {
     case minimized
 }
 
+public enum NotchTransitionStyle {
+    case standard
+    case commandBarCollapse
+}
+
 public enum NotchViews {
     case home
     case shelf

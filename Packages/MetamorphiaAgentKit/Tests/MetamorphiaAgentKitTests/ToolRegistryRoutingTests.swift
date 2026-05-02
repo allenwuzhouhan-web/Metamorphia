@@ -50,6 +50,20 @@ final class ToolRegistryRoutingTests: XCTestCase {
                 ),
                 .web
             ),
+            (
+                StubTool(
+                    name: "search_skills",
+                    description: "Search the skill library"
+                ),
+                .skills
+            ),
+            (
+                StubTool(
+                    name: "load_skill",
+                    description: "Load a skill by id"
+                ),
+                .skills
+            ),
         ])
         return registry
     }
@@ -111,5 +125,25 @@ final class ToolRegistryRoutingTests: XCTestCase {
         XCTAssertTrue(names.contains("recall_memory"))
         XCTAssertTrue(names.contains("store_memory"))
         XCTAssertFalse(names.contains("find_files"))
+    }
+
+    func testSkillDiscoveryQuestionExposesSkillTools() {
+        let names = toolNames(
+            makeRegistry().filteredToolDefinitions(for: "What skills do you have for Word, Excel, and PowerPoint?")
+        )
+
+        XCTAssertTrue(names.contains("search_skills"))
+        XCTAssertTrue(names.contains("load_skill"))
+        XCTAssertFalse(names.contains("search_web"))
+    }
+
+    func testSkillDiscoveryQuestionExposesSkillToolsForGeneralAgentPath() {
+        let names = toolNames(
+            makeRegistry().filteredToolDefinitions(for: "What skills do you have for Word, Excel, and PowerPoint?", agent: .general)
+        )
+
+        XCTAssertTrue(names.contains("search_skills"))
+        XCTAssertTrue(names.contains("load_skill"))
+        XCTAssertFalse(names.contains("search_web"))
     }
 }

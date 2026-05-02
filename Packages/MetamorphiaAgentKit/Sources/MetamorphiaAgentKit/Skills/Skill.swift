@@ -27,11 +27,23 @@ public struct Skill: Sendable, Hashable {
     /// needed by the agent itself.
     public let frontmatter: [String: String]
 
-    public init(id: String, description: String, body: String, frontmatter: [String: String] = [:]) {
+    /// Directory containing the `SKILL.md` file, when loaded from disk.
+    /// Metamorphia uses this to expose adjacent guides, scripts, templates,
+    /// and licenses that richer skills rely on.
+    public let sourceDirectory: URL?
+
+    public init(
+        id: String,
+        description: String,
+        body: String,
+        frontmatter: [String: String] = [:],
+        sourceDirectory: URL? = nil
+    ) {
         self.id = id
         self.description = description
         self.body = body
         self.frontmatter = frontmatter
+        self.sourceDirectory = sourceDirectory
     }
 }
 
@@ -50,7 +62,7 @@ public enum SkillParser {
     /// `metadata.openclaw.install[]`) are captured as the raw block string so
     /// round-tripping works, but we don't try to parse them structurally —
     /// Metamorphia doesn't need those fields.
-    public static func parse(id: String, markdown: String) throws -> Skill {
+    public static func parse(id: String, markdown: String, sourceDirectory: URL? = nil) throws -> Skill {
         var frontmatter: [String: String] = [:]
         var body = markdown
 
@@ -79,7 +91,13 @@ public enum SkillParser {
 
         let resolvedId = frontmatter["name"]?.trimmingCharacters(in: .whitespaces) ?? id
 
-        return Skill(id: resolvedId, description: description, body: body, frontmatter: frontmatter)
+        return Skill(
+            id: resolvedId,
+            description: description,
+            body: body,
+            frontmatter: frontmatter,
+            sourceDirectory: sourceDirectory
+        )
     }
 
     private static func parseFrontmatter(_ block: String) -> [String: String] {

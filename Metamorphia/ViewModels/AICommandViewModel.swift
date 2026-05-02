@@ -132,7 +132,11 @@ public final class AICommandViewModel: ObservableObject {
     }
     /// Current command-bar FSM state. Authoritative source of truth for the
     /// command bar UI; `isProcessing` is now derived from this.
-    @Published public private(set) var inputBarState: InputBarState = .ready
+    @Published public private(set) var inputBarState: InputBarState = .ready {
+        didSet {
+            MenuBarTaskStatusStore.shared.update(from: inputBarState)
+        }
+    }
 
     /// Back-compat accessor. Six views outside the command bar read this — keep
     /// it a plain computed var so SwiftUI republishes via `inputBarState`.
@@ -264,6 +268,11 @@ public final class AICommandViewModel: ObservableObject {
     public static var defaultSystemPrompt: String {
         let home = NSHomeDirectory()
         let user = NSUserName()
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd HH:mm zzz"
+        let now = formatter.string(from: Date())
         return """
         You are Metamorphia, an AI assistant on macOS. Use the available \
         tools to fulfill the user's request. Be concise — the user sees \
@@ -278,9 +287,21 @@ public final class AICommandViewModel: ObservableObject {
         - If a needed live-data tool is unavailable, say you cannot verify \
         the current answer instead of guessing.
 
+        ## Skills and dependencies
+        - If the user asks what skills, integrations, or capabilities you \
+        have, call `search_skills` when it is available before answering.
+        - If the user asks for Word, Excel, PowerPoint, DOCX, XLSX, or PPTX \
+        work, prefer Office-specific skills when available: `word-docx`, \
+        `excel-xlsx`, and `pptx`.
+        - Never combine dependency checks with installs in one command. Do \
+        not use patterns like `pip show ... || pip install ...` or \
+        `node -e ... || npm install ...`. Check first; if a dependency is \
+        missing, ask before installing or use a no-install fallback.
+
         ## User context
         - macOS short name: \(user)
         - Home directory: \(home)
+        - Current local date/time: \(now)
         - Treat \(home) as the user's home. Files under it belong to the \
         user — never refuse to open them claiming they belong to a \
         different user. Do not invent usernames or paths.
@@ -388,6 +409,63 @@ public final class AICommandViewModel: ObservableObject {
     /// so the conversation history reflects what the user actually typed.
     public func submit(prompt: String, systemPrompt: String) async {
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        if ConversationContinuationService.parseWeChatDirectMessageRequest(prompt) != nil {
+            currentInput = ""
+            errorMessage = nil
+            inputBarState = .processing
+            let outcome = await ConversationContinuationService.shared.runWeChatDirectMessageAndPlace(
+                sourcePrompt: prompt
+            )
+            let isError: Bool
+            switch outcome {
+            case .failure, .needsUserInput:
+                isError = true
+                inputBarState = .error(message: outcome.userMessage)
+            case .placed, .placedDirect, .cancelled:
+                isError = false
+                inputBarState = .result(message: outcome.userMessage)
+            }
+            conversation.append(Turn(
+                prompt: prompt,
+                result: outcome.userMessage,
+                toolPills: [],
+                isStreaming: false,
+                isError: isError
+            ))
+            liveStatus = nil
+            agentTree = nil
+            return
+        }
+
+        if ConversationContinuationService.isConversationContinuationRequest(prompt) {
+            currentInput = ""
+            errorMessage = nil
+            inputBarState = .processing
+            let outcome = await ConversationContinuationService.shared.runDraftReviewAndPlace(
+                sourcePrompt: prompt,
+                preferredAppName: CommandBarCoordinator.shared.lastExternalAppName
+            )
+            let isError: Bool
+            switch outcome {
+            case .failure, .needsUserInput:
+                isError = true
+                inputBarState = .error(message: outcome.userMessage)
+            case .placed, .placedDirect, .cancelled:
+                isError = false
+                inputBarState = .result(message: outcome.userMessage)
+            }
+            conversation.append(Turn(
+                prompt: prompt,
+                result: outcome.userMessage,
+                toolPills: [],
+                isStreaming: false,
+                isError: isError
+            ))
+            liveStatus = nil
+            agentTree = nil
+            return
+        }
 
         // ModeRouter takes first pass — if input is `/<keyword> <args>` and
         // the keyword matches a registered mode, the mode handles the turn
