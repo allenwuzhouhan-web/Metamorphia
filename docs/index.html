@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Metamorphia Starry Lite turns the MacBook notch into an AI command surface for media, tools, context, and fast macOS workflows.">
+    <title>Metamorphia Starry Lite</title>
+    <link rel="icon" href="assets/metamorphia-logo.png">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="Metamorphia home">
+        <img src="assets/metamorphia-logo.png" alt="">
+        <span>Metamorphia</span>
+      </a>
+      <nav aria-label="Main navigation">
+        <a href="#setup">Setup</a>
+        <a href="#keys">API Keys</a>
+        <a href="#release">Release</a>
+        <a href="#issues">Issues</a>
+      </nav>
+      <a class="header-download" href="releases/Metamorphia-Starry-Lite.dmg">Download</a>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="hero-media" aria-hidden="true">
+          <img src="assets/metamorphia-hero.png" alt="">
+        </div>
+        <div class="hero-content" data-animate>
+          <p class="eyebrow">Version name: Starry Lite</p>
+          <h1>The MacBook notch, rebuilt as an AI command surface.</h1>
+          <p class="hero-copy">
+            Metamorphia lives where your eyes already land. It expands from the notch into media controls,
+            system insight, clipboard and shelf tools, lock-screen widgets, and an AI command bar that can
+            use OpenAI, DeepSeek, Kimi, Claude, Gemini, or local models.
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="releases/Metamorphia-Starry-Lite.dmg">Download Starry Lite DMG</a>
+            <a class="button secondary" href="#setup">Set it up</a>
+          </div>
+          <dl class="hero-facts">
+            <div>
+              <dt>macOS</dt>
+              <dd>14.0+</dd>
+            </div>
+            <div>
+              <dt>Build</dt>
+              <dd>SwiftUI native</dd>
+            </div>
+            <div>
+              <dt>Release</dt>
+              <dd>Starry Lite</dd>
+            </div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="section intro" data-animate>
+        <div class="section-kicker">What It Does</div>
+        <h2>A calm control layer for the work already happening on your Mac.</h2>
+        <p>
+          Metamorphia is a native macOS notch experience that appears when needed and disappears when the job is done.
+          It gives you fast access to playback, timers, clipboard history, screen context, file sharing, live status,
+          and an AI agent that can read the task in front of you and route work through native tools.
+        </p>
+      </section>
+
+      <section class="feature-grid" aria-label="Metamorphia feature previews">
+        <article class="feature" data-animate>
+          <img src="assets/metamorphia-media.png" alt="Metamorphia media controls">
+          <div>
+            <p>Media</p>
+            <h3>Playback without hunting windows.</h3>
+            <span>Control Apple Music, Spotify, and other players with inline previews and gestures.</span>
+          </div>
+        </article>
+        <article class="feature" data-animate>
+          <img src="assets/metamorphia-stats.png" alt="Metamorphia system stats">
+          <div>
+            <p>System</p>
+            <h3>At-a-glance Mac state.</h3>
+            <span>CPU, memory, battery, downloads, privacy indicators, focus, and screen recording status.</span>
+          </div>
+        </article>
+        <article class="feature" data-animate>
+          <img src="assets/metamorphia-colorpicker.png" alt="Metamorphia color picker">
+          <div>
+            <p>Tools</p>
+            <h3>Small utilities, one gesture away.</h3>
+            <span>Timers, color picker, calendar previews, shelf drops, quick sharing, and clipboard history.</span>
+          </div>
+        </article>
+        <article class="feature" data-animate>
+          <img src="assets/metamorphia-clipboard.png" alt="Metamorphia clipboard history">
+          <div>
+            <p>AI Command Bar</p>
+            <h3>An agent inside the notch.</h3>
+            <span>Press Cmd+Shift+Space to ask, create, summarize, inspect, and run tool-backed workflows.</span>
+          </div>
+        </article>
+      </section>
+
+      <section id="setup" class="section split" data-animate>
+        <div>
+          <div class="section-kicker">Setup</div>
+          <h2>Install Starry Lite in a few minutes.</h2>
+          <p>
+            Start with the DMG if you just want to run the app. Build from source if you want to inspect, modify,
+            or ship your own fork.
+          </p>
+        </div>
+        <div class="steps">
+          <article>
+            <span>01</span>
+            <h3>Download the DMG</h3>
+            <p>Open <a href="releases/Metamorphia-Starry-Lite.dmg">Metamorphia-Starry-Lite.dmg</a>, then drag Metamorphia into Applications.</p>
+          </article>
+          <article>
+            <span>02</span>
+            <h3>Launch and approve permissions</h3>
+            <p>Grant Accessibility for controls, Screen Recording for screen-aware features, Calendar for previews, and Music/Media permissions when prompted.</p>
+          </article>
+          <article>
+            <span>03</span>
+            <h3>Open the notch</h3>
+            <p>Hover near the notch, use the configured gesture, or press the command bar hotkey. The default command bar shortcut is Cmd+Shift+Space.</p>
+          </article>
+          <article>
+            <span>04</span>
+            <h3>Pick an AI provider</h3>
+            <p>Go to Settings, open AI Command Bar, choose your provider and model, paste the provider key, then Save Key.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="terminal-section" data-animate>
+        <div>
+          <div class="section-kicker">From Source</div>
+          <h2>Build it yourself.</h2>
+          <p>
+            Requirements: macOS 14 or later, Xcode 15 or later, and the Metamorphia Xcode scheme.
+          </p>
+        </div>
+        <div class="terminal" role="group" aria-label="Build commands">
+          <button class="copy-button" data-copy="git clone https://github.com/JohannEndersmith/Metamorphia.git
+cd Metamorphia
+open Metamorphia.xcodeproj">Copy</button>
+          <pre><code>git clone https://github.com/JohannEndersmith/Metamorphia.git
+cd Metamorphia
+open Metamorphia.xcodeproj</code></pre>
+        </div>
+      </section>
+
+      <section id="keys" class="section" data-animate>
+        <div class="section-kicker">API Keys</div>
+        <h2>Bring the model you trust.</h2>
+        <p>
+          Metamorphia stores provider keys per provider through its AI Command Bar settings. Keys are used only for
+          the selected provider and model. If a key is missing or invalid, the command bar will tell you before the
+          request can complete.
+        </p>
+        <div class="provider-grid">
+          <article>
+            <h3>OpenAI</h3>
+            <p>Create a project key at <a href="https://platform.openai.com" rel="noreferrer">platform.openai.com</a>. In Metamorphia, choose OpenAI and one of the listed OpenAI models, then paste a key that begins with <code>sk-</code>.</p>
+          </article>
+          <article>
+            <h3>DeepSeek</h3>
+            <p>Sign in at <a href="https://platform.deepseek.com" rel="noreferrer">platform.deepseek.com</a>, create an API key, then choose DeepSeek in Metamorphia. Starry Lite supports <code>deepseek-chat</code> and <code>deepseek-reasoner</code>.</p>
+          </article>
+          <article>
+            <h3>Kimi International</h3>
+            <p>Use <a href="https://platform.moonshot.ai" rel="noreferrer">platform.moonshot.ai</a> for Moonshot/Kimi international keys. Select Kimi International, then pick a Kimi K2.5 model from the model menu.</p>
+          </article>
+          <article>
+            <h3>Kimi China</h3>
+            <p>Use <a href="https://platform.moonshot.cn" rel="noreferrer">platform.moonshot.cn</a> for China-region Kimi keys. Select Kimi China when your key is issued for that endpoint.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="release" class="release" data-animate>
+        <div>
+          <div class="section-kicker">Release</div>
+          <h2>Starry Lite</h2>
+          <p>
+            A polished first GitHub Pages release focused on getting users installed, configured, and productive
+            without reading the source tree first.
+          </p>
+          <ul>
+            <li>DMG included for direct installation.</li>
+            <li>Setup guide for permissions, AI providers, and first launch.</li>
+            <li>Troubleshooting notes for the most common macOS and API issues.</li>
+          </ul>
+        </div>
+        <aside class="download-panel" aria-label="Starry Lite release download">
+          <img src="assets/metamorphia-logo.png" alt="">
+          <h3>Metamorphia Starry Lite</h3>
+          <p>DMG for macOS. Approx. 25 MB.</p>
+          <a class="button primary" href="releases/Metamorphia-Starry-Lite.dmg">Download DMG</a>
+        </aside>
+      </section>
+
+      <section id="issues" class="section" data-animate>
+        <div class="section-kicker">Potential Issues</div>
+        <h2>Fast fixes for the usual macOS friction.</h2>
+        <div class="issue-list">
+          <article>
+            <h3>macOS says the app cannot be opened</h3>
+            <p>Open System Settings, Privacy &amp; Security, then allow Metamorphia. If you built locally, make sure the app is signed by Xcode or opened from Applications.</p>
+          </article>
+          <article>
+            <h3>The command bar shortcut does nothing</h3>
+            <p>Cmd+Shift+Space can be intercepted by macOS input-source shortcuts. Change the Metamorphia hotkey or disable the conflicting macOS shortcut.</p>
+          </article>
+          <article>
+            <h3>AI replies fail immediately</h3>
+            <p>Confirm the selected provider matches the key issuer. DeepSeek, Kimi International, and Kimi China use different endpoints and keys.</p>
+          </article>
+          <article>
+            <h3>Screen or app context looks empty</h3>
+            <p>After granting Accessibility or Screen Recording, quit and relaunch Metamorphia so macOS applies the new permission state.</p>
+          </article>
+          <article>
+            <h3>Media controls are blank</h3>
+            <p>Start playback in Music, Spotify, or another supported player first, then verify Media permissions if macOS asks for them.</p>
+          </article>
+          <article>
+            <h3>No notch on this Mac</h3>
+            <p>Metamorphia is designed for MacBooks with a notch. Some panels can still run, but the main interaction model is optimized for notched displays.</p>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div>
+        <strong>Metamorphia Starry Lite</strong>
+        <span>Native macOS notch intelligence.</span>
+      </div>
+      <a href="#top">Back to top</a>
+    </footer>
+
+    <script src="script.js"></script>
+  </body>
+</html>

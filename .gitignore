@@ -35,6 +35,7 @@ build/
 *.app
 *.dSYM
 *.dmg
+!docs/releases/*.dmg
 
 # Temporary files
 *.swp
