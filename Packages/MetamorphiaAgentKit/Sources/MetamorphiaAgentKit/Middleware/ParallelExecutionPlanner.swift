@@ -13,6 +13,10 @@ public final class ParallelExecutionPlanner: AgentMiddleware {
     private static let statsKey = "ParallelExec.stats"
     private static let suggestionsKey = "ParallelExec.suggestions"
 
+    /// Cap on retained execution waves. Only a small recent window is ever read,
+    /// so older waves are dropped to keep `waveHistory` from growing unbounded.
+    private static let maxWaveHistory = 50
+
     // MARK: - Statistics
 
     public struct ExecutionStats {
@@ -73,6 +77,12 @@ public final class ParallelExecutionPlanner: AgentMiddleware {
         if toolCalls.count > 1 {
             stats.parallelBatches += 1
             stats.waveHistory.append(toolCalls.map { $0.function.name })
+            // Bound the history — only the most recent waves are ever read (suffix(5)
+            // in checkForMissedParallelism / the stats tool). Keep a small ring of the
+            // newest entries so a long session can't grow this without limit.
+            if stats.waveHistory.count > Self.maxWaveHistory {
+                stats.waveHistory.removeFirst(stats.waveHistory.count - Self.maxWaveHistory)
+            }
             stats.estimatedTimeSaved += Double(toolCalls.count - 1) * 1.0
         } else {
             stats.sequentialCalls += 1

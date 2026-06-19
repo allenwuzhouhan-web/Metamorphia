@@ -43,7 +43,14 @@ extension NSImage {
             let width = cgImage.width
             let height = cgImage.height
             let totalPixels = width * height
-            
+
+            guard totalPixels > 0 else {
+                DispatchQueue.main.async {
+                    completion(nil)
+                }
+                return
+            }
+
             guard let context = CGContext(data: nil,
                                           width: width,
                                           height: height,
@@ -173,7 +180,12 @@ extension Color {
         
         // Calculate perceived brightness using the formula: (0.299*R + 0.587*G + 0.114*B)
         let perceivedBrightness = (0.2126 * red + 0.7152 * green + 0.0722 * blue)
-        
+
+        // Guard against divide-by-zero on pure-black art: return the color unchanged.
+        guard perceivedBrightness > 0 else {
+            return self
+        }
+
         let scale = factor / perceivedBrightness
         red = min(red * scale, 1.0)
         green = min(green * scale, 1.0)

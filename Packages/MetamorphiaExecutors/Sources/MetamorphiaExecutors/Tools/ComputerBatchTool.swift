@@ -90,6 +90,13 @@ public struct ComputerBatchTool: ToolDefinition {
 
     public init() {}
 
+    // AUDIT: `computer_batch` runs an arbitrary ordered sequence of
+    // press/type/focus/press_menu actions in a single feedback-suppressed span
+    // without re-entering the safety gate per step. To close that bypass it is
+    // classified `.critical` in `MetamorphiaToolSafetyGate.defaultCriticalTools`,
+    // so `ToolRegistry.execute` prompts the user once (covering the whole flow)
+    // before this method is reached. Do not lower that classification without
+    // adding per-sub-action inspection here.
     public func execute(arguments: String) async throws -> String {
         let args: [String: Any]
         do { args = try parseArguments(arguments) }

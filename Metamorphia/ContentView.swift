@@ -1001,6 +1001,26 @@ struct ContentView: View {
               .opacity(abs(gestureProgress) > 0.3 ? min(abs(gestureProgress * 2), 0.8) : 1)
               .animation(.smooth(duration: 0.3), value: coordinator.currentView)
           }
+          // Closed-notch agent indicator (integration #5): when an agent run is
+          // streaming with the notch closed, surface a small pulsing dot in the
+          // right region. This composes ON TOP of whatever closed-notch live
+          // activity is already showing (music/timer/recording/etc.) instead of
+          // stealing a mutually-exclusive branch in the chain above. Hit testing
+          // is disabled so it never intercepts the closed-notch tap gesture —
+          // tapping the notch still opens it, where the command bar lives.
+          //
+          // The show/hide gate on `isProcessing` lives inside
+          // `AgentRunningLiveActivity` (which @ObservedObject's the view model),
+          // so the dot reacts to streaming state without ContentView having to
+          // observe the AICommandViewModel itself.
+          .overlay(alignment: .trailing) {
+              if vm.notchState == .closed && !vm.hideOnClosed && !lockScreenManager.isLocked,
+                 let agentViewModel = CommandBarCoordinator.shared.viewModel {
+                  AgentRunningLiveActivity(agentViewModel: agentViewModel)
+                      .frame(width: 40, height: vm.effectiveClosedNotchHeight + (isHovering ? 8 : 0))
+                      .allowsHitTesting(false)
+              }
+          }
       }
 
     /// Fallback view for the command-bar tab when the agent view model has

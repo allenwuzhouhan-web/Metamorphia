@@ -38,10 +38,10 @@ struct LyricLine: Identifiable, Codable {
     }
 }
 
-let defaultImage: NSImage = .init(
+let defaultImage: NSImage = NSImage(
     systemSymbolName: "heart.fill",
     accessibilityDescription: "Album Art"
-)!
+) ?? NSImage()
 
 class MusicManager: ObservableObject {
     enum SkipDirection: Equatable {

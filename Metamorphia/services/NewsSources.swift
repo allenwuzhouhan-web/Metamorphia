@@ -109,7 +109,7 @@ public struct NewsSources: Sendable {
 
     public func bbcWorld() async throws -> [NewsArticle] {
         return await fetchRSS(
-            url: URL(string: "http://feeds.bbci.co.uk/news/world/rss.xml")!,
+            url: URL(string: "https://feeds.bbci.co.uk/news/world/rss.xml")!,
             origin: .bbc
         )
     }
@@ -120,7 +120,7 @@ public struct NewsSources: Sendable {
     public func arxivNewSubmissions(category: String) async throws -> [NewsArticle] {
         let encodedCategory = category.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? category
         return await fetchRSS(
-            url: URL(string: "http://export.arxiv.org/rss/\(encodedCategory)")!,
+            url: URL(string: "https://export.arxiv.org/rss/\(encodedCategory)")!,
             origin: .arxiv
         )
     }

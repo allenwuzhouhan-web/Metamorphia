@@ -45,7 +45,10 @@ public enum SafetyScanner {
                     parentRef: el.parentRef, depth: el.depth,
                     source: el.source, confidence: el.confidence,
                     appBundleID: el.appBundleID, windowIndex: el.windowIndex,
-                    displayIndex: el.displayIndex
+                    displayIndex: el.displayIndex,
+                    // Preserve DOM addressing — only the value is redacted, so a
+                    // browser element keeps its CDP/querySelector execution path.
+                    domSelector: el.domSelector, domNodeId: el.domNodeId
                 )
             }
         }

@@ -110,13 +110,20 @@ public struct YahooFinanceService: Sendable {
     }
 
     public func search(query: String, newsCount: Int = 5) async throws -> SearchResult {
-        var comps = URLComponents(string: "https://query1.finance.yahoo.com/v1/finance/search")!
+        guard var comps = URLComponents(string: "https://query1.finance.yahoo.com/v1/finance/search") else {
+            throw ServiceError.invalidURL
+        }
+        // `query` is placed via URLQueryItem, so URLComponents percent-encodes
+        // it for us — no manual escaping needed here.
         comps.queryItems = [
             URLQueryItem(name: "q", value: query),
             URLQueryItem(name: "newsCount", value: String(newsCount)),
             URLQueryItem(name: "quotesCount", value: "10"),
         ]
-        let response: YahooSearchResponse = try await get(comps.url!)
+        guard let url = comps.url else {
+            throw ServiceError.invalidURL
+        }
+        let response: YahooSearchResponse = try await get(url)
         let quotes = response.quotes.map {
             SearchHit(
                 symbol: $0.symbol,
@@ -172,13 +179,26 @@ public struct YahooFinanceService: Sendable {
     }
 
     private func fetchRawChart(symbol: String, range: String, interval: String) async throws -> RawChart {
-        var comps = URLComponents(string: "https://query1.finance.yahoo.com/v8/finance/chart/\(symbol)")!
+        // The symbol is LLM-supplied and may contain characters illegal in a
+        // URL path component (`^`, spaces, `=`, etc.). Percent-encode it and
+        // guard the optionals instead of force-unwrapping — a bad symbol must
+        // surface as a clean error, never a trap.
+        guard let encodedSymbol = symbol.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              !encodedSymbol.isEmpty else {
+            throw ServiceError.invalidSymbol(symbol)
+        }
+        guard var comps = URLComponents(string: "https://query1.finance.yahoo.com/v8/finance/chart/\(encodedSymbol)") else {
+            throw ServiceError.invalidSymbol(symbol)
+        }
         comps.queryItems = [
             URLQueryItem(name: "range", value: range),
             URLQueryItem(name: "interval", value: interval),
             URLQueryItem(name: "includePrePost", value: "false"),
         ]
-        let response: YahooChartResponse = try await get(comps.url!)
+        guard let url = comps.url else {
+            throw ServiceError.invalidURL
+        }
+        let response: YahooChartResponse = try await get(url)
         guard let result = response.chart.result?.first else {
             throw ServiceError.noData
         }
@@ -219,12 +239,16 @@ public struct YahooFinanceService: Sendable {
         case noData
         case nonHTTPResponse
         case httpError(status: Int)
+        case invalidSymbol(String)
+        case invalidURL
 
         var errorDescription: String? {
             switch self {
             case .noData: return "No data returned by Yahoo Finance."
             case .nonHTTPResponse: return "Unexpected non-HTTP response from Yahoo Finance."
             case .httpError(let status): return "Yahoo Finance returned HTTP \(status)."
+            case .invalidSymbol(let symbol): return "Invalid ticker symbol: '\(symbol)'."
+            case .invalidURL: return "Failed to build a valid Yahoo Finance request URL."
             }
         }
     }

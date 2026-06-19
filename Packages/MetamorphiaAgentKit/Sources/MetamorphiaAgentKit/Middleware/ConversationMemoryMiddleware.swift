@@ -56,10 +56,15 @@ public final class ConversationMemoryMiddleware: AgentMiddleware {
             let recapPrefix = "[Session Recap]\n"
             // Strip any prior recap injection to avoid accumulation across iterations.
             ctx.messages.removeAll { $0.content?.hasPrefix(recapPrefix) == true }
+            // The recap embeds truncated tool OUTPUT (line items in the activity
+            // log), which is untrusted — a tool result could contain an injection
+            // payload. Frame it as data so the model doesn't treat recalled tool
+            // output as instructions.
+            let framedRecap = ExternalContentFraming.wrap(recap, source: "session activity log (tool output)")
             // Seat the recap immediately after the system prompt at index 0.
             let insertIdx = ctx.messages.isEmpty ? 0 : 1
             ctx.messages.insert(
-                ChatMessage(role: "system", content: recapPrefix + recap),
+                ChatMessage(role: "system", content: recapPrefix + framedRecap),
                 at: insertIdx
             )
         }

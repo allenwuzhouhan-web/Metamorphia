@@ -57,17 +57,24 @@ extension KeyboardShortcuts.Shortcut {
             return nil
         }
         let layoutData = Unmanaged<CFData>.fromOpaque(ptr).takeUnretainedValue() as Data
-        let osStatus = layoutData.withUnsafeBytes {
-            UCKeyTranslate($0.bindMemory(to: UCKeyboardLayout.self).baseAddress, carbonKeyCode, UInt16(kUCKeyActionDown),
-                           modifierKeys, keyboardType, UInt32(kUCKeyTranslateNoDeadKeysMask),
-                           &deadKeys, maxNameLength, &nameLength, &nameBuffer)
+        let osStatus = layoutData.withUnsafeBytes { rawBuffer -> OSStatus in
+            guard let baseAddress = rawBuffer.bindMemory(to: UCKeyboardLayout.self).baseAddress else {
+                return OSStatus(paramErr)
+            }
+            return UCKeyTranslate(baseAddress, carbonKeyCode, UInt16(kUCKeyActionDown),
+                                  modifierKeys, keyboardType, UInt32(kUCKeyTranslateNoDeadKeysMask),
+                                  &deadKeys, maxNameLength, &nameLength, &nameBuffer)
         }
         guard osStatus == noErr else {
             NSLog("Code: 0x%04X  Status: %+i", carbonKeyCode, osStatus);
             return nil
         }
-        
-        return KeyEquivalent(Character(String(utf16CodeUnits: nameBuffer, count: nameLength)))
+
+        // Bound nameLength to the buffer we allocated before reading it back.
+        let boundedLength = max(0, min(nameLength, maxNameLength))
+        guard boundedLength > 0 else { return nil }
+
+        return KeyEquivalent(Character(String(utf16CodeUnits: nameBuffer, count: boundedLength)))
     }
     
     func toEventModifiers() -> SwiftUI.EventModifiers {

@@ -144,22 +144,32 @@ final class ExtensionRPCService {
             )
         }
 
-        let bi = params?["bundleIdentifier"]?.stringValue ?? bundleIdentifier
+        // The RPC transport (unlike the XPC path) cannot cryptographically verify the caller's
+        // code-signing identity, so the requested bundle id is untrusted. Ownership is pinned to
+        // this connection's declared identity (set on first contact). Reject mismatched requests.
+        guard ownsBundleIdentifier(params?["bundleIdentifier"]?.stringValue) else {
+            return errorResponse(code: RPCErrorCode.unauthorized, message: "Bundle identifier does not match connection", id: id)
+        }
+        let bi = bundleIdentifier
+
+        // Create (or fetch) the entry as .pending — do NOT auto-grant. The user explicitly
+        // approves the request in Settings (Extensions). Until then the client is unauthorized.
         let entry = authorizationManager.ensureEntryExists(bundleIdentifier: bi, appName: bi)
 
         if entry.isAuthorized {
             return RPCSuccessResponse(result: ["authorized": .bool(true)], id: id)
         }
 
-        // Auto-authorize for now (user can revoke in settings)
-        authorizationManager.authorize(bundleIdentifier: bi, appName: bi)
-        logDiagnostics("Authorized RPC client \(bi)")
-
-        return RPCSuccessResponse(result: ["authorized": .bool(true)], id: id)
+        logDiagnostics("RPC authorization request recorded as pending for \(bi); awaiting user approval")
+        return RPCSuccessResponse(result: ["authorized": .bool(false), "pending": .bool(true)], id: id)
     }
 
     private func handleCheckAuthorization(params: RPCParams?, id: String) -> Codable {
-        let bi = params?["bundleIdentifier"]?.stringValue ?? bundleIdentifier
+        // A connection may only query its own authorization state, never another bundle's.
+        guard ownsBundleIdentifier(params?["bundleIdentifier"]?.stringValue) else {
+            return RPCSuccessResponse(result: ["authorized": .bool(false)], id: id)
+        }
+        let bi = bundleIdentifier
 
         guard Defaults[.enableThirdPartyExtensions] else {
             return RPCSuccessResponse(result: ["authorized": .bool(false)], id: id)
@@ -181,6 +191,9 @@ final class ExtensionRPCService {
         do {
             let transformed = Self.transformClientJSON(descriptorData)
             let descriptor = try decoder.decode(AtollLiveActivityDescriptor.self, from: transformed)
+            guard ownsBundleIdentifier(descriptor.bundleIdentifier) else {
+                return errorResponse(code: RPCErrorCode.unauthorized, message: "Bundle identifier does not match connection", id: id)
+            }
             try ExtensionDescriptorValidator.validate(descriptor)
             try liveActivityManager.present(descriptor: descriptor, bundleIdentifier: descriptor.bundleIdentifier)
             logDiagnostics("RPC: Presented live activity \(descriptor.id) for \(descriptor.bundleIdentifier)")
@@ -202,6 +215,9 @@ final class ExtensionRPCService {
         do {
             let transformed = Self.transformClientJSON(descriptorData)
             let descriptor = try decoder.decode(AtollLiveActivityDescriptor.self, from: transformed)
+            guard ownsBundleIdentifier(descriptor.bundleIdentifier) else {
+                return errorResponse(code: RPCErrorCode.unauthorized, message: "Bundle identifier does not match connection", id: id)
+            }
             try liveActivityManager.update(descriptor: descriptor, bundleIdentifier: descriptor.bundleIdentifier)
             logDiagnostics("RPC: Updated live activity \(descriptor.id) for \(descriptor.bundleIdentifier)")
             return RPCSuccessResponse(result: ["success": .bool(true)], id: id)
@@ -217,7 +233,10 @@ final class ExtensionRPCService {
         guard let activityID = params?["activityID"]?.stringValue else {
             return errorResponse(code: RPCErrorCode.invalidParams, message: "Missing activityID", id: id)
         }
-        let bi = params?["bundleIdentifier"]?.stringValue ?? bundleIdentifier
+        guard ownsBundleIdentifier(params?["bundleIdentifier"]?.stringValue) else {
+            return errorResponse(code: RPCErrorCode.unauthorized, message: "Bundle identifier does not match connection", id: id)
+        }
+        let bi = bundleIdentifier
         liveActivityManager.dismiss(activityID: activityID, bundleIdentifier: bi)
         logDiagnostics("RPC: Dismissed live activity \(activityID) for \(bi)")
         return RPCSuccessResponse(result: ["success": .bool(true)], id: id)
@@ -233,6 +252,9 @@ final class ExtensionRPCService {
         do {
             let transformed = Self.transformClientJSON(descriptorData)
             let descriptor = try decoder.decode(AtollLockScreenWidgetDescriptor.self, from: transformed)
+            guard ownsBundleIdentifier(descriptor.bundleIdentifier) else {
+                return errorResponse(code: RPCErrorCode.unauthorized, message: "Bundle identifier does not match connection", id: id)
+            }
             try ExtensionDescriptorValidator.validate(descriptor)
             try widgetManager.present(descriptor: descriptor, bundleIdentifier: descriptor.bundleIdentifier)
             logDiagnostics("RPC: Presented widget \(descriptor.id) for \(descriptor.bundleIdentifier)")
@@ -254,6 +276,9 @@ final class ExtensionRPCService {
         do {
             let transformed = Self.transformClientJSON(descriptorData)
             let descriptor = try decoder.decode(AtollLockScreenWidgetDescriptor.self, from: transformed)
+            guard ownsBundleIdentifier(descriptor.bundleIdentifier) else {
+                return errorResponse(code: RPCErrorCode.unauthorized, message: "Bundle identifier does not match connection", id: id)
+            }
             try widgetManager.update(descriptor: descriptor, bundleIdentifier: descriptor.bundleIdentifier)
             logDiagnostics("RPC: Updated widget \(descriptor.id) for \(descriptor.bundleIdentifier)")
             return RPCSuccessResponse(result: ["success": .bool(true)], id: id)
@@ -269,7 +294,10 @@ final class ExtensionRPCService {
         guard let widgetID = params?["widgetID"]?.stringValue else {
             return errorResponse(code: RPCErrorCode.invalidParams, message: "Missing widgetID", id: id)
         }
-        let bi = params?["bundleIdentifier"]?.stringValue ?? bundleIdentifier
+        guard ownsBundleIdentifier(params?["bundleIdentifier"]?.stringValue) else {
+            return errorResponse(code: RPCErrorCode.unauthorized, message: "Bundle identifier does not match connection", id: id)
+        }
+        let bi = bundleIdentifier
         widgetManager.dismiss(widgetID: widgetID, bundleIdentifier: bi)
         logDiagnostics("RPC: Dismissed widget \(widgetID) for \(bi)")
         return RPCSuccessResponse(result: ["success": .bool(true)], id: id)
@@ -285,6 +313,9 @@ final class ExtensionRPCService {
         do {
             let transformed = Self.transformClientJSON(descriptorData)
             let descriptor = try decoder.decode(AtollNotchExperienceDescriptor.self, from: transformed)
+            guard ownsBundleIdentifier(descriptor.bundleIdentifier) else {
+                return errorResponse(code: RPCErrorCode.unauthorized, message: "Bundle identifier does not match connection", id: id)
+            }
             try ExtensionDescriptorValidator.validate(descriptor)
             try notchManager.present(descriptor: descriptor, bundleIdentifier: descriptor.bundleIdentifier)
             logDiagnostics("RPC: Presented notch experience \(descriptor.id) for \(descriptor.bundleIdentifier)")
@@ -306,6 +337,9 @@ final class ExtensionRPCService {
         do {
             let transformed = Self.transformClientJSON(descriptorData)
             let descriptor = try decoder.decode(AtollNotchExperienceDescriptor.self, from: transformed)
+            guard ownsBundleIdentifier(descriptor.bundleIdentifier) else {
+                return errorResponse(code: RPCErrorCode.unauthorized, message: "Bundle identifier does not match connection", id: id)
+            }
             try notchManager.update(descriptor: descriptor, bundleIdentifier: descriptor.bundleIdentifier)
             logDiagnostics("RPC: Updated notch experience \(descriptor.id) for \(descriptor.bundleIdentifier)")
             return RPCSuccessResponse(result: ["success": .bool(true)], id: id)
@@ -321,7 +355,10 @@ final class ExtensionRPCService {
         guard let experienceID = params?["experienceID"]?.stringValue else {
             return errorResponse(code: RPCErrorCode.invalidParams, message: "Missing experienceID", id: id)
         }
-        let bi = params?["bundleIdentifier"]?.stringValue ?? bundleIdentifier
+        guard ownsBundleIdentifier(params?["bundleIdentifier"]?.stringValue) else {
+            return errorResponse(code: RPCErrorCode.unauthorized, message: "Bundle identifier does not match connection", id: id)
+        }
+        let bi = bundleIdentifier
         notchManager.dismiss(experienceID: experienceID, bundleIdentifier: bi)
         logDiagnostics("RPC: Dismissed notch experience \(experienceID) for \(bi)")
         return RPCSuccessResponse(result: ["success": .bool(true)], id: id)
@@ -356,6 +393,17 @@ final class ExtensionRPCService {
     private func logDiagnostics(_ message: String) {
         guard Defaults[.extensionDiagnosticsLoggingEnabled] else { return }
         Logger.log(message, category: .extensions)
+    }
+
+    // MARK: - Ownership
+
+    /// A connection may only present/update/dismiss content attributed to its own (declared)
+    /// bundle id. A nil/absent claim defaults to the connection's identity (allowed); any other
+    /// value must match exactly. This prevents a client from spoofing another extension's bundle
+    /// id over the unauthenticated RPC transport (the XPC path enforces the same via `validate`).
+    private func ownsBundleIdentifier(_ claimed: String?) -> Bool {
+        guard let claimed, !claimed.isEmpty else { return true }
+        return claimed == bundleIdentifier
     }
 
     // MARK: - File Sharing Authorization Check
@@ -547,13 +595,23 @@ final class ExtensionRPCService {
             for fileValue in filesArray {
                 guard case .object(let fileObj) = fileValue,
                       let dataStr = fileObj["data"]?.stringValue,
-                      let fileName = fileObj["fileName"]?.stringValue,
+                      let rawName = fileObj["fileName"]?.stringValue,
                       let fileData = Data(base64Encoded: dataStr) else { continue }
+
+                // Sanitize the client-supplied file name to prevent path traversal: strip any
+                // directory components and reject names that still contain separators or "..".
+                let safeName = (rawName as NSString).lastPathComponent
+                guard !safeName.isEmpty,
+                      safeName != ".", safeName != "..",
+                      !safeName.contains("/"), !safeName.contains("\\"),
+                      !safeName.contains("..") else { continue }
 
                 let tempDir = FileManager.default.temporaryDirectory
                     .appendingPathComponent("MetamorphiaExtensionFiles", isDirectory: true)
                 try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-                let fileURL = tempDir.appendingPathComponent(fileName)
+                let fileURL = tempDir.appendingPathComponent(safeName)
+                // Defense in depth: confirm the resolved path is still inside the intended temp dir.
+                guard fileURL.standardizedFileURL.path.hasPrefix(tempDir.standardizedFileURL.path + "/") else { continue }
                 guard (try? fileData.write(to: fileURL)) != nil else { continue }
 
                 if let bookmark = try? Bookmark(url: fileURL) {

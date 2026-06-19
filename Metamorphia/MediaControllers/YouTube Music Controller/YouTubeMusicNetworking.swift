@@ -75,19 +75,37 @@ final class YouTubeMusicHTTPClient: ObservableObject {
         token: String
     ) async throws -> Data {
         let request = try createAuthenticatedRequest(
-            endpoint: "/api/v1\(endpoint)",
+            endpoint: "/api/v1\(YouTubeMusicHTTPClient.sanitizedPath(endpoint))",
             method: method,
             body: body,
             token: token
         )
-        
+
         let (data, response) = try await session.data(for: request)
         try validateResponse(response)
-        
+
         return data
     }
-    
+
     // MARK: - Private Helpers
+
+    /// Percent-encodes an endpoint path component so a caller-supplied segment
+    /// can't inject query/fragment separators or whitespace into the URL.
+    /// Already-encoded paths pass through unchanged (`urlPathAllowed` keeps `/`).
+    private static func sanitizedPath(_ path: String) -> String {
+        path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
+    }
+
+    /// Rejects bearer tokens containing CR/LF (or other control characters) that
+    /// would allow header injection when interpolated into the Authorization
+    /// header. Returns the token unchanged when it is safe.
+    static func validatedBearerToken(_ token: String) throws -> String {
+        guard token.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) else {
+            throw YouTubeMusicError.invalidResponse
+        }
+        return token
+    }
+
     private func createAuthenticatedRequest(
         endpoint: String,
         method: String,
@@ -97,10 +115,12 @@ final class YouTubeMusicHTTPClient: ObservableObject {
         guard let url = URL(string: "\(baseURL)\(endpoint)") else {
             throw YouTubeMusicError.invalidURL
         }
-        
+
+        let safeToken = try YouTubeMusicHTTPClient.validatedBearerToken(token)
+
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(safeToken)", forHTTPHeaderField: "Authorization")
         
         if let body = body {
             request.httpBody = try Self.encoder.encode(body)
@@ -147,9 +167,13 @@ actor YouTubeMusicWebSocketClient {
     
     func connect(to url: URL, with token: String) async throws {
         await disconnect()
-        
+
+        // Reject tokens carrying CR/LF / control characters before they reach
+        // the Authorization header (header-injection guard).
+        let safeToken = try YouTubeMusicHTTPClient.validatedBearerToken(token)
+
         var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(safeToken)", forHTTPHeaderField: "Authorization")
         
         let newTask = session.webSocketTask(with: request)
         task = newTask

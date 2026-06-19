@@ -1,6 +1,14 @@
 import Foundation
 import SQLite3
 
+/// SQLite's `SQLITE_TRANSIENT` sentinel destructor. Tells SQLite to make its
+/// own private copy of the bound text immediately, so an autoreleased / temporary
+/// C string (e.g. `(value as NSString).utf8String`) staying valid past the bind
+/// call is not required. Passing `nil` (SQLITE_STATIC) instead would be a
+/// use-after-free because the NSString backing the pointer can be released before
+/// `sqlite3_step` runs.
+private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
 /// Persistent SQLite database for learned element identities, corrections, workflows, and app profiles.
 /// Raw SQLite3 C API, WAL mode, M-series optimizations, DispatchQueue serialization.
 ///
@@ -590,12 +598,15 @@ public final class ElementDatabase: @unchecked Sendable {
     // MARK: - SQLite Helpers
 
     private func bindText(_ stmt: OpaquePointer?, _ index: Int32, _ value: String) {
-        sqlite3_bind_text(stmt, index, (value as NSString).utf8String, -1, nil)
+        // SQLITE_TRANSIENT (not nil/SQLITE_STATIC): the autoreleased C string from
+        // `(value as NSString).utf8String` is transient — SQLite must copy it now,
+        // otherwise `sqlite3_step` later reads freed memory.
+        sqlite3_bind_text(stmt, index, (value as NSString).utf8String, -1, SQLITE_TRANSIENT)
     }
 
     private func bindTextOrNull(_ stmt: OpaquePointer?, _ index: Int32, _ value: String?) {
         if let v = value {
-            sqlite3_bind_text(stmt, index, (v as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, index, (v as NSString).utf8String, -1, SQLITE_TRANSIENT)
         } else {
             sqlite3_bind_null(stmt, index)
         }

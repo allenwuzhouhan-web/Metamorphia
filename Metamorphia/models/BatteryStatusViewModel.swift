@@ -73,9 +73,27 @@ class BatteryStatusViewModel: ObservableObject {
         }
     }
 
+    /// Runs the given mutation on the main thread (immediately if already there,
+    /// otherwise hops). Published battery state must only change on main, even if a
+    /// future observer-delivery path stops guaranteeing main-thread delivery.
+    private func onMain(_ work: @escaping () -> Void) {
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
+    }
+
     /// Handles battery events and updates the corresponding properties
     /// - Parameter event: The battery event to handle
     private func handleBatteryEvent(_ event: BatteryActivityManager.BatteryEvent) {
+        onMain { [weak self] in
+            guard let self else { return }
+            self.applyBatteryEvent(event)
+        }
+    }
+
+    private func applyBatteryEvent(_ event: BatteryActivityManager.BatteryEvent) {
         switch event {
         case .powerSourceChanged(let isPluggedIn):
             print("🔌 Power source: \(isPluggedIn ? "Connected" : "Disconnected")")
@@ -134,14 +152,17 @@ class BatteryStatusViewModel: ObservableObject {
     /// Updates the battery information with the given BatteryInfo instance
     /// - Parameter batteryInfo: The BatteryInfo instance containing the battery data
     private func updateBatteryInfo(_ batteryInfo: BatteryInfo) {
-        withAnimation {
-            self.levelBattery = batteryInfo.currentCapacity
-            self.isPluggedIn = batteryInfo.isPluggedIn
-            self.isCharging = batteryInfo.isCharging
-            self.isInLowPowerMode = batteryInfo.isInLowPowerMode
-            self.timeToFullCharge = batteryInfo.timeToFullCharge
-            self.maxCapacity = batteryInfo.maxCapacity
-            self.statusText = batteryInfo.isPluggedIn ? String(localized: "Plugged In") : String(localized: "Unplugged")
+        onMain { [weak self] in
+            guard let self else { return }
+            withAnimation {
+                self.levelBattery = batteryInfo.currentCapacity
+                self.isPluggedIn = batteryInfo.isPluggedIn
+                self.isCharging = batteryInfo.isCharging
+                self.isInLowPowerMode = batteryInfo.isInLowPowerMode
+                self.timeToFullCharge = batteryInfo.timeToFullCharge
+                self.maxCapacity = batteryInfo.maxCapacity
+                self.statusText = batteryInfo.isPluggedIn ? String(localized: "Plugged In") : String(localized: "Unplugged")
+            }
         }
     }
 

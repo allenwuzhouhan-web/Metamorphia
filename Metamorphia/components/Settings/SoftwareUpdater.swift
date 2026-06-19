@@ -78,5 +78,13 @@ struct UpdaterSettingsView: View {
                 Text("Software updates")
             }
         }
+        // Re-sync the once-seeded `@State` with the updater's live values when
+        // the pane reappears (fix #11). Without this, changing the setting
+        // elsewhere (or Sparkle changing it) left the toggles showing a stale
+        // snapshot from the view's first init.
+        .onAppear {
+            automaticallyChecksForUpdates = updater.automaticallyChecksForUpdates
+            automaticallyDownloadsUpdates = updater.automaticallyDownloadsUpdates
+        }
     }
 }

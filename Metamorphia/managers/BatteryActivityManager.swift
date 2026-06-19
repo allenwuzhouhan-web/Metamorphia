@@ -335,6 +335,10 @@ class BatteryActivityManager {
     }
     
     deinit {
+        // Release the IOPS run-loop source and the low-power-mode observer on all paths.
+        // AUDIT: stopMonitoring() removes the source from CFRunLoopGetCurrent(); this
+        // assumes deinit runs on the same run loop as startMonitoring(). For the
+        // app-lifetime shared singleton this holds (deinit effectively never fires).
         stopMonitoring()
         NotificationCenter.default.removeObserver(self)
     }

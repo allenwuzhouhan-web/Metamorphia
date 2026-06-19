@@ -33,6 +33,10 @@ public actor MCPClient: MCPTransport {
     private var isReconnecting = false
     private static let maxReconnectAttempts = 5
     private static let maxBackoffSeconds: Double = 30
+    /// Hard cap on a single JSON-RPC frame (32 MB). A larger declared Content-Length
+    /// or an unbounded never-terminated frame is treated as a protocol error rather
+    /// than allowed to exhaust memory.
+    private static let maxFrameBytes = 32 * 1024 * 1024
 
     public init(name: String) {
         self.serverName = name
@@ -70,10 +74,11 @@ public actor MCPClient: MCPTransport {
         proc.standardOutput = stdoutPipe
         proc.standardError = stderrPipe
 
-        var procEnv = ProcessInfo.processInfo.environment
-        for (k, v) in env { procEnv[k] = v }
-        // Ensure node / npx can be found
-        procEnv["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:\(procEnv["PATH"] ?? "")"
+        // SECURITY: do NOT pass the full parent environment to a third-party MCP
+        // server — that would leak the user's API keys, tokens, and secrets to an
+        // untrusted child process. Build a minimal allowlist of process-neutral
+        // vars plus only the server's own explicitly configured env.
+        let procEnv = Self.minimalChildEnvironment(serverEnv: env)
         proc.environment = procEnv
 
         try proc.run()
@@ -114,7 +119,9 @@ public actor MCPClient: MCPTransport {
             initResult = try await sendRequest("initialize", params: initParams, timeout: 8)
         } catch let error where !rawJsonMode && (error is MCPError) {
             // Framing timed out — server likely expects raw JSON. Restart in that mode.
+            #if DEBUG
             print("[MCP] \(serverName): Content-Length framing timed out, restarting in raw JSON mode")
+            #endif
             disconnect()
 
             rawJsonMode = true
@@ -162,7 +169,30 @@ public actor MCPClient: MCPTransport {
         self.isReconnecting = false
 
         let serverInfo = (initResult["serverInfo"] as? [String: Any])?["name"] as? String ?? "unknown"
+        #if DEBUG
         print("[MCP] Connected to \(serverInfo)")
+        #endif
+    }
+
+    /// Build a minimal, allowlisted environment for an MCP child process.
+    ///
+    /// Passing `ProcessInfo.processInfo.environment` wholesale leaks every secret
+    /// the host process holds (API keys, OAuth tokens) into an untrusted third-party
+    /// server. Instead we forward only a small set of process-neutral variables plus
+    /// whatever the server itself declared via its own config.
+    private static func minimalChildEnvironment(serverEnv: [String: String]) -> [String: String] {
+        let parent = ProcessInfo.processInfo.environment
+        let allowlist = ["HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SHELL", "TERM", "TZ"]
+        var env: [String: String] = [:]
+        for key in allowlist {
+            if let value = parent[key] { env[key] = value }
+        }
+        // Ensure node / npx can be found without inheriting the parent PATH verbatim.
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        // The server's own explicitly configured env wins — it may legitimately
+        // need a scoped token the user supplied for THIS server.
+        for (k, v) in serverEnv { env[k] = v }
+        return env
     }
 
     public func disconnect() {
@@ -303,13 +333,24 @@ public actor MCPClient: MCPTransport {
     private func handleData(_ data: Data) {
         readBuffer.append(data)
 
+        // Guard against a malformed / never-terminated frame growing the buffer
+        // without bound. If we've accumulated more than a full max-frame and still
+        // can't extract a message below, the stream is corrupt — drop it and reset.
+        if readBuffer.count > Self.maxFrameBytes * 2 {
+            print("[MCP] \(serverName): read buffer exceeded \(Self.maxFrameBytes * 2) bytes without a complete frame; resetting stream")
+            readBuffer.removeAll(keepingCapacity: false)
+            return
+        }
+
         // Auto-detect framing from first response (once, then locked).
         if !rawJsonMode && !rawJsonModeLocked {
             let trimmed = readBuffer.drop(while: { $0 == 0x0A || $0 == 0x0D || $0 == 0x20 })
             if let first = trimmed.first, first == UInt8(ascii: "{") {
                 rawJsonMode = true
                 rawJsonModeLocked = true
+                #if DEBUG
                 print("[MCP] \(serverName): auto-detected raw JSON mode (no Content-Length framing)")
+                #endif
             } else if let first = trimmed.first, first == UInt8(ascii: "C") {
                 rawJsonModeLocked = true
             }
@@ -332,6 +373,15 @@ public actor MCPClient: MCPTransport {
               let lengthLine = headerStr.split(separator: "\r\n").first(where: { $0.hasPrefix("Content-Length:") }),
               let length = Int(lengthLine.split(separator: ":").last?.trimmingCharacters(in: .whitespaces) ?? "")
         else { return nil }
+
+        // Reject absurd or negative declared lengths before attempting to read the
+        // body — an attacker-controlled Content-Length could otherwise drive an
+        // unbounded read / memory exhaustion.
+        guard length >= 0, length <= Self.maxFrameBytes else {
+            print("[MCP] \(serverName): rejecting frame with Content-Length \(length) (max \(Self.maxFrameBytes)); resetting stream")
+            readBuffer.removeAll(keepingCapacity: false)
+            return nil
+        }
 
         let bodyStart = headerEnd.upperBound
         let bodyEnd = readBuffer.index(bodyStart, offsetBy: length, limitedBy: readBuffer.endIndex)
@@ -497,7 +547,9 @@ public actor MCPClient: MCPTransport {
             reconnectAttempts = 0
         }
 
+        #if DEBUG
         print("[MCP] Liveness check failed for \(serverName), reconnecting...")
+        #endif
         do {
             try await connect(command: command, args: args, env: lastEnv ?? [:])
         } catch {

@@ -7,23 +7,73 @@ public final class DefaultComputerPerception: ComputerPerception, @unchecked Sen
     // `internal` so Rank 2 delta helpers in this target can reach the pipeline
     // for `refStabilizer.tierSnapshot()`. External modules still go through
     // the protocol surface below.
-    let pipeline: PerceptionPipeline
-    private let db: ElementDatabase
+    //
+    // Both `pipeline` and `db` are resolved LAZILY (computed properties backed by
+    // optional injected instances). Resolving `PerceptionPipeline.shared` or
+    // `ElementDatabase.shared` eagerly would reach `PerceptionRuntime.host`, which
+    // `preconditionFailure`s before `PerceptionRuntime.bootstrap` runs — so even
+    // constructing the `.shared` singleton would trap. Deferring resolution lets the
+    // capture/query methods check `PerceptionRuntime.isBootstrapped` at entry and
+    // degrade gracefully (empty map / thrown error) instead of trapping.
+    private let injectedPipeline: PerceptionPipeline?
+    var pipeline: PerceptionPipeline { injectedPipeline ?? .shared }
+    private let injectedDB: ElementDatabase?
+    private var db: ElementDatabase { injectedDB ?? .shared }
     /// Snapshot cache for delta sessions. Actor-isolated — safe to share.
     private let deltaCache: SnapshotCache
 
+    /// Designated initializer used by `.shared` — defers pipeline / ElementDatabase
+    /// resolution so the singleton can be built before `PerceptionRuntime.bootstrap`.
     public init(
-        pipeline: PerceptionPipeline = .shared,
-        db: ElementDatabase = .shared,
         deltaCache: SnapshotCache = .shared
     ) {
-        self.pipeline = pipeline
-        self.db = db
+        self.injectedPipeline = nil
+        self.injectedDB = nil
+        self.deltaCache = deltaCache
+    }
+
+    /// Injection initializer for tests / custom hosts that own isolated
+    /// `PerceptionPipeline` / `ElementDatabase` instances. Injected instances
+    /// bypass lazy `.shared` resolution.
+    public init(
+        pipeline: PerceptionPipeline,
+        db: ElementDatabase,
+        deltaCache: SnapshotCache = .shared
+    ) {
+        self.injectedPipeline = pipeline
+        self.injectedDB = db
         self.deltaCache = deltaCache
     }
 
     // Singleton for convenience — mirrors the old PerceptionPipeline.shared pattern.
     public static let shared = DefaultComputerPerception()
+
+    // MARK: - Bootstrap guard
+
+    /// An empty `ScreenMap` returned when the perception runtime has not been
+    /// bootstrapped yet (e.g. a tool reached the API before
+    /// `PerceptionRuntime.bootstrap`). Lets the tool path degrade gracefully
+    /// instead of relying on `PerceptionHost.host`'s `preconditionFailure`.
+    private static func emptyMap() -> ScreenMap {
+        ScreenMap(
+            timestamp: Date(),
+            captureMs: 0,
+            displays: [DisplayInfo(id: 0, index: 0, name: "Unavailable", origin: .zero, width: 0, height: 0, scale: 1, isMain: true)],
+            focusedApp: AppInfo(name: "", bundleID: nil, pid: 0),
+            windows: [],
+            elements: [],
+            navigation: nil,
+            safety: .empty,
+            metadata: CaptureMetadata(
+                axCoveragePercent: 0,
+                ocrUsed: false,
+                elementCount: 0,
+                interactiveCount: 0,
+                offScreenHint: nil
+            ),
+            menus: []
+        )
+    }
 
     // MARK: - Perception
 
@@ -35,6 +85,9 @@ public final class DefaultComputerPerception: ComputerPerception, @unchecked Sen
 
     /// Rank 7 — policy-aware capture with auto-profile learning.
     public func capture(forceOCR: Bool, appFilter: String?, ocrOverride: OCRPolicy) async -> ScreenMap {
+        // Fail soft if a tool reached perception before bootstrap ran — returning
+        // an empty map instead of tripping PerceptionHost's preconditionFailure.
+        guard PerceptionRuntime.isBootstrapped else { return Self.emptyMap() }
         let map = await pipeline.capture(
             forceOCR: forceOCR,
             appFilter: appFilter,
@@ -167,6 +220,22 @@ public final class DefaultComputerPerception: ComputerPerception, @unchecked Sen
     // MARK: - Delta Encoding (Rank 2)
 
     public func captureDelta(sessionID: String, policy: FilterPolicy) async -> DeltaPayload {
+        // Fail soft before bootstrap — touching `pipeline.refStabilizer` below
+        // would otherwise trip PerceptionHost's preconditionFailure. Emit a
+        // baseline payload built from an empty map.
+        guard PerceptionRuntime.isBootstrapped else {
+            let sequence = await deltaCache.nextSequenceNumber(for: sessionID)
+            return DeltaEncoder.buildPayload(
+                previous: nil,
+                current: Self.emptyMap(),
+                previousTiers: nil,
+                currentTiers: [:],
+                sessionID: sessionID,
+                sequenceNumber: sequence,
+                policy: policy
+            )
+        }
+
         // Snapshot the previous entry BEFORE we capture — the new capture
         // rotates the pipeline's ref stabilizer internally, so reading
         // previous tiers after capture would give us the current ones.
@@ -232,6 +301,9 @@ public final class DefaultComputerPerception: ComputerPerception, @unchecked Sen
     // MARK: - Vision Diffs (Rank 8)
 
     public func visionDiff(sessionID: String, policy: VisionDiffPolicy) async -> VisionDiff? {
+        // Fail soft before bootstrap — `pipeline.refStabilizer` would otherwise
+        // trip PerceptionHost's preconditionFailure.
+        guard PerceptionRuntime.isBootstrapped else { return nil }
         // Snapshot the previous map BEFORE capturing — the new capture
         // rotates the stabilizer and overwrites the retained image.
         let previousEntry = await deltaCache.fetch(sessionID: sessionID)
@@ -256,16 +328,22 @@ public final class DefaultComputerPerception: ComputerPerception, @unchecked Sen
         // the pipeline's VisualDiffState. Fall back to a fresh captureDisplay
         // if nothing was retained (e.g. permission denied or first-ever call
         // in this process).
-        let cgImage: CGImage = await {
+        let cgImage: CGImage? = await {
             if let retained = await pipeline.visualDiffState.fetch(displayIndex: mainDisplayIndex) {
                 return retained.value
             }
             if let fresh = ScreenCapture.captureDisplay(index: mainDisplayIndex) {
                 return fresh
             }
-            // Last-resort: main-display capture.
-            return ScreenCapture.captureMainDisplay()!
+            // Last-resort: main-display capture. Nil exactly when screen-recording
+            // permission is denied — guard rather than force-unwrap (a force-unwrap
+            // here trapped the whole capture thread).
+            return ScreenCapture.captureMainDisplay()
         }()
+
+        // No image available (permission denied / capture failed) — report "no
+        // diff" instead of crashing.
+        guard let cgImage else { return nil }
 
         return VisionDiffer.diff(
             previous: previous,
@@ -278,6 +356,8 @@ public final class DefaultComputerPerception: ComputerPerception, @unchecked Sen
     }
 
     public func visionDiffMultiDisplay(sessionID: String, policy: VisionDiffPolicy) async -> MultiDisplayVisionDiff? {
+        // Fail soft before bootstrap — see `visionDiff(sessionID:policy:)`.
+        guard PerceptionRuntime.isBootstrapped else { return nil }
         let previousEntry = await deltaCache.fetch(sessionID: sessionID)
         let current = await capture(forceOCR: false, appFilter: nil, ocrOverride: .auto)
         let currentTiers = pipeline.refStabilizer.tierSnapshot()
@@ -316,6 +396,9 @@ public final class DefaultComputerPerception: ComputerPerception, @unchecked Sen
     }
 
     public func query(_ selector: String, in map: ScreenMap, options: QueryOptions) throws -> [QueryResult] {
+        // Touching `pipeline.refStabilizer` before bootstrap would trip
+        // PerceptionHost's preconditionFailure — throw a recoverable error instead.
+        guard PerceptionRuntime.isBootstrapped else { throw PerceptionUnavailableError.notBootstrapped }
         let tiers = pipeline.refStabilizer.tierSnapshot()
         return try QueryEngine.query(selector, in: map, tiers: tiers, options: options)
     }
@@ -323,6 +406,9 @@ public final class DefaultComputerPerception: ComputerPerception, @unchecked Sen
     public func query(_ selector: String, sessionID: String?, options: QueryOptions) async throws -> [QueryResult] {
         // Parse first so bad selectors fail cheaply without a capture.
         let parsed = try QueryEngine.parse(selector)
+        // Fail soft before bootstrap rather than trapping when we resolve the
+        // pipeline / run a capture below.
+        guard PerceptionRuntime.isBootstrapped else { throw PerceptionUnavailableError.notBootstrapped }
         let map: ScreenMap
         let tiers: [ElementRef: IdentityTier]
         if let sessionID, let cached = await deltaCache.fetch(sessionID: sessionID) {
@@ -366,5 +452,22 @@ public final class DefaultComputerPerception: ComputerPerception, @unchecked Sen
 
     public func checkUndoState() -> UndoAdvisor.UndoState {
         UndoAdvisor.checkUndoState()
+    }
+}
+
+// MARK: - Perception availability
+
+/// Thrown by perception query methods when reached before
+/// `PerceptionRuntime.bootstrap(_:)` has installed a host. Lets the tool path
+/// surface a recoverable error instead of tripping `PerceptionHost`'s
+/// `preconditionFailure`.
+public enum PerceptionUnavailableError: Error, Sendable, CustomStringConvertible {
+    case notBootstrapped
+
+    public var description: String {
+        switch self {
+        case .notBootstrapped:
+            return "Perception runtime is not bootstrapped (call PerceptionRuntime.bootstrap before using perception)."
+        }
     }
 }

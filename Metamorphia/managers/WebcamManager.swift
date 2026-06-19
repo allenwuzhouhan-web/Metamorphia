@@ -92,14 +92,19 @@ class WebcamManager: NSObject, ObservableObject {
     
     deinit {
         NotificationCenter.default.removeObserver(self)
-        
+
+        // stopRunning() can block (~100ms); never call it inline on the thread that
+        // is deallocating us. Hand the session off to the session queue to stop it.
         if let session = captureSession {
-            if session.isRunning {
-                session.stopRunning()
+            let queue = sessionQueue
+            queue.async {
+                if session.isRunning {
+                    session.stopRunning()
+                }
             }
         }
         captureSession = nil
-            
+
         previewLayer = nil
     }
 

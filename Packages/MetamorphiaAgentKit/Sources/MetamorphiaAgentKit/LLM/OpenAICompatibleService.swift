@@ -325,13 +325,24 @@ public final class OpenAICompatibleService: LLMServiceProtocol, @unchecked Senda
                                 let function = tc["function"] as? [String: Any]
 
                                 if let id = tc["id"] as? String, let name = function?["name"] as? String {
-                                    toolCallAccumulators[index] = (id: id, name: name, arguments: "")
+                                    // Preserve any argument bytes that arrived before the
+                                    // start frame for this index (some providers stream a
+                                    // partial arguments delta ahead of the id/name frame).
+                                    let existingArgs = toolCallAccumulators[index]?.arguments ?? ""
+                                    toolCallAccumulators[index] = (id: id, name: name, arguments: existingArgs)
                                     continuation.yield(.toolCallStart(id: id, name: name))
                                 }
 
                                 if let argDelta = function?["arguments"] as? String {
+                                    // Lazily create the accumulator if an argument delta
+                                    // precedes the start frame, so early arg bytes aren't
+                                    // silently dropped. The id is backfilled when the start
+                                    // frame arrives above.
+                                    if toolCallAccumulators[index] == nil {
+                                        toolCallAccumulators[index] = (id: "", name: "", arguments: "")
+                                    }
                                     toolCallAccumulators[index]?.arguments += argDelta
-                                    if let id = toolCallAccumulators[index]?.id {
+                                    if let id = toolCallAccumulators[index]?.id, !id.isEmpty {
                                         continuation.yield(.toolCallDelta(id: id, argumentsDelta: argDelta))
                                     }
                                 }

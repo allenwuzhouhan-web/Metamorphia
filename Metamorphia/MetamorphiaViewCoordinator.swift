@@ -429,13 +429,18 @@ class MetamorphiaViewCoordinator: ObservableObject {
         didSet {
             if expandingView.show {
                 expandingViewTask?.cancel()
-                // Only auto-hide for battery, not for downloads (DownloadManager handles that)
+                // Auto-hide every expanding type except downloads, which
+                // DownloadManager dismisses itself when the transfer finishes.
                 if expandingView.type != .download {
                     let duration: TimeInterval = 3
+                    let showingType = expandingView.type
                     expandingViewTask = Task { [weak self] in
                         try? await Task.sleep(for: .seconds(duration))
                         guard let self = self, !Task.isCancelled else { return }
-                        self.toggleExpandingView(status: false, type: .battery)
+                        // Dismiss the type that's actually showing — mirrors the
+                        // sneakPeek auto-hide path — instead of always resetting
+                        // to .battery, which would dismiss the wrong content.
+                        self.toggleExpandingView(status: false, type: showingType)
                     }
                 }
             } else {

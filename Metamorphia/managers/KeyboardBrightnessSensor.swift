@@ -192,7 +192,10 @@ private final class CoreBrightnessClient {
     private typealias BrightnessSetter = @convention(c) (NSObject, Selector, Float, UInt64) -> ObjCBool
 
     private func methodIMP<T>(on object: NSObject, selector: Selector, as type: T.Type) -> T? {
-        guard let cls = object_getClass(object),
+        // Fail soft if the private class doesn't actually respond to the selector
+        // (different macOS build); never bitcast an unresolved/absent implementation.
+        guard object.responds(to: selector),
+              let cls = object_getClass(object),
               let method = class_getInstanceMethod(cls, selector)
         else { return nil }
         let imp = method_getImplementation(method)

@@ -103,7 +103,7 @@ struct CPUCoreUsage: Identifiable, Equatable {
 
 // MARK: - GPU Helpers
 
-private final class GPUInfoCollector {
+private final class GPUInfoCollector: Sendable {
     func collectDevices() -> [GPUDeviceMetrics] {
         var devices: [GPUDeviceMetrics] = []
         let matching = IOServiceMatching(kIOAcceleratorClassName)
@@ -264,7 +264,7 @@ private final class GPUInfoCollector {
     }
 }
 
-struct GPUBreakdown: Equatable {
+struct GPUBreakdown: Equatable, Sendable {
     let render: Double
     let compute: Double
     let video: Double
@@ -277,7 +277,7 @@ struct GPUBreakdown: Equatable {
     }
 }
 
-struct GPUMetricsSnapshot {
+struct GPUMetricsSnapshot: Sendable {
     let usage: Double
     let breakdown: GPUBreakdown
     let devices: [GPUDeviceMetrics]
@@ -308,7 +308,7 @@ struct NetworkInterfaceMetrics: Identifiable, Equatable {
     var id: String { name }
 }
 
-struct DiskDeviceMetrics: Identifiable, Equatable {
+struct DiskDeviceMetrics: Identifiable, Equatable, Sendable {
     let id: String
     let name: String
     let path: URL
@@ -327,7 +327,7 @@ struct DiskDeviceMetrics: Identifiable, Equatable {
     }
 }
 
-struct GPUDeviceMetrics: Identifiable, Equatable {
+struct GPUDeviceMetrics: Identifiable, Equatable, Sendable {
     let id: String
     let vendor: String?
     let model: String
@@ -413,6 +413,8 @@ class StatsManager: ObservableObject {
     private var monitoringTimer: Timer?
     private var delayedStopTimer: Timer?
     private var delayedStartTimer: Timer?
+    /// Serial queue for the heavy off-main stats collection (GPU/disk/network syscalls).
+    private let statsCollectionQueue = DispatchQueue(label: "com.dynamicisland.stats.collection", qos: .utility)
     private let maxHistoryPoints = 30
     /// Cached host port to avoid leaking Mach send rights.
     /// Every call to `mach_host_self()` acquires a new send right that must be
@@ -661,19 +663,54 @@ class StatsManager: ObservableObject {
         }
     }
     
+    /// Heavy, self-contained collection results gathered off the main thread.
+    /// These syscalls (IOAccelerator/IOStorage registry iteration, getifaddrs,
+    /// mounted-volume enumeration) are expensive and must not block the main actor.
+    private struct HeavyStatsSnapshot: Sendable {
+        let gpu: GPUMetricsSnapshot
+        /// `nil` when volume enumeration transiently failed — keep the prior list.
+        let diskDevices: [DiskDeviceMetrics]?
+        let diskStats: (bytesRead: UInt64, bytesWritten: UInt64)
+        let networkStats: (bytesIn: UInt64, bytesOut: UInt64)
+    }
+
+    /// Runs entirely off the main actor: only touches immutable (`let`) state and locals.
+    nonisolated private func gatherHeavyStats() -> HeavyStatsSnapshot {
+        HeavyStatsSnapshot(
+            gpu: getGPUMetrics(),
+            diskDevices: collectDiskDevices(),
+            diskStats: getDiskStats(),
+            networkStats: getNetworkStats()
+        )
+    }
+
     // MARK: - Private Methods
     @MainActor
     private func updateSystemStats() {
+        // Offload the expensive registry/volume/socket iteration to a background
+        // queue, then hop back to main to compute diffs and assign @Published state.
+        statsCollectionQueue.async { [weak self] in
+            guard let self else { return }
+            let heavy = self.gatherHeavyStats()
+            DispatchQueue.main.async {
+                self.applySystemStats(heavy: heavy)
+            }
+        }
+    }
+
+    @MainActor
+    private func applySystemStats(heavy: HeavyStatsSnapshot) {
+        guard isMonitoring else { return }
         let cpuMetrics = getCPULoadBreakdown()
         let newCpuUsage = cpuMetrics.activeUsage
         let memorySnapshot = getMemorySnapshot()
         let newMemoryUsage = memorySnapshot.usage
-        let gpuSnapshot = getGPUMetrics()
+        let gpuSnapshot = heavy.gpu
         let newGpuUsage = gpuSnapshot.usage
         let coreUsage = collectCPUCoreUsage()
-        
+
         // Calculate network speeds
-        let currentNetworkStats = getNetworkStats()
+        let currentNetworkStats = heavy.networkStats
         let currentTime = Date()
         let timeInterval = currentTime.timeIntervalSince(previousTimestamp)
         
@@ -694,7 +731,7 @@ class StatsManager: ObservableObject {
         }
         
         // Calculate disk speeds
-        let currentDiskStats = getDiskStats()
+        let currentDiskStats = heavy.diskStats
         var readSpeed: Double = 0.0
         var writeSpeed: Double = 0.0
         var bytesRead: UInt64 = 0
@@ -772,7 +809,10 @@ class StatsManager: ObservableObject {
         previousDiskStats = currentDiskStats
         previousTimestamp = currentTime
         networkInterfaces = collectNetworkInterfaces(deltaTime: timeInterval)
-        diskDevices = collectDiskDevices()
+        // Only update when collection succeeded (nil = transient failure → keep prior list).
+        if let collectedDiskDevices = heavy.diskDevices, diskDevices != collectedDiskDevices {
+            diskDevices = collectedDiskDevices
+        }
         refreshProcessStatsIfNeeded(force: true)
     }
     
@@ -941,7 +981,7 @@ class StatsManager: ObservableObject {
         return (min(100.0, max(0.0, usage)), breakdown)
     }
     
-    private func getGPUMetrics() -> GPUMetricsSnapshot {
+    nonisolated private func getGPUMetrics() -> GPUMetricsSnapshot {
         let devices = gpuCollector.collectDevices()
         guard !devices.isEmpty else {
             return .zero
@@ -957,7 +997,7 @@ class StatsManager: ObservableObject {
         return GPUMetricsSnapshot(usage: usage, breakdown: breakdown, devices: devices)
     }
     
-    private func makeGPUBreakdown(from devices: [GPUDeviceMetrics]) -> GPUBreakdown {
+    nonisolated private func makeGPUBreakdown(from devices: [GPUDeviceMetrics]) -> GPUBreakdown {
         guard let primary = devices.first(where: { ($0.utilization ?? 0) > 0 || ($0.renderUtilization ?? 0) > 0 || ($0.tilerUtilization ?? 0) > 0 }) else {
             return .zero
         }
@@ -1103,7 +1143,7 @@ class StatsManager: ObservableObject {
         }
     }
 
-    private func collectDiskDevices() -> [DiskDeviceMetrics] {
+    nonisolated private func collectDiskDevices() -> [DiskDeviceMetrics]? {
         let keys: [URLResourceKey] = [
             .volumeNameKey,
             .volumeTotalCapacityKey,
@@ -1113,8 +1153,11 @@ class StatsManager: ObservableObject {
             .volumeIsRootFileSystemKey,
             .volumeIsRemovableKey
         ]
+        // Runs off the main actor, so it cannot read the @Published diskDevices
+        // fallback; return nil on enumeration failure so the caller keeps the
+        // prior list instead of briefly wiping it to empty.
         guard let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) else {
-            return diskDevices
+            return nil
         }
         var devices: [DiskDeviceMetrics] = []
         for url in urls {
@@ -1251,7 +1294,7 @@ class StatsManager: ObservableObject {
         }
     }
     
-    private func getNetworkStats() -> (bytesIn: UInt64, bytesOut: UInt64) {
+    nonisolated private func getNetworkStats() -> (bytesIn: UInt64, bytesOut: UInt64) {
         // Use BSD sockets to get network interface statistics
         var totalBytesIn: UInt64 = 0
         var totalBytesOut: UInt64 = 0
@@ -1295,7 +1338,7 @@ class StatsManager: ObservableObject {
         return (totalBytesIn, totalBytesOut)
     }
     
-    private func getDiskStats() -> (bytesRead: UInt64, bytesWritten: UInt64) {
+    nonisolated private func getDiskStats() -> (bytesRead: UInt64, bytesWritten: UInt64) {
         // Use IOKit to get disk I/O statistics from IOStorage service
         var totalBytesRead: UInt64 = 0
         var totalBytesWritten: UInt64 = 0

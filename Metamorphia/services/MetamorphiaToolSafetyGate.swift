@@ -51,6 +51,13 @@ final class MetamorphiaToolSafetyGate: ToolSafetyGate, @unchecked Sendable {
 
     /// Known tool names whose default tier is `.critical` regardless of
     /// arguments. Keep in sync with the tools registered in ``MetamorphiaBootstrap``.
+    ///
+    /// AUDIT: `computer_batch` runs an arbitrary sequence of presses/types/menu
+    /// invokes in one atomic span. Each sub-action would individually be subject
+    /// to the inspector, but the batch executes them without re-entering the gate
+    /// per step, so the batch itself is gated `.critical` (a single confirmation
+    /// covers the whole flow). Scripting/file/process tools below have an
+    /// unbounded blast radius and are always `.critical`.
     private static let defaultCriticalTools: Set<String> = [
         "run_shell_command",
         "run_applescript",
@@ -61,6 +68,36 @@ final class MetamorphiaToolSafetyGate: ToolSafetyGate, @unchecked Sendable {
         "kill_process",
         "write_file",
         "edit_file",
+        "computer_batch",
+    ]
+
+    /// Autonomous input tools that synthesize real HID events (mouse/keyboard)
+    /// into whatever is frontmost. They are NOT read-only, so they must never
+    /// fall through to `.safe`. Baseline is `.elevated` — silent but non-`safe` —
+    /// so `PerceptionSafetyInspector` can escalate the specific click/keystroke
+    /// to `.critical` when it lands on a destructive element or a sensitive field
+    /// (e.g. "Delete account", a password box). A blanket `.critical` here would
+    /// prompt on every benign click and wreck UX, which the safety design
+    /// explicitly avoids. Names mirror the tools registered in `GestureTools`
+    /// plus the `computer_batch` sub-action verbs for defense in depth.
+    ///
+    /// AUDIT: closes the fail-open hole where destructive input fired at `.safe`.
+    private static let defaultElevatedTools: Set<String> = [
+        "click_at",
+        "double_click_at",
+        "right_click_at",
+        "long_press",
+        "drag",
+        "swipe",
+        "type_text",
+        "key_combo",
+        "move_mouse",
+        // `computer_batch` sub-action verbs / audit aliases — harmless if a tool
+        // by this exact name isn't registered, but keeps the set authoritative.
+        "type",
+        "press",
+        "invoke_menu",
+        "click",
     ]
 
     /// Friendly display names for the confirmation dialog. Falls back to the
@@ -168,6 +205,14 @@ final class MetamorphiaToolSafetyGate: ToolSafetyGate, @unchecked Sendable {
             return .critical
         }
 
+        // AUTONOMOUS-INPUT tools that drive real HID events are never read-only.
+        // They sit at `.elevated` by default so the inspector (consulted before
+        // this table in `checkPermission`) can escalate the dangerous ones to
+        // `.critical`. They must NOT reach the `.safe` fallback below.
+        if Self.defaultElevatedTools.contains(toolName) {
+            return .elevated
+        }
+
         lock.lock()
         let dynamic = dynamicTiers[toolName]
         lock.unlock()
@@ -181,6 +226,11 @@ final class MetamorphiaToolSafetyGate: ToolSafetyGate, @unchecked Sendable {
             return .elevated
         }
 
+        // AUDIT: `.safe` is the fallback ONLY for genuinely read-only tools
+        // (perception/query/web-read tools that have no side effect). It is
+        // intentionally NOT a blanket allow — every side-effecting tool above is
+        // classified explicitly so an unlisted *read-only* tool stays fast while
+        // a newly added *dangerous* tool must be added to a set above to ship.
         return .safe
     }
 

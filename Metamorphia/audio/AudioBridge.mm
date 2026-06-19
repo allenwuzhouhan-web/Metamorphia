@@ -21,6 +21,7 @@
 
 #import "AudioBridge.h"
 #import "AudioProcessor.hpp"
+#include <new>
 
 @implementation AudioBridge {
     AudioProcessor *processor;
@@ -29,16 +30,20 @@
 - (instancetype)init {
     self = [super init];
     if (self) {
-        processor = new AudioProcessor();
+        processor = new (std::nothrow) AudioProcessor();
     }
     return self;
 }
 
 - (void)processBuffer:(const float *)buffer count:(int)count {
+    if (processor == nullptr || buffer == nullptr || count <= 0) { return; }
     processor->process(buffer, count);
 }
 
 - (simd_float4)getSmoothedMagnitudes {
+    if (processor == nullptr) {
+        return simd_make_float4(0, 0, 0, 0);
+    }
     return simd_make_float4(
         processor->getBand(0),
         processor->getBand(1),

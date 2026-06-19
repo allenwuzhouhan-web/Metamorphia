@@ -37,7 +37,11 @@ final class MenuBarTaskStatusStore: ObservableObject {
 struct MenuBarTaskStatusDot: View {
     @ObservedObject private var store = MenuBarTaskStatusStore.shared
     @State private var pulsePhase: Double = 0
-    private let pulseTimer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
+    // Manually connected so the 30fps redraw only runs while a task is actually
+    // in progress. A steady .succeeded/.failed dot doesn't animate, so there's
+    // no reason to re-render the offscreen NSImage 30 times a second.
+    @State private var pulseConnection: Cancellable?
+    private let pulseTimer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common)
 
     var body: some View {
         Image(nsImage: MenuBarTaskStatusImage.make(status: store.status, phase: pulsePhase))
@@ -49,6 +53,27 @@ struct MenuBarTaskStatusDot: View {
             .onReceive(pulseTimer) { date in
                 pulsePhase = date.timeIntervalSinceReferenceDate
             }
+            .onAppear {
+                updatePulseConnection(for: store.status)
+            }
+            .onDisappear {
+                pulseConnection?.cancel()
+                pulseConnection = nil
+            }
+            .onChange(of: store.status) { _, newStatus in
+                updatePulseConnection(for: newStatus)
+            }
+    }
+
+    private func updatePulseConnection(for status: MenuBarTaskStatus) {
+        if status == .inProgress {
+            if pulseConnection == nil {
+                pulseConnection = pulseTimer.connect()
+            }
+        } else {
+            pulseConnection?.cancel()
+            pulseConnection = nil
+        }
     }
 
     private var accessibilityLabel: String {

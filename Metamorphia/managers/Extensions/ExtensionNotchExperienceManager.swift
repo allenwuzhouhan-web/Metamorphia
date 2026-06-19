@@ -31,7 +31,10 @@ final class ExtensionNotchExperienceManager: ObservableObject {
     private let maxCapacityKey = Defaults.Keys.extensionNotchExperienceCapacity
     private let eventBridge = ExtensionEventBridge.shared
     private var observerToken: NSObjectProtocol?
-    private var suppressBroadcast = false
+    // Depth counter rather than a bare bool so nested/re-entrant snapshot
+    // application restores the suppression state correctly.
+    private var snapshotApplyDepth = 0
+    private var suppressBroadcast: Bool { snapshotApplyDepth > 0 }
     private let currentProcessID = ProcessInfo.processInfo.processIdentifier
 
     private init() {
@@ -208,9 +211,9 @@ final class ExtensionNotchExperienceManager: ObservableObject {
 
     private func applySnapshot(_ payloads: [ExtensionNotchExperiencePayload], sourcePID: Int32) {
         guard sourcePID != currentProcessID else { return }
-        suppressBroadcast = true
+        snapshotApplyDepth += 1
+        defer { snapshotApplyDepth -= 1 }
         activeExperiences = payloads.sorted(by: descriptorComparator)
-        suppressBroadcast = false
         logDiagnostics("Applied external notch experience snapshot from PID \(sourcePID) (count: \(payloads.count))")
     }
 

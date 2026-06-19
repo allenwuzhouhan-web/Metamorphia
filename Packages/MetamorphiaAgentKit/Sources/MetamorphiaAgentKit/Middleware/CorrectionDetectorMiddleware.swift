@@ -114,9 +114,14 @@ public final class CorrectionDetectorMiddleware: AgentMiddleware {
             let alreadyInjected = ctx.storage[Self.injectedKey] as? Bool ?? false
             if !alreadyInjected {
                 let section = formatCorrections(pastCorrections)
+                // Recalled corrections contain text the user (or a prior tool
+                // context) supplied and that was persisted verbatim — untrusted on
+                // recall. Frame it as data so a poisoned "correction" memory can't
+                // smuggle instructions into the system prompt.
+                let framed = ExternalContentFraming.wrap(section, source: "recalled user corrections")
                 if let sysIdx = ctx.messages.firstIndex(where: { $0.role == "system" }),
                    let existing = ctx.messages[sysIdx].content {
-                    ctx.messages[sysIdx] = ChatMessage(role: "system", content: existing + "\n\n" + section)
+                    ctx.messages[sysIdx] = ChatMessage(role: "system", content: existing + "\n\n" + framed)
                 }
                 ctx.storage[Self.injectedKey] = true
             }

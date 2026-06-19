@@ -92,8 +92,14 @@ public final class NullMemoryStore: MemoryStore, @unchecked Sendable {
 public final class InMemoryMemoryStore: MemoryStore, @unchecked Sendable {
     private let lock = NSLock()
     private var records: [MemoryRecord] = []
+    /// Upper bound on retained records — mirrors `FileMemoryStore`'s `maxRecords`
+    /// so an unbounded `add()` loop can't exhaust memory. Records are appended in
+    /// chronological order, so dropping from the front evicts the oldest first.
+    private let maxRecords: Int
 
-    public init() {}
+    public init(maxRecords: Int = 2_000) {
+        self.maxRecords = maxRecords
+    }
 
     public func add(_ input: MemoryInput) {
         lock.lock(); defer { lock.unlock() }
@@ -102,6 +108,9 @@ public final class InMemoryMemoryStore: MemoryStore, @unchecked Sendable {
             category: input.category,
             keywords: input.keywords
         ))
+        if records.count > maxRecords {
+            records.removeFirst(records.count - maxRecords)
+        }
     }
 
     public func recall(query: String, category: MemoryCategory, limit: Int) -> [MemoryRecord] {

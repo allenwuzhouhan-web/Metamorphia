@@ -132,9 +132,11 @@ struct AICommandBarSettings: View {
 
                 Spacer()
 
-                Link(destination: URL(string: "https://\(selectedProvider.config.signupURL)")!) {
-                    Label("Get a key", systemImage: "arrow.up.right.square")
-                        .font(.caption)
+                if let signupURL = URL(string: "https://\(selectedProvider.config.signupURL)") {
+                    Link(destination: signupURL) {
+                        Label("Get a key", systemImage: "arrow.up.right.square")
+                            .font(.caption)
+                    }
                 }
             }
         }
@@ -244,9 +246,10 @@ struct VoiceSettingsSection: View {
     var body: some View {
         Toggle("Enable voice input (Cmd+Shift+V)", isOn: $voiceEnabled)
             .onChange(of: voiceEnabled) { _, newValue in
-                // Toggle the bridged UserDefaults key the service actually
-                // reads. `Defaults` writes `"voiceEnabled"`; `VoiceService`
-                // reads `"metamorphia_voice_enabled"`. Mirror on change.
+                // `Defaults` has already persisted the canonical `"voiceEnabled"`
+                // key by the time this fires; VoiceService now reads the same
+                // key. Setting `isEnabled` here drives the service's start/stop
+                // side-effects (background listening) on the toggle.
                 VoiceService.shared.isEnabled = newValue
             }
 

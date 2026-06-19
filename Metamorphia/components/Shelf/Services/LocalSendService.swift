@@ -13,6 +13,7 @@ import Network
 import Defaults
 import UniformTypeIdentifiers
 import Darwin
+import CryptoKit
 
 struct LocalSendDeviceInfo: Identifiable, Hashable, Sendable {
     let id: String
@@ -1055,12 +1056,69 @@ final class LocalSendService: NSObject, ObservableObject {
     }()
 }
 
+/// Trust-On-First-Use certificate pin store for LocalSend peers.
+///
+/// LocalSend uses self-signed certificates with no pre-shared fingerprint, so
+/// enabling default TLS validation would reject every transfer. Instead we
+/// remember the SHA-256 of the leaf certificate the first time we contact a
+/// given host and reject any subsequent connection whose leaf certificate hash
+/// differs — catching impersonation/MITM while preserving first-contact P2P.
+///
+/// Pins are keyed by host (IP:port), which is the addressable identity present
+/// at TLS-handshake time. Thread-safe via an internal lock since URLSession
+/// challenge callbacks arrive on an arbitrary delegate queue.
+private final class LocalSendCertPinStore: @unchecked Sendable {
+    static let shared = LocalSendCertPinStore()
+
+    private let lock = NSLock()
+    private var pins: [String: Data] = [:]
+
+    private init() {}
+
+    /// Returns true if the presented leaf hash is acceptable for `host`:
+    /// accepts on first contact (and records the pin) or when it matches the
+    /// stored pin; rejects on mismatch (possible MITM).
+    func validate(host: String, leafHash: Data) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if let known = pins[host] {
+            return known == leafHash
+        }
+        pins[host] = leafHash
+        return true
+    }
+}
+
 private class LocalSendTLSDelegate: NSObject, URLSessionDelegate {
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
-        if let trust = challenge.protectionSpace.serverTrust {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let trust = challenge.protectionSpace.serverTrust else {
+            return (.performDefaultHandling, nil)
+        }
+
+        // Extract the leaf certificate and hash it for Trust-On-First-Use pinning.
+        guard let leafHash = Self.leafCertificateHash(from: trust) else {
+            // Can't read the leaf cert — fail closed rather than blindly trusting.
+            return (.cancelAuthenticationChallenge, nil)
+        }
+
+        let host = "\(challenge.protectionSpace.host):\(challenge.protectionSpace.port)"
+        if LocalSendCertPinStore.shared.validate(host: host, leafHash: leafHash) {
             return (.useCredential, URLCredential(trust: trust))
         }
-        return (.performDefaultHandling, nil)
+
+        // Presented certificate differs from the pinned one for this host — possible MITM.
+        Logger.log("LocalSend TLS pin mismatch for \(host); rejecting connection", category: .extensions)
+        return (.cancelAuthenticationChallenge, nil)
+    }
+
+    private static func leafCertificateHash(from trust: SecTrust) -> Data? {
+        // Deployment target is macOS 14.6+, so the modern chain API is always available.
+        guard let certificate = (SecTrustCopyCertificateChain(trust) as? [SecCertificate])?.first else {
+            return nil
+        }
+        let der = SecCertificateCopyData(certificate) as Data
+        return Data(SHA256.hash(data: der))
     }
 }
 
