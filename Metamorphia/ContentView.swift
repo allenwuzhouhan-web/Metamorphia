@@ -989,6 +989,14 @@ struct ContentView: View {
                                 }
                             case .retrace:
                                 NotchRetraceView()
+                            case .equation:
+                                LaTeXScratchpadView()
+                            case .graphing:
+                                GraphingCalculatorView()
+                            case .tools:
+                                ScratchpadTrayView(onActivate: { tool, point in
+                                    ScratchpadWindow.shared.present(tool: tool, at: point)
+                                })
                           }
                       }
                       .id(coordinator.currentView)

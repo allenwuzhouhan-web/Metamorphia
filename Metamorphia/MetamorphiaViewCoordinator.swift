@@ -103,7 +103,7 @@ class MetamorphiaViewCoordinator: ObservableObject {
     static let shared = MetamorphiaViewCoordinator()
     private var cancellables = Set<AnyCancellable>()
     
-    private static let tabOrder: [NotchViews] = [.home, .shelf, .markets, .news, .timer, .stats, .colorPicker, .notes, .clipboard, .terminal, .extensionExperience, .commandBar]
+    private static let tabOrder: [NotchViews] = [.home, .shelf, .markets, .news, .timer, .stats, .colorPicker, .equation, .graphing, .tools, .notes, .clipboard, .terminal, .extensionExperience, .commandBar]
     
     /// Direction of the most recent tab switch (true = forward/right, false = backward/left)
     @Published var tabSwitchForward: Bool = true
@@ -191,6 +191,27 @@ class MetamorphiaViewCoordinator: ObservableObject {
             }
             .store(in: &cancellables)
 
+        Defaults.publisher(.enableEquationFeature)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] change in
+                self?.handleEquationFeatureToggle(change.newValue)
+            }
+            .store(in: &cancellables)
+
+        Defaults.publisher(.enableGraphingFeature)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] change in
+                self?.handleGraphingFeatureToggle(change.newValue)
+            }
+            .store(in: &cancellables)
+
+        Defaults.publisher(.enableScratchpads)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] change in
+                self?.handleScratchpadsFeatureToggle(change.newValue)
+            }
+            .store(in: &cancellables)
+
         Defaults.publisher(.enableMinimalisticUI)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] change in
@@ -269,6 +290,27 @@ class MetamorphiaViewCoordinator: ObservableObject {
 
     private func handleTimerFeatureToggle(_ isEnabled: Bool) {
         guard !isEnabled, currentView == .timer else { return }
+        withAnimation(.smooth) {
+            currentView = .home
+        }
+    }
+
+    private func handleEquationFeatureToggle(_ isEnabled: Bool) {
+        guard !isEnabled, currentView == .equation else { return }
+        withAnimation(.smooth) {
+            currentView = .home
+        }
+    }
+
+    private func handleGraphingFeatureToggle(_ isEnabled: Bool) {
+        guard !isEnabled, currentView == .graphing else { return }
+        withAnimation(.smooth) {
+            currentView = .home
+        }
+    }
+
+    private func handleScratchpadsFeatureToggle(_ isEnabled: Bool) {
+        guard !isEnabled, currentView == .tools else { return }
         withAnimation(.smooth) {
             currentView = .home
         }

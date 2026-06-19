@@ -20,4 +20,10 @@ public extension KeyboardShortcuts.Name {
         "commandBar",
         default: .init(.space, modifiers: [.shift, .command])
     )
+
+    /// Ctrl+Option+W opens Writing Tools on the current text selection.
+    static let writingTools = Self(
+        "writingTools",
+        default: .init(.w, modifiers: [.control, .option])
+    )
 }

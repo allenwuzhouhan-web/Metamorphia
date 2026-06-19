@@ -1039,6 +1039,13 @@ extension Defaults.Keys {
     
     // MARK: ColorPicker Feature
     static let enableColorPickerFeature = Key<Bool>("enableColorPickerFeature", default: true)
+    // Equation (LaTeX) renderer + graphing calculator tabs.
+    static let enableEquationFeature = Key<Bool>("enableEquationFeature", default: true)
+    static let enableGraphingFeature = Key<Bool>("enableGraphingFeature", default: true)
+    // Writing Tools (AI actions on the current text selection, ⌃⌥W).
+    static let enableWritingTools = Key<Bool>("enableWritingTools", default: true)
+    // Scratchpad tools tray (regex/JSON/diff/QR/palette/translate, drag-out panels).
+    static let enableScratchpads = Key<Bool>("enableScratchpads", default: true)
     static let showColorFormats = Key<Bool>("showColorFormats", default: true)
     static let colorPickerDisplayMode = Key<ColorPickerDisplayMode>("colorPickerDisplayMode", default: .panel)
     static let colorHistorySize = Key<Int>("colorHistorySize", default: 10)

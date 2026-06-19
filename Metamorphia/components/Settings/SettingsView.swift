@@ -1120,6 +1120,30 @@ struct GeneralSettings: View {
             }
 
             Section {
+                Defaults.Toggle(key: .enableEquationFeature) {
+                    Text("Equation renderer")
+                }
+                .settingsHighlight(id: highlightID("Equation renderer"))
+                Defaults.Toggle(key: .enableGraphingFeature) {
+                    Text("Graphing calculator")
+                }
+                .settingsHighlight(id: highlightID("Graphing calculator"))
+                Defaults.Toggle(key: .enableWritingTools) {
+                    Text("Writing Tools")
+                }
+                .settingsHighlight(id: highlightID("Writing Tools"))
+                KeyboardShortcuts.Recorder("Writing Tools shortcut", name: .writingTools)
+                Defaults.Toggle(key: .enableScratchpads) {
+                    Text("Scratchpad tools")
+                }
+                .settingsHighlight(id: highlightID("Scratchpad tools"))
+            } header: {
+                Text("Tools")
+            } footer: {
+                Text("Equation renderer + graphing calculator notch tabs (math also renders inline in AI answers). Writing Tools runs AI actions — proofread, rewrite, summarize — on selected text in any app. Scratchpad tools (regex, JSON, diff, QR, palette, translate) live in the Tools tab; drag one out to float it anywhere.")
+            }
+
+            Section {
                 Defaults.Toggle(key: .menubarIcon) {
                     Text("Menubar icon")
                 }
