@@ -574,7 +574,7 @@ public struct PowerPointRewriteReplacement: Codable, Sendable, Hashable, Identif
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = UUID()
-        shapeIndex = try container.decode(Int.self, forKey: .shapeIndex)
+        shapeIndex = try container.decodeIfPresent(Int.self, forKey: .shapeIndex) ?? 0
         shapeName = try container.decodeIfPresent(String.self, forKey: .shapeName) ?? ""
         role = try container.decodeIfPresent(PowerPointShapeRole.self, forKey: .role) ?? .other
         originalText = try container.decodeIfPresent(String.self, forKey: .originalText) ?? ""
@@ -594,7 +594,7 @@ public struct PowerPointRewriteReplacement: Codable, Sendable, Hashable, Identif
 
     public var trimmedReplacementText: String? {
         let trimmed = replacementText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : replacementText
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 

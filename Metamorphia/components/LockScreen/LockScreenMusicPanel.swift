@@ -28,7 +28,13 @@ struct LockScreenMusicPanel: View {
     }
 
     static let collapsedHeight: CGFloat = 180
+    /// Maximum collapsed width — also the slider's upper bound and the 100%
+    /// reference width used for the live preview scaling.
     static let defaultCollapsedWidth: CGFloat = 420
+    /// Width the "Reset to default" action restores. This MUST equal the
+    /// persisted `Defaults[.lockScreenMusicPanelWidth]` default (350) so that
+    /// resetting matches a fresh install (fix #3); previously it jumped to 420.
+    static let resetCollapsedWidth: CGFloat = 350
     static var collapsedSize: CGSize {
         CGSize(width: CGFloat(Defaults[.lockScreenMusicPanelWidth]), height: collapsedHeight)
     }
@@ -70,6 +76,16 @@ struct LockScreenMusicPanel: View {
         _animator = ObservedObject(wrappedValue: animator)
     }
     
+    /// Album-art aspect ratio test (width / height), guarded against a
+    /// zero-height image so we never divide by zero (fix #4). Returns `true`
+    /// for landscape artwork (width > height), `false` for square/portrait or
+    /// an unavailable image.
+    private var albumArtIsLandscape: Bool {
+        let size = musicManager.albumArt.size
+        guard size.height > 0 else { return false }
+        return size.width / size.height > 1.0
+    }
+
     private let collapsedPanelCornerRadius: CGFloat = 28
     private let expandedPanelCornerRadius: CGFloat = 52
     private let collapsedAlbumArtCornerRadius: CGFloat = 16
@@ -313,7 +329,7 @@ struct LockScreenMusicPanel: View {
                 .parallax3D(enableOverride: lockScreenParallaxEnabled, suspended: isParallaxSuspended)
                 .frame(width: size)
                 .background(albumArtBackground(cornerRadius: cornerRadius))
-                .clipShape(RoundedRectangle(cornerRadius: musicManager.albumArt.size.width/musicManager.albumArt.size.height > 1.0 ? appIconCornerRadius/3 : appIconCornerRadius, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: albumArtIsLandscape ? appIconCornerRadius/3 : appIconCornerRadius, style: .continuous))
         }
         .buttonStyle(PlainButtonStyle())
         .opacity(musicManager.isPlaying ? 1 : 0.4)
@@ -1052,7 +1068,7 @@ struct LockScreenMusicPanel: View {
         Image(nsImage: musicManager.albumArt)
             .resizable()
             .aspectRatio(contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: musicManager.albumArt.size.width/musicManager.albumArt.size.height > 1.0 ? cornerRadius/3 : cornerRadius))
+            .clipShape(RoundedRectangle(cornerRadius: albumArtIsLandscape ? cornerRadius/3 : cornerRadius))
     }
 
     @ViewBuilder

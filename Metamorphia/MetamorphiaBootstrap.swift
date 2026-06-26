@@ -655,6 +655,13 @@ public enum MetamorphiaBootstrap {
             print("[MetamorphiaBootstrap] voiceInput hotkey was empty — restored ⌘⇧V default.")
         }
 
+        // 8d. Ctrl+Option+W — Writing Tools on the current text selection.
+        KeyboardShortcuts.onKeyDown(for: .writingTools) {
+            Task { @MainActor in
+                WritingToolsWindow.shared.toggle()
+            }
+        }
+
         // 8b. Keep the global KeyboardShortcuts switch ON — the commandBar
         // hotkey must survive even when the user disables per-feature
         // shortcuts. See MetamorphiaApp's `updateFeatureShortcutAvailability`

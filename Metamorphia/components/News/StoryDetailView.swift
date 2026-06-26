@@ -122,7 +122,10 @@ struct StoryDetailView: View {
         }()
 
         return Button {
-            if let url = URL(string: article.articleId) {
+            // articleId comes from untrusted feed data; only open web URLs.
+            if let url = URL(string: article.articleId),
+               let scheme = url.scheme?.lowercased(),
+               scheme == "http" || scheme == "https" {
                 NSWorkspace.shared.open(url)
             }
         } label: {

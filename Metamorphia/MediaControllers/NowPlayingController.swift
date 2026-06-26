@@ -40,8 +40,6 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
     var isWorking: Bool {
         return process != nil && process?.isRunning == true
     }
-    private var lastMusicItem:
-        (title: String, artist: String, album: String, duration: TimeInterval, artworkData: Data?)?
 
     // MARK: - Media Remote Functions
     private let mediaRemoteBundle: CFBundle
@@ -140,9 +138,28 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
     
     func toggleRepeat() async {
         // MRMediaRemoteSendCommandFunction(7, nil)
-        let newRepeatMode = (playbackState.repeatMode == .off) ? 3 : (playbackState.repeatMode.rawValue - 1)
-        playbackState.repeatMode = RepeatMode(rawValue: newRepeatMode) ?? .off
-        MRMediaRemoteSetRepeatModeFunction(newRepeatMode)
+        // Cycle the local RepeatMode: off -> all -> one -> off.
+        let nextMode: RepeatMode
+        switch playbackState.repeatMode {
+        case .off: nextMode = .all
+        case .all: nextMode = .one
+        case .one: nextMode = .off
+        }
+        playbackState.repeatMode = nextMode
+        // MediaRemote's integer mapping differs from the app's RepeatMode
+        // rawValues (off=1/one=2/all=3). MediaRemote expects 0=off, 1=all, 2=one,
+        // so map explicitly before the call to keep system and local state in sync.
+        MRMediaRemoteSetRepeatModeFunction(Self.mediaRemoteRepeatValue(for: nextMode))
+    }
+
+    /// Maps the app's `RepeatMode` to the integer MediaRemote expects
+    /// (0=off, 1=all, 2=one).
+    private static func mediaRemoteRepeatValue(for mode: RepeatMode) -> Int {
+        switch mode {
+        case .off: return 0
+        case .all: return 1
+        case .one: return 2
+        }
     }
     
     // MARK: - Setup Methods
@@ -177,7 +194,9 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
                     .trimmingCharacters(in: .whitespacesAndNewlines),
                   !message.isEmpty
             else { return }
+            #if DEBUG
             print("NowPlayingController [stderr]: \(message)")
+            #endif
         }
         
         self.process = process
@@ -207,8 +226,13 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         let payload = update.payload
         let diff = update.diff ?? false
 
-        var newPlaybackState = PlaybackState(bundleIdentifier: playbackState.bundleIdentifier)
-        
+        // `handleAdapterUpdate` runs off the main thread (driven by the pipe
+        // actor's read loop). The read-modify-write of `@Published playbackState`
+        // must happen on the main actor so observers see a consistent value and
+        // the publish doesn't race a concurrent SwiftUI read.
+        await MainActor.run {
+        var newPlaybackState = PlaybackState(bundleIdentifier: self.playbackState.bundleIdentifier)
+
         newPlaybackState.title = payload.title ?? (diff ? self.playbackState.title : "")
         newPlaybackState.artist = payload.artist ?? (diff ? self.playbackState.artist : "")
         newPlaybackState.album = payload.album ?? (diff ? self.playbackState.album : "")
@@ -258,8 +282,9 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             payload.bundleIdentifier ??
             (diff ? self.playbackState.bundleIdentifier : "")
         )
-        
+
         self.playbackState = newPlaybackState
+        }
     }
 }
 

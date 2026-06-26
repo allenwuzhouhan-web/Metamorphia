@@ -43,7 +43,9 @@ private func screenCaptureEventCallback(eventType: Int32, _: Int32, _: Int32, co
     let manager = Unmanaged<ScreenRecordingManager>.fromOpaque(context).takeUnretainedValue()
     
     DispatchQueue.main.async {
+#if DEBUG
         print("ScreenRecordingManager: 📢 Screen capture event received (type: \(eventType))")
+#endif
         manager.checkRecordingStatus()
     }
 }
@@ -67,6 +69,9 @@ class ScreenRecordingManager: ObservableObject {
     private var recordingStartTime: Date?
     private var durationTimer: Timer?
     private var debounceIdleTask: Task<Void, Never>?
+    /// The private CGS notify-proc has no unregister API, so register it at most once
+    /// for the app lifetime and re-use it across start/stop cycles.
+    private var hasRegisteredPrivateAPINotifications = false
     
     // MARK: - Configuration
     private let debounceDelay: TimeInterval = 0.2 // Debounce rapid changes
@@ -144,33 +149,45 @@ class ScreenRecordingManager: ObservableObject {
     
     /// Setup private API notifications for screen capture events
     private func setupPrivateAPINotifications() {
+        // There is no CGSUnregisterNotifyProc API, so registering on every start would
+        // stack duplicate callbacks. Register exactly once for the app lifetime; the
+        // callback short-circuits when monitoring is off via checkRecordingStatus().
+        guard !hasRegisteredPrivateAPINotifications else { return }
+
         // Pass self as context to the global callback function
         let context = Unmanaged.passUnretained(self).toOpaque()
-        
+
         // Register for remote session events (screen capture start/stop)
         // kCGSessionRemoteConnect - fires when screen sharing/recording starts
         let registered1 = CGSRegisterNotifyProc(screenCaptureEventCallback, 1502, context)
-        
+
         // kCGSessionRemoteDisconnect - fires when screen sharing/recording stops
         let registered2 = CGSRegisterNotifyProc(screenCaptureEventCallback, 1503, context)
-        
+
         if registered1 && registered2 {
+            hasRegisteredPrivateAPINotifications = true
+#if DEBUG
             print("ScreenRecordingManager: ✅ Private API notifications registered")
+#endif
         } else {
-            print("ScreenRecordingManager: ⚠️ Failed to register private API notifications")
+            NSLog("ScreenRecordingManager: ⚠️ Failed to register private API notifications")
         }
     }
     
     /// Check current recording status using private API
     func checkRecordingStatus() {
         let currentRecordingState = CGSIsScreenWatcherPresent()
-        
-        // Debug: Always log current check
+
+#if DEBUG
+        // Debug: log current check
         print("ScreenRecordingManager: 🔍 Checking... current=\(isRecording), detected=\(currentRecordingState)")
-        
+#endif
+
         // Debounce changes to avoid flickering
         if currentRecordingState != isRecording {
+#if DEBUG
             print("ScreenRecordingManager: 🔄 State change detected (\(isRecording) -> \(currentRecordingState))")
+#endif
             
             if currentRecordingState && !isRecording {
                 // Started recording

@@ -22,12 +22,24 @@ public enum SecureInputProbe {
         return unsafeBitCast(ptr, to: (@convention(c) () -> Bool).self)
     }()
 
+    #if DEBUG
+    /// Test-only override. When non-nil, `isActive()` returns this instead of
+    /// probing the live system, so privacy/firewall tests are deterministic
+    /// regardless of whether a password field / 1Password / secure terminal has
+    /// focus on the host running the suite. Always `nil` in production use, and
+    /// the whole hook is compiled out of release builds.
+    nonisolated(unsafe) static var testOverride: Bool?
+    #endif
+
     /// True when Secure Event Input Mode is currently active. macOS enables
     /// this when password fields, sudo prompts, 1Password, or a secure
     /// terminal has focus — synthetic keystrokes (via CGEvent) are silently
     /// dropped while this is on. Callers that would synthesize keystrokes
     /// should probe first and refuse with a user-visible error.
     public static func isActive() -> Bool {
-        sym?() ?? false
+        #if DEBUG
+        if let testOverride { return testOverride }
+        #endif
+        return sym?() ?? false
     }
 }

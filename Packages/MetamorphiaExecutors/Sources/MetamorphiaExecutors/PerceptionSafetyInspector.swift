@@ -50,8 +50,11 @@ public final class PerceptionSafetyInspector: ToolArgumentSafetyInspector, @unch
     // MARK: - Click inspection
 
     private func inspectPointGesture(args: [String: Any]) async -> ToolRiskTier? {
+        // AUDIT: fail CLOSED. A click whose target we cannot verify is treated as
+        // needing confirmation, not waved through at `.safe`. Missing x/y means we
+        // cannot hit-test at all, so escalate to `.elevated`.
         guard let x = Self.readDouble(args["x"]), let y = Self.readDouble(args["y"]) else {
-            return nil
+            return .elevated
         }
         let map = await mapCache.current(perception: perception)
 
@@ -61,7 +64,12 @@ public final class PerceptionSafetyInspector: ToolArgumentSafetyInspector, @unch
         let hit = map.elements
             .filter { ($0.bounds?.contains(point) ?? false) && $0.role.isInteractive }
             .min(by: { ($0.bounds?.area ?? .greatestFiniteMagnitude) < ($1.bounds?.area ?? .greatestFiniteMagnitude) })
-        guard let hit else { return nil }
+        // AUDIT: no element found under the point. We can't reason about whether
+        // the click is destructive, so fail closed to `.elevated` (confirm) rather
+        // than `nil`/`.safe`. The gate's `.elevated` tier still passes silently for
+        // a trusted session, but an unlisted/unknown click no longer slips through
+        // as guaranteed-safe.
+        guard let hit else { return .elevated }
 
         let ctx = DangerDetector.ScanContext(
             appBundleID: map.focusedApp.bundleID,

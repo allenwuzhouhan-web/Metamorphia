@@ -49,6 +49,7 @@ public struct DocumentReviewFinding: Codable, Sendable, Hashable, Identifiable {
     public let suggestedRevision: String?
 
     enum CodingKeys: String, CodingKey {
+        case id
         case title
         case location
         case severity
@@ -77,7 +78,9 @@ public struct DocumentReviewFinding: Codable, Sendable, Hashable, Identifiable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = UUID()
+        // Preserve the persisted id when present; only mint a new one for legacy
+        // records that predate id persistence.
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         title = try container.decode(String.self, forKey: .title)
         location = try container.decode(String.self, forKey: .location)
         severity = try container.decode(DocumentReviewSeverity.self, forKey: .severity)
@@ -88,6 +91,7 @@ public struct DocumentReviewFinding: Codable, Sendable, Hashable, Identifiable {
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
         try container.encode(title, forKey: .title)
         try container.encode(location, forKey: .location)
         try container.encode(severity, forKey: .severity)

@@ -43,6 +43,12 @@ struct IdleAnimationsSettingsSection: View {
     @State private var importError: String?
     @State private var showingError = false
     
+    /// Placeholder source URL handed to the editor when none is set. Guarded
+    /// against a force-unwrap (fix #9): `URL(string:)` is statically valid here,
+    /// but fall back to a file URL so this can never trap.
+    private static let builtinFaceURL: URL =
+        URL(string: "builtin://face") ?? URL(fileURLWithPath: "/dev/null")
+
     // Animation editor state
     @State private var showingEditor = false
     @State private var editorSourceURL: URL?
@@ -70,29 +76,37 @@ struct IdleAnimationsSettingsSection: View {
                                     showingDeleteAlert = true
                                 },
                                 onEdit: {
+                                    #if DEBUG
                                     print("🔧 [Edit] Attempting to edit animation: \(animation.name)")
                                     print("🔧 [Edit] Animation source: \(animation.source)")
-                                    
+                                    #endif
+
                                     // Set state immediately
                                     editingExistingAnimation = animation
-                                    
+
                                     switch animation.source {
                                     case .lottieFile(let url):
+                                        #if DEBUG
                                         print("🔧 [Edit] Lottie file URL: \(url)")
                                         print("🔧 [Edit] File exists: \(FileManager.default.fileExists(atPath: url.path))")
+                                        #endif
                                         editorSourceURL = url
                                         editorIsRemote = false
-                                        
+
                                     case .lottieURL(let url):
+                                        #if DEBUG
                                         print("🔧 [Edit] Lottie URL: \(url)")
+                                        #endif
                                         editorSourceURL = url
                                         editorIsRemote = true
                                     }
-                                    
+
                                     // Show editor with slight delay to ensure state is set
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                                         showingEditor = true
+                                        #if DEBUG
                                         print("🔧 [Edit] Sheet should now be visible")
+                                        #endif
                                     }
                                 }
                             )
@@ -159,7 +173,7 @@ struct IdleAnimationsSettingsSection: View {
             }
         )) { state in
             AnimationEditorView(
-                sourceURL: state.url ?? URL(string: "builtin://face")!,
+                sourceURL: state.url ?? Self.builtinFaceURL,
                 isRemoteURL: state.isRemote,
                 animation: $editedAnimation,
                 existingAnimation: state.existingAnimation
@@ -229,9 +243,11 @@ struct IdleAnimationsSettingsSection: View {
             // Show editor with slight delay to ensure state is set
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 showingEditor = true
+                #if DEBUG
                 print("📥 [Import] Opening editor for new import")
+                #endif
             }
-            
+
         case .failure(let error):
             importError = error.localizedDescription
             showingError = true
@@ -255,7 +271,9 @@ struct IdleAnimationsSettingsSection: View {
         // Show editor with slight delay to ensure state is set
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             showingEditor = true
+            #if DEBUG
             print("📥 [Import] Opening editor for URL import")
+            #endif
         }
     }
 }

@@ -154,7 +154,12 @@ public extension ScreenElement {
             confidence: confidence,
             appBundleID: appBundleID,
             windowIndex: windowIndex,
-            displayIndex: displayIndex
+            displayIndex: displayIndex,
+            // Preserve the DOM addressing fields — only the value is redacted.
+            // Dropping these would strip a browser element's CDP/querySelector
+            // path, breaking press(ref) on the redacted (e.g. password) field.
+            domSelector: domSelector,
+            domNodeId: domNodeId
         )
     }
 }

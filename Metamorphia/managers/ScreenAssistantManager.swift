@@ -412,15 +412,17 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         // Get selected model or default to gemini-2.5-flash
         let selectedModel = Defaults[.selectedAIModel] ?? AIModel(id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", supportsThinking: true)
         let modelId = selectedModel.id
-        
-        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(modelId):generateContent?key=\(apiKey)") else {
+
+        // Send the API key via the x-goog-api-key header instead of a `?key=` query
+        // parameter so it doesn't leak into URL logs/proxies.
+        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(modelId):generateContent") else {
             print("❌ ScreenAssistant: Invalid Gemini API URL")
             addAssistantMessage("Error: Invalid API URL")
             isLoading = false
             return
         }
-        
-        performAPIRequest(url: url, requestBody: buildGeminiRequestBody(message: message, files: files), provider: .gemini)
+
+        performAPIRequest(url: url, requestBody: buildGeminiRequestBody(message: message, files: files), provider: .gemini, googleAPIKey: apiKey)
     }
     
     private func sendToOpenAIAPI(message: String, files: [ScreenAssistantFile]) {
@@ -645,11 +647,15 @@ class ScreenAssistantManager: NSObject, ObservableObject {
     
     // MARK: - API Request Performers
     
-    private func performAPIRequest(url: URL, requestBody: [String: Any], provider: AIModelProvider) {
+    private func performAPIRequest(url: URL, requestBody: [String: Any], provider: AIModelProvider, googleAPIKey: String? = nil) {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        
+        // Gemini: pass the key via header so it never appears in the request URL.
+        if let googleAPIKey, !googleAPIKey.isEmpty {
+            request.addValue(googleAPIKey, forHTTPHeaderField: "x-goog-api-key")
+        }
+
         do {
             let jsonData = try JSONSerialization.data(withJSONObject: requestBody, options: .prettyPrinted)
             request.httpBody = jsonData

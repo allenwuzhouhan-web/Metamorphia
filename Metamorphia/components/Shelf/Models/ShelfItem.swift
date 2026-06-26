@@ -77,11 +77,37 @@ struct ShelfItem: Identifiable, Codable, Equatable, Sendable {
     var displayName: String {
         switch kind {
         case .file(let bookmarkData):
-            let bookmark = Bookmark(data: bookmarkData)
-            guard let resolvedURL = bookmark.resolveURL() else { return "" }
-            
-            // Check for stored data files (text blocks, weblocs, etc.) to provide friendly names
-            if resolvedURL.pathExtension.lowercased() == "json" && resolvedURL.path.contains("TextBlocks") {
+            // Cache the resolved name so SwiftUI body reads don't hit disk per render/scroll.
+            if let cached = ShelfItemResolutionCache.shared.displayName(forBookmark: bookmarkData) {
+                return cached
+            }
+            let resolved = resolveFileDisplayName(bookmarkData: bookmarkData)
+            // Don't pin a transient resolution failure (empty string) — let a later
+            // render retry once the bookmark resolves.
+            if !resolved.isEmpty {
+                ShelfItemResolutionCache.shared.setDisplayName(resolved, forBookmark: bookmarkData)
+            }
+            return resolved
+        case .text(let string):
+            return string.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .link(let url):
+            let s = url.absoluteString
+            if s.hasPrefix("https://") {
+                return String(s.dropFirst("https://".count))
+            } else if s.hasPrefix("http://") {
+                return String(s.dropFirst("http://".count))
+            } else {
+                return s
+            }
+        }
+    }
+
+    private func resolveFileDisplayName(bookmarkData: Data) -> String {
+        let bookmark = Bookmark(data: bookmarkData)
+        guard let resolvedURL = bookmark.resolveURL() else { return "" }
+
+        // Check for stored data files (text blocks, weblocs, etc.) to provide friendly names
+        if resolvedURL.pathExtension.lowercased() == "json" && resolvedURL.path.contains("TextBlocks") {
                 do {
                     let data = try Data(contentsOf: resolvedURL)
                     let decoder = JSONDecoder()
@@ -118,39 +144,34 @@ struct ShelfItem: Identifiable, Codable, Equatable, Sendable {
                     // Fall through to default naming
                 }
             }
-            return (try? resolvedURL.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? resolvedURL.lastPathComponent
-        case .text(let string):
-            return string.trimmingCharacters(in: .whitespacesAndNewlines)
-        case .link(let url):
-            let s = url.absoluteString
-            if s.hasPrefix("https://") {
-                return String(s.dropFirst("https://".count))
-            } else if s.hasPrefix("http://") {
-                return String(s.dropFirst("http://".count))
-            } else {
-                return s
-            }
-        }
+        return (try? resolvedURL.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? resolvedURL.lastPathComponent
     }
-    
+
     var fileURL: URL? {
         guard case .file = kind else { return nil }
         return ShelfStateViewModel.shared.resolveFileURL(for: self)
     }
-    
+
     var URL: URL? {
         if case let .file(bookmark) = kind { return resolvedContext(for: bookmark)?.url }
         else if case let .link(url) = kind { return url }
         else { return nil }
     }
-    
+
     var icon: NSImage {
-        guard case .file = kind else {
+        guard case .file(let bookmarkData) = kind else {
             return Self.thumbnailSymbolImage(systemName: kind.iconSymbolName) ?? NSImage()
         }
-        if let resolvedURL = ShelfStateViewModel.shared.resolveFileURL(for: self) {
-            return NSWorkspace.shared.icon(forFile: resolvedURL.path)
+        // Cache the workspace icon so body reads don't call NSWorkspace.icon(forFile:) per render.
+        if let cached = ShelfItemResolutionCache.shared.icon(forBookmark: bookmarkData) {
+            return cached
         }
+        if let resolvedURL = ShelfStateViewModel.shared.resolveFileURL(for: self) {
+            let resolved = NSWorkspace.shared.icon(forFile: resolvedURL.path)
+            ShelfItemResolutionCache.shared.setIcon(resolved, forBookmark: bookmarkData)
+            return resolved
+        }
+        // Resolution failed (e.g. unmounted volume) — don't pin an empty icon.
         return NSImage()
     }
     
@@ -239,5 +260,53 @@ private extension ShelfItem {
             return (url, bookmark.refreshedData ?? bookmarkData)
         }
         return nil
+    }
+}
+
+// MARK: - Resolved-value cache
+//
+// `displayName` and `icon` resolve security-scoped bookmarks and touch disk
+// (file reads, `NSWorkspace.icon(forFile:)`). These properties are read inside
+// SwiftUI `body`, so doing the work per render/scroll caused real I/O on the
+// render path. This cache memoizes the resolved values keyed by the bookmark
+// data, so a refreshed bookmark (e.g. after a rename) naturally produces a new
+// cache entry. Bounded to avoid unbounded growth.
+@MainActor
+final class ShelfItemResolutionCache {
+    static let shared = ShelfItemResolutionCache()
+
+    private var displayNames: [Data: String] = [:]
+    private var icons: [Data: NSImage] = [:]
+    private var insertionOrder: [Data] = []
+    private let maxEntries = 256
+
+    private init() {}
+
+    func displayName(forBookmark bookmark: Data) -> String? {
+        displayNames[bookmark]
+    }
+
+    func setDisplayName(_ name: String, forBookmark bookmark: Data) {
+        displayNames[bookmark] = name
+        recordInsertion(bookmark)
+    }
+
+    func icon(forBookmark bookmark: Data) -> NSImage? {
+        icons[bookmark]
+    }
+
+    func setIcon(_ icon: NSImage, forBookmark bookmark: Data) {
+        icons[bookmark] = icon
+        recordInsertion(bookmark)
+    }
+
+    private func recordInsertion(_ bookmark: Data) {
+        insertionOrder.removeAll { $0 == bookmark }
+        insertionOrder.append(bookmark)
+        while insertionOrder.count > maxEntries {
+            let oldest = insertionOrder.removeFirst()
+            displayNames.removeValue(forKey: oldest)
+            icons.removeValue(forKey: oldest)
+        }
     }
 }

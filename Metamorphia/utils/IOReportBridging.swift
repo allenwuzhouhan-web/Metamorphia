@@ -22,6 +22,9 @@ import Darwin
 public typealias IOReportSubscriptionRef = OpaquePointer
 
 private enum IOReportLoader {
+	// AUDIT: The dlopen handle is intentionally retained for the process lifetime
+	// (the resolved symbols are cached and used until exit), so it is never dlclose'd.
+	// Closing it would invalidate the function pointers below; the OS reclaims it at exit.
 	private static let libraryHandle: UnsafeMutableRawPointer? = {
 		let paths = [
 			"/System/Library/PrivateFrameworks/IOReport.framework/IOReport",

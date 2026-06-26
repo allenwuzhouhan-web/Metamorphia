@@ -114,18 +114,28 @@ internal struct SMCVal_t {
 
 extension FourCharCode {
     init(fromString str: String) {
-        precondition(str.count == 4)
-        
-        self = str.utf8.reduce(0) { sum, character in
-            return sum << 8 | UInt32(character)
+        // Soft-fail on malformed keys instead of trapping: pad/truncate the
+        // UTF-8 to exactly four bytes so a bad SMC key can't abort the process.
+        let bytes = Array(str.utf8.prefix(4))
+        var code: UInt32 = 0
+        for index in 0..<4 {
+            let byte = index < bytes.count ? bytes[index] : 0
+            code = code << 8 | UInt32(byte)
         }
+        self = code
     }
-    
+
     func toString() -> String {
-        return String(describing: UnicodeScalar(self >> 24 & 0xff)!) +
-               String(describing: UnicodeScalar(self >> 16 & 0xff)!) +
-               String(describing: UnicodeScalar(self >> 8  & 0xff)!) +
-               String(describing: UnicodeScalar(self       & 0xff)!)
+        // UnicodeScalar(_:) on a masked byte is always valid, but guard to
+        // avoid any force-unwrap trap on the capture path.
+        func scalarString(_ value: UInt32) -> String {
+            guard let scalar = UnicodeScalar(value & 0xff) else { return " " }
+            return String(describing: scalar)
+        }
+        return scalarString(self >> 24) +
+               scalarString(self >> 16) +
+               scalarString(self >> 8) +
+               scalarString(self)
     }
 }
 
@@ -503,8 +513,13 @@ public class SMC {
             return result
         }
         
-        memcpy(&value.pointee.bytes, &output.bytes, Int(value.pointee.dataSize))
-        
+        // The device-reported dataSize is untrusted; clamp the copy length to both
+        // the fixed 32-byte destination buffer and the source struct to prevent overflow.
+        let destinationCount = value.pointee.bytes.count
+        let sourceCount = MemoryLayout.size(ofValue: output.bytes)
+        let copyLength = min(Int(value.pointee.dataSize), min(destinationCount, sourceCount))
+        memcpy(&value.pointee.bytes, &output.bytes, copyLength)
+
         return kIOReturnSuccess
     }
     

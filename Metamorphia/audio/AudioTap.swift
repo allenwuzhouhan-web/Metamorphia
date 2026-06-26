@@ -28,8 +28,27 @@ import os.log
 
 private let audioTapLog = OSLog(subsystem: "com.johannendersmith.metamorphia", category: "AudioTap")
 
-// Debug: track callback invocations
+#if DEBUG
+// Debug-only callback counter. Guarded by an unfair lock so the real-time audio
+// thread doesn't race on it. Compiled out of release builds entirely.
+private var callbackCountLock = os_unfair_lock_s()
 private var callbackCount: Int = 0
+
+@inline(__always)
+private func incrementCallbackCount() -> Int {
+    os_unfair_lock_lock(&callbackCountLock)
+    callbackCount += 1
+    let value = callbackCount
+    os_unfair_lock_unlock(&callbackCountLock)
+    return value
+}
+
+private func resetCallbackCount() {
+    os_unfair_lock_lock(&callbackCountLock)
+    callbackCount = 0
+    os_unfair_lock_unlock(&callbackCountLock)
+}
+#endif
 
 // CoreAudio fires this on a high-priority background real-time thread.
 let audioIOProc: AudioDeviceIOProc = {
@@ -44,29 +63,34 @@ let audioIOProc: AudioDeviceIOProc = {
     let bufferList = UnsafeMutableAudioBufferListPointer(mutableInputData)
 
     if let firstBuffer = bufferList.first, let data = firstBuffer.mData {
-        // CoreAudio gives us byte size, divide by 4 (Float size) to get array length
-        let floatCount = Int32(firstBuffer.mDataByteSize) / Int32(MemoryLayout<Float>.size)
+        // CoreAudio gives us byte size, divide by 4 (Float size) to get array length.
+        // Clamp against a non-negative bound so a bogus mDataByteSize can't drive an
+        // out-of-range loop or pass a negative count downstream.
+        let rawFloatCount = Int(firstBuffer.mDataByteSize) / MemoryLayout<Float>.size
+        let floatCount = Int32(max(0, min(rawFloatCount, Int(Int32.max))))
 
         let floatData = data.assumingMemoryBound(to: Float.self)
 
         // Pass the mono array directly to C++
         scanner.bridge.processBuffer(floatData, count: floatCount)
-        
+
+#if DEBUG
         // Debug: log periodically with audio level info
-        callbackCount += 1
-        if callbackCount % 1000 == 0 {
+        let count = incrementCallbackCount()
+        if count % 1000 == 0 {
             // Calculate max absolute value in buffer to check if audio is present
             var maxVal: Float = 0.0
             for i in 0..<Int(floatCount) {
                 let absVal = abs(floatData[i])
                 if absVal > maxVal { maxVal = absVal }
             }
-            os_log(.debug, log: audioTapLog, "🔊 Audio callback fired %d times, buffer size: %d, max amplitude: %f", callbackCount, floatCount, maxVal)
-            
+            os_log(.debug, log: audioTapLog, "🔊 Audio callback fired %d times, buffer size: %d, max amplitude: %f", count, floatCount, maxVal)
+
             // Also log the current band values from the bridge
             let mags = scanner.bridge.getSmoothedMagnitudes()
             os_log(.debug, log: audioTapLog, "🎚️ Bridge magnitudes: [%f, %f, %f, %f]", mags.x, mags.y, mags.z, mags.w)
         }
+#endif
     }
 
     return noErr
@@ -258,8 +282,10 @@ class AudioTap: NSObject {
         }
 
         captureIsRunning = true
-        callbackCount = 0
+#if DEBUG
+        resetCallbackCount()
         print("🟢 [AudioTap] CoreAudio CATap flowing through Aggregate Device!")
+#endif
     }
     
     private func cleanupPartialSetup() {

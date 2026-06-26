@@ -53,7 +53,11 @@ final class MemoryUsageMonitor {
     }
 
     private func evaluateMemoryFootprint() async {
-        guard let usage = currentResidentSize() else { return }
+        // Run the mach task_info syscall off the main actor; only hop back to main
+        // (implicitly, since this method is @MainActor) to act on the result.
+        guard let usage = await Task.detached(priority: .utility) { [weak self] in
+            self?.currentResidentSize()
+        }.value else { return }
         if usage >= thresholdBytes {
             restartIfNeeded(currentUsage: usage)
         } else if Date().timeIntervalSince(lastLogSample) >= logSampleInterval {
@@ -120,7 +124,7 @@ final class MemoryUsageMonitor {
         }
     }
 
-    private func currentResidentSize() -> UInt64? {
+    nonisolated private func currentResidentSize() -> UInt64? {
         var info = mach_task_basic_info()
         var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
         let result = withUnsafeMutablePointer(to: &info) {

@@ -126,11 +126,18 @@ class SpotifyController: MediaControllerProtocol {
             lastUpdated: Date()
         )
 
-        if artworkURL == lastArtworkURL, let existingArtwork = self.playbackState.artwork {
-            state.artwork = existingArtwork
+        // `updatePlaybackInfo` runs off the main thread (DistributedNotification
+        // observer / init Task). Read the carried-over artwork and publish the
+        // new state on the main actor so the @Published mutation isn't off-main.
+        let baseState = state
+        state = await MainActor.run {
+            var resolved = baseState
+            if artworkURL == self.lastArtworkURL, let existingArtwork = self.playbackState.artwork {
+                resolved.artwork = existingArtwork
+            }
+            self.playbackState = resolved
+            return resolved
         }
-
-    playbackState = state
 
         if !artworkURL.isEmpty, let url = URL(string: artworkURL) {
             guard artworkURL != lastArtworkURL || state.artwork == nil else { return }

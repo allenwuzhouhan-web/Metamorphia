@@ -22,7 +22,9 @@ import SwiftUI
 
 // Process information structure
 struct ProcessStats: Identifiable, Hashable {
-    let id = UUID()
+    // Identity is the process id so SwiftUI ForEach keeps row state stable across
+    // refreshes instead of churning on a freshly-minted UUID each tick.
+    var id: Int32 { pid }
     let pid: Int32
     let name: String
     let cpuUsage: Double

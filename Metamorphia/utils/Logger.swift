@@ -60,8 +60,11 @@ struct Logger {
         return formatter
     }()
     private static var osLoggerCache: [LogCategory: OSLog] = [:]
+    private static let osLoggerCacheLock = NSLock()
 
     private static func osLogger(for category: LogCategory) -> OSLog {
+        osLoggerCacheLock.lock()
+        defer { osLoggerCacheLock.unlock() }
         if let cached = osLoggerCache[category] {
             return cached
         }

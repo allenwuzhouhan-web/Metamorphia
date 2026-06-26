@@ -40,7 +40,7 @@ struct SystemItemButton: View {
                             .foregroundStyle(.gray)
                     }
 
-                    Text((showEmojis ? "\(emoji) " : "") + label!)
+                    Text((showEmojis ? "\(emoji) " : "") + (label ?? ""))
                         .font(.caption2)
                         .fontWeight(.regular)
                         .foregroundStyle(.gray)

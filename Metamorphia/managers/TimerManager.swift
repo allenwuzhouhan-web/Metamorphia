@@ -125,6 +125,10 @@ class TimerManager: ObservableObject {
     private var timerInstance: Timer?
     private var cancellables = Set<AnyCancellable>()
     private var soundPlayer: AVAudioPlayer?
+    // Bumped every time a timer starts or stops. A scheduled smooth-close captures
+    // the token at schedule time and bails if a newer timer has since started,
+    // so a quickly-restarted timer can't be force-closed by a stale close.
+    private var closeGeneration: Int = 0
     // MARK: - Initialization
     private init() {
         // Simple initialization
@@ -144,7 +148,10 @@ class TimerManager: ObservableObject {
 
         // Stop any existing timer
         timerInstance?.invalidate()
-        
+
+        // New timer generation — invalidates any in-flight smooth-close.
+        closeGeneration &+= 1
+
         // Start new timer
         withAnimation(.smooth) {
             isTimerActive = true
@@ -276,6 +283,9 @@ class TimerManager: ObservableObject {
         timerInstance = nil
         soundPlayer?.stop()
 
+        // New timer generation — invalidates any in-flight smooth-close.
+        closeGeneration &+= 1
+
         activeSource = .external
 
         let clampedTotal = totalDuration > 0 ? totalDuration : max(totalDuration, remaining)
@@ -381,8 +391,17 @@ class TimerManager: ObservableObject {
     }
 
     private func scheduleSmoothClose() {
+        // Capture the current generation; if a newer timer starts before the
+        // delayed close fires, the close is stale and must be skipped.
+        let scheduledGeneration = closeGeneration
         // Wait 3 seconds then smoothly close the live activity
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            guard let self = self else { return }
+            // Bail if a newer timer has started since this close was scheduled.
+            guard self.closeGeneration == scheduledGeneration else { return }
+            // Ensure any looping timer sound is stopped on this close path too —
+            // otherwise an auto-close that bypasses stop() would loop forever.
+            self.soundPlayer?.stop()
             withAnimation(.easeInOut(duration: 1.0)) {
                 self.isTimerActive = false
             }

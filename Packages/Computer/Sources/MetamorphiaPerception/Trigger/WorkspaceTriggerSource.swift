@@ -55,10 +55,13 @@ public final class WorkspaceTriggerSource {
 
     // MARK: - CG callback registration guard
 
-    /// True after the CG reconfig callback has been registered. Registered only
-    /// once across start/stop cycles — CGDisplayRemoveReconfigurationCallback
-    /// requires the exact same C-function pointer, so we register once at first
-    /// start() and leave it for the process lifetime.
+    /// True while the CG reconfig callback is registered. The callback passes
+    /// `Unmanaged.passUnretained(self)` as its context, so it MUST be removed
+    /// (via `CGDisplayRemoveReconfigurationCallback`, which requires the exact
+    /// same C-function pointer + context) before this object deallocates —
+    /// otherwise the C callback dereferences freed memory on the next display
+    /// reconfiguration. We balance register in `start()` with remove in `stop()`
+    /// / `deinit`.
     private var didRegisterCGCallback = false
 
     // MARK: - Init
@@ -128,7 +131,9 @@ public final class WorkspaceTriggerSource {
             ) { [weak self] _ in self?.bus.post(.systemWake) }
         )
 
-        // Display reconfiguration — register the C callback only once.
+        // Display reconfiguration — register the C callback. Balanced by the
+        // matching CGDisplayRemoveReconfigurationCallback in stop()/deinit so the
+        // callback can never fire after self deallocates.
         if !didRegisterCGCallback {
             didRegisterCGCallback = true
             CGDisplayRegisterReconfigurationCallback(
@@ -163,6 +168,34 @@ public final class WorkspaceTriggerSource {
         pasteboardPollTask?.cancel()
         pasteboardPollTask = nil
 
+        removeCGReconfigCallback()
+
         started = false
+    }
+
+    deinit {
+        // The CG reconfig callback captures an unretained pointer to self.
+        // It must be removed before deallocation or it will deref freed memory.
+        // `CGDisplayRemoveReconfigurationCallback` and the context pointer are
+        // both free functions / fixed values, so this is safe from deinit.
+        if didRegisterCGCallback {
+            CGDisplayRemoveReconfigurationCallback(
+                cgReconfigCallback,
+                Unmanaged.passUnretained(self).toOpaque()
+            )
+        }
+    }
+
+    // MARK: - CG callback teardown
+
+    /// Remove the CG reconfiguration callback registered in `start()`, using the
+    /// exact same function pointer + context the API requires for a match.
+    private func removeCGReconfigCallback() {
+        guard didRegisterCGCallback else { return }
+        didRegisterCGCallback = false
+        CGDisplayRemoveReconfigurationCallback(
+            cgReconfigCallback,
+            Unmanaged.passUnretained(self).toOpaque()
+        )
     }
 }

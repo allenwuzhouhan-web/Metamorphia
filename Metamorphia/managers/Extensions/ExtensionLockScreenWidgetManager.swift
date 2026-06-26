@@ -31,7 +31,10 @@ final class ExtensionLockScreenWidgetManager: ObservableObject {
     private var presentationController: ExtensionLockScreenWidgetPresentationController!
     private let eventBridge = ExtensionEventBridge.shared
     private var widgetObserver: NSObjectProtocol?
-    private var suppressBroadcast = false
+    // Depth counter rather than a bare bool so nested/re-entrant snapshot
+    // application restores the suppression state correctly.
+    private var snapshotApplyDepth = 0
+    private var suppressBroadcast: Bool { snapshotApplyDepth > 0 }
     private let currentProcessID = ProcessInfo.processInfo.processIdentifier
 
     private init() {
@@ -51,6 +54,11 @@ final class ExtensionLockScreenWidgetManager: ObservableObject {
     }
 
     func present(descriptor: AtollLockScreenWidgetDescriptor, bundleIdentifier: String) throws {
+        // Ownership: the descriptor's own bundle id must match the authorized caller's.
+        guard descriptor.bundleIdentifier == bundleIdentifier else {
+            logDiagnostics("Rejected lock screen widget \(descriptor.id) from \(bundleIdentifier): bundle mismatch (descriptor: \(descriptor.bundleIdentifier))")
+            throw ExtensionValidationError.invalidDescriptor("Bundle identifier mismatch")
+        }
         guard authorizationManager.canProcessLockScreenRequest(from: bundleIdentifier) else {
             logDiagnostics("Rejected lock screen widget \(descriptor.id) from \(bundleIdentifier): scope disabled or bundle unauthorized")
             throw ExtensionValidationError.unauthorized
@@ -92,6 +100,10 @@ final class ExtensionLockScreenWidgetManager: ObservableObject {
     }
 
     func update(descriptor: AtollLockScreenWidgetDescriptor, bundleIdentifier: String) throws {
+        guard descriptor.bundleIdentifier == bundleIdentifier else {
+            logDiagnostics("Rejected lock screen widget update \(descriptor.id) from \(bundleIdentifier): bundle mismatch (descriptor: \(descriptor.bundleIdentifier))")
+            throw ExtensionValidationError.invalidDescriptor("Bundle identifier mismatch")
+        }
         guard descriptor.isValid else {
             logDiagnostics("Rejected lock screen widget update \(descriptor.id) from \(bundleIdentifier): descriptor validation failed")
             throw ExtensionValidationError.invalidDescriptor("Structure validation failed")
@@ -156,14 +168,14 @@ final class ExtensionLockScreenWidgetManager: ObservableObject {
 
     private func applySnapshot(_ payloads: [ExtensionLockScreenWidgetPayload], sourcePID: Int32) {
         guard sourcePID != currentProcessID else { return }
-        suppressBroadcast = true
+        snapshotApplyDepth += 1
+        defer { snapshotApplyDepth -= 1 }
         activeWidgets = payloads.sorted { lhs, rhs in
             if lhs.priority == rhs.priority {
                 return lhs.receivedAt < rhs.receivedAt
             }
             return lhs.priority > rhs.priority
         }
-        suppressBroadcast = false
         logDiagnostics("Applied external lock screen widget snapshot from PID \(sourcePID) (count: \(payloads.count))")
     }
 

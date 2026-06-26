@@ -100,6 +100,7 @@ private struct LabeledRow: View {
     let store: PlaceLabelStore
 
     @State private var draft: String
+    @FocusState private var isFocused: Bool
 
     init(entry: PlaceLabelStore.Entry, store: PlaceLabelStore) {
         self.entry = entry
@@ -111,8 +112,22 @@ private struct LabeledRow: View {
         HStack {
             TextField("Label", text: $draft)
                 .textFieldStyle(.roundedBorder)
+                .focused($isFocused)
+                // Commit on submit / end-editing rather than on every keystroke
+                // (fix #8). The previous `onChange(of: draft)` wrote to the
+                // store on every character typed.
                 .onSubmit { commitLabel() }
-                .onChange(of: draft) { _ in commitLabel() }
+                .onChange(of: isFocused) { _, focused in
+                    if !focused { commitLabel() }
+                }
+                // Refresh the once-initialized `@State draft` when the external
+                // entry's label changes out from under us (the row is reused by
+                // identity in the ForEach, so `@State` would otherwise go stale).
+                .onChange(of: entry.label) { _, newLabel in
+                    if !isFocused, draft != newLabel {
+                        draft = newLabel
+                    }
+                }
             Spacer()
             Button("Remove", role: .destructive) {
                 store.remove(id: entry.id)

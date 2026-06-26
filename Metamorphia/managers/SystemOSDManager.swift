@@ -126,8 +126,11 @@ class SystemOSDManager {
             
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            
-            return task.terminationStatus == 0 && !output!.isEmpty
+
+            // Guard the optional: non-UTF8 output must not crash the check.
+            // AUDIT: synchronous Process call; callers on a hot/main path should
+            // prefer isOSDUIHelperRunningAsync().
+            return task.terminationStatus == 0 && !(output ?? "").isEmpty
         } catch {
             return false
         }

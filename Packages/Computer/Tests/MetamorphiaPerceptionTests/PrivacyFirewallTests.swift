@@ -3,6 +3,21 @@ import XCTest
 
 final class PrivacyFirewallTests: XCTestCase {
 
+    // Pin Secure Event Input OFF so admission tests are deterministic regardless of
+    // whether a password field / 1Password / secure terminal has focus on the host.
+    // (testSecureTextFieldHintDenied is denied via the AX role hint, not this probe,
+    // so it remains correct.) Without this, every "should be admitted" assertion
+    // fails on a machine where secure input happens to be active.
+    override func setUp() {
+        super.setUp()
+        SecureInputProbe.testOverride = false
+    }
+
+    override func tearDown() {
+        SecureInputProbe.testOverride = nil
+        super.tearDown()
+    }
+
     // MARK: - Helpers
 
     private func firewall() -> PrivacyFirewall { PrivacyFirewall() }

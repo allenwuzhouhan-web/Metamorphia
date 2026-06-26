@@ -132,10 +132,10 @@ final class AppleHardwareInfo {
             while case let child = IOIteratorNext(children), child != 0 {
                 defer { IOObjectRelease(child) }
                 guard let name = di_getIOName(child), name == "cpus", let props = di_getIOProperties(child) else { continue }
-                if let data = props.object(forKey: "e-core-count") as? Data {
+                if let data = props.object(forKey: "e-core-count") as? Data, data.count >= MemoryLayout<Int32>.size {
                     eCoreCount = data.withUnsafeBytes { $0.load(as: Int32.self) }
                 }
-                if let data = props.object(forKey: "p-core-count") as? Data {
+                if let data = props.object(forKey: "p-core-count") as? Data, data.count >= MemoryLayout<Int32>.size {
                     pCoreCount = data.withUnsafeBytes { $0.load(as: Int32.self) }
                 }
             }

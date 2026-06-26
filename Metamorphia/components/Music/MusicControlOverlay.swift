@@ -263,6 +263,9 @@ private struct FloatingMediaButton: View {
     private func triggerPressEffect(override: PressEffect? = nil) {
         let activeEffect = override ?? pressEffect
 
+        // AUDIT: the trailing asyncAfter blocks only reset the press offset/rotation
+        // back to their resting value (0). That is idempotent and harmless even if
+        // the button is no longer on screen, so no cancellation token is needed.
         switch activeEffect {
         case .none:
             return

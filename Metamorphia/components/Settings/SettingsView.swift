@@ -1120,6 +1120,30 @@ struct GeneralSettings: View {
             }
 
             Section {
+                Defaults.Toggle(key: .enableEquationFeature) {
+                    Text("Equation renderer")
+                }
+                .settingsHighlight(id: highlightID("Equation renderer"))
+                Defaults.Toggle(key: .enableGraphingFeature) {
+                    Text("Graphing calculator")
+                }
+                .settingsHighlight(id: highlightID("Graphing calculator"))
+                Defaults.Toggle(key: .enableWritingTools) {
+                    Text("Writing Tools")
+                }
+                .settingsHighlight(id: highlightID("Writing Tools"))
+                KeyboardShortcuts.Recorder("Writing Tools shortcut", name: .writingTools)
+                Defaults.Toggle(key: .enableScratchpads) {
+                    Text("Scratchpad tools")
+                }
+                .settingsHighlight(id: highlightID("Scratchpad tools"))
+            } header: {
+                Text("Tools")
+            } footer: {
+                Text("Equation renderer + graphing calculator notch tabs (math also renders inline in AI answers). Writing Tools runs AI actions — proofread, rewrite, summarize — on selected text in any app. Scratchpad tools (regex, JSON, diff, QR, palette, translate) live in the Tools tab; drag one out to float it anywhere.")
+            }
+
+            Section {
                 Defaults.Toggle(key: .menubarIcon) {
                     Text("Menubar icon")
                 }
@@ -2526,9 +2550,11 @@ struct Media: View {
                         Text("YouTube Music requires this third-party app to be installed: ")
                             .foregroundStyle(.secondary)
                             .font(.caption)
-                        Link("https://github.com/th-ch/youtube-music", destination: URL(string: "https://github.com/th-ch/youtube-music")!)
-                            .font(.caption)
-                            .foregroundColor(.blue) // Ensures it's visibly a link
+                        if let ytMusicURL = URL(string: "https://github.com/th-ch/youtube-music") {
+                            Link("https://github.com/th-ch/youtube-music", destination: ytMusicURL)
+                                .font(.caption)
+                                .foregroundColor(.blue) // Ensures it's visibly a link
+                        }
                     }
                 } else {
                     Text("'Now Playing' was the only option on previous versions and works with all media apps.")
@@ -3446,7 +3472,9 @@ struct Shelf: View {
     @Default(.expandedDragDetection) var expandedDragDetection
     @Default(.copyOnDrag) var copyOnDrag
     @Default(.autoRemoveShelfItems) var autoRemoveShelfItems
-    @StateObject private var quickShareService = QuickShareService.shared
+    // Externally-owned singleton — observe it, don't take ownership of its
+    // lifecycle with @StateObject (fix #6).
+    @ObservedObject private var quickShareService = QuickShareService.shared
     @ObservedObject private var fullDiskAccessPermission = FullDiskAccessPermissionStore.shared
     @ObservedObject private var shelfFolderAccessPermission = ShelfFolderAccessPermissionStore.shared
 
@@ -5478,12 +5506,16 @@ private struct LockScreenPositioningControls: View {
     }
 
     private func resetMusicWidth() {
-        musicWidth = Double(LockScreenMusicPanel.defaultCollapsedWidth)
+        // Restore the persisted default (350), not the slider max (420). See
+        // LockScreenMusicPanel.resetCollapsedWidth (fix #3).
+        musicWidth = Double(LockScreenMusicPanel.resetCollapsedWidth)
         propagateMusicWidthChange(animated: true)
     }
 
     private func resetTimerWidth() {
-        timerWidth = LockScreenTimerWidget.defaultWidth
+        // Restore the persisted default (350), not the slider max (420). See
+        // LockScreenTimerWidget.resetWidth (fix #3).
+        timerWidth = LockScreenTimerWidget.resetWidth
         propagateTimerWidthChange(animated: true)
     }
 
@@ -7179,7 +7211,9 @@ struct ScreenAssistantSettings: View {
 
                             HStack {
                                 Button("Open Google AI Studio") {
-                                    NSWorkspace.shared.open(URL(string: "https://aistudio.google.com/app/apikey")!)
+                                    if let url = URL(string: "https://aistudio.google.com/app/apikey") {
+                                        NSWorkspace.shared.open(url)
+                                    }
                                 }
                                 .buttonStyle(.link)
 
@@ -7756,20 +7790,18 @@ struct TerminalSettings: View {
         "\(Int(terminalMaxHeightFraction * 100))% of screen"
     }
 
-    /// All monospaced font families available on the system.
-    private var monospacedFontFamilies: [String] {
+    /// All monospaced font families available on the system. Enumerating every
+    /// font family is expensive, so it's computed once and cached rather than
+    /// recomputed on every render (fix #6). The installed-font set is stable for
+    /// the lifetime of the Settings window.
+    private static let monospacedFontFamilies: [String] = {
         NSFontManager.shared.availableFontFamilies.filter { family in
             guard let font = NSFont(name: family, size: 12) else { return false }
             return font.isFixedPitch
                 || font.fontDescriptor.symbolicTraits.contains(.monoSpace)
         }
         .sorted()
-    }
-
-    /// Display name for the font picker — shows "System Monospaced" when no custom font is set.
-    private var fontDisplayName: String {
-        terminalFontFamily.isEmpty ? "System Monospaced" : terminalFontFamily
-    }
+    }()
 
     private var cursorStyleBinding: Binding<TerminalCursorStyleOption> {
         Binding(
@@ -7826,7 +7858,7 @@ struct TerminalSettings: View {
                     Picker("Font family", selection: $terminalFontFamily) {
                         Text("System Monospaced").tag("")
                         Divider()
-                        ForEach(monospacedFontFamilies, id: \.self) { family in
+                        ForEach(Self.monospacedFontFamilies, id: \.self) { family in
                             Text(family)
                                 .font(.custom(family, size: 13))
                                 .tag(family)

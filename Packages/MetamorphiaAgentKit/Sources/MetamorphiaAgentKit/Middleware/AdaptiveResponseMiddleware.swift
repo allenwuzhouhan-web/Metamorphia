@@ -273,10 +273,6 @@ public final class AdaptiveResponseMiddleware: AgentMiddleware, @unchecked Senda
 
     private func trackEngagement(userMessageLength: Int, previousResponseLength: Int) {
         engagementLock.lock()
-        defer {
-            engagementLock.unlock()
-            saveEngagement()
-        }
 
         engagement.totalInteractions += 1
 
@@ -291,6 +287,14 @@ public final class AdaptiveResponseMiddleware: AgentMiddleware, @unchecked Senda
         if userMessageLength > 50 && previousResponseLength > 200 {
             engagement.skipCount += 1
         }
+
+        // Snapshot the profile while still holding the lock, then release and
+        // encode/persist the COPY. Encoding after the unlock (the previous `defer`)
+        // raced a concurrent mutation of `engagement`.
+        let snapshot = engagement
+        engagementLock.unlock()
+
+        saveEngagement(snapshot)
     }
 
     // MARK: - Persistence
@@ -306,10 +310,12 @@ public final class AdaptiveResponseMiddleware: AgentMiddleware, @unchecked Senda
         }
     }
 
-    private func saveEngagement() {
+    /// Persist a snapshot of the engagement profile. Callers must pass a value
+    /// captured under `engagementLock` so encoding never races a live mutation.
+    private func saveEngagement(_ snapshot: EngagementProfile) {
         guard let url = storageURL else { return }
         do {
-            let data = try JSONEncoder().encode(engagement)
+            let data = try JSONEncoder().encode(snapshot)
             try data.write(to: url, options: .atomic)
         } catch {
             print("[AdaptiveResponse] Failed to save engagement: \(error)")

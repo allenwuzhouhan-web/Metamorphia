@@ -16,7 +16,7 @@ import Foundation
 /// All three providers are injected via the initializer; the package itself
 /// never imports AppKit. Use `NullSystemContextProvider`, `NullClipboardProvider`,
 /// and `NullSessionProvider` in tests or when a capability is disabled.
-public final class ImplicitContextMiddleware: AgentMiddleware {
+public final class ImplicitContextMiddleware: AgentMiddleware, @unchecked Sendable {
     public let name = "ImplicitContext"
 
     // MARK: - Dependencies
@@ -26,6 +26,12 @@ public final class ImplicitContextMiddleware: AgentMiddleware {
     private let session: SessionProvider
     /// Directories to scan for recently-modified files. Defaults to Desktop / Documents / Downloads.
     private let recentFileSearchDirs: [URL]
+
+    /// Last app name fetched from the provider, refreshed asynchronously so the
+    /// synchronous `beforeModelCall` hook never blocks the agent-loop thread.
+    /// Guarded by `cachedAppNameLock` because the refresh runs on a detached task.
+    private let cachedAppNameLock = NSLock()
+    private var cachedAppName: String?
 
     public init(
         systemContext: SystemContextProvider,
@@ -109,9 +115,15 @@ public final class ImplicitContextMiddleware: AgentMiddleware {
 
         let section = formatImplicitContext(contextParts, relevance: relevance)
 
+        // The frontmost-app name, window titles, clipboard descriptor, and file
+        // names are all attacker-influenceable (a malicious window title can carry
+        // an injection payload). Frame the section as untrusted data so the model
+        // treats it as ambient context, not instructions.
+        let framed = ExternalContentFraming.wrap(section, source: "implicit desktop context")
+
         if let sysIdx = ctx.messages.firstIndex(where: { $0.role == "system" }),
            let existing = ctx.messages[sysIdx].content {
-            ctx.messages[sysIdx] = ChatMessage(role: "system", content: existing + "\n\n" + section)
+            ctx.messages[sysIdx] = ChatMessage(role: "system", content: existing + "\n\n" + framed)
         }
 
         return .continue
@@ -153,18 +165,41 @@ public final class ImplicitContextMiddleware: AgentMiddleware {
     // MARK: - Context Gathering
 
     private func gatherAppContext(query: String) -> String? {
-        // Synchronous read from the SystemContextProvider is done via a
-        // semaphore-free approach: we accept that in tests the Null provider
-        // returns nil immediately. Real AppKit-backed impls in the app target
-        // read from a cached @MainActor value so this stays non-blocking.
-        var appName: String? = nil
-        let semaphore = DispatchSemaphore(value: 0)
-        Task {
-            appName = await systemContext.lastCapturedAppName
-            semaphore.signal()
+        // Prefer the value cached by a previous turn's background refresh — that
+        // path never blocks. Always kick off a fresh async refresh for the next
+        // turn so the cache stays warm.
+        cachedAppNameLock.lock()
+        var appName = cachedAppName
+        let cacheWasWarm = appName != nil
+        cachedAppNameLock.unlock()
+
+        // If the cache is cold (first turn of a session), prime it with a bounded
+        // read so the very first deictic query still gets the frontmost app. The
+        // read runs on a DETACHED task (its own executor), so the short bounded
+        // wait here cannot deadlock the structured agent-loop continuation the way
+        // an unstructured `Task {}` + `DispatchSemaphore.wait` on the cooperative
+        // pool could. Subsequent turns hit the warm-cache fast path above.
+        if !cacheWasWarm {
+            let box = AppNameBox()
+            let semaphore = DispatchSemaphore(value: 0)
+            Task.detached(priority: .userInitiated) { [systemContext] in
+                box.value = await systemContext.lastCapturedAppName
+                semaphore.signal()
+            }
+            _ = semaphore.wait(timeout: .now() + .milliseconds(50))
+            appName = box.value
+            cachedAppNameLock.lock()
+            cachedAppName = box.value
+            cachedAppNameLock.unlock()
+        } else {
+            Task { [weak self] in
+                guard let self else { return }
+                let latest = await self.systemContext.lastCapturedAppName
+                self.cachedAppNameLock.lock()
+                self.cachedAppName = latest
+                self.cachedAppNameLock.unlock()
+            }
         }
-        // Cap at 50ms to never stall the agent loop on a misbehaving provider.
-        _ = semaphore.wait(timeout: .now() + .milliseconds(50))
 
         guard let name = appName, !name.isEmpty, name != "Metamorphia", name != "Executer" else {
             return nil
@@ -245,6 +280,13 @@ public final class ImplicitContextMiddleware: AgentMiddleware {
     }
 
     // MARK: - Helpers
+
+    /// Tiny reference box so the detached prime task can hand the fetched app name
+    /// back to the synchronous caller without capturing a `var` across a concurrency
+    /// boundary. The semaphore establishes the happens-before for the read.
+    private final class AppNameBox: @unchecked Sendable {
+        var value: String?
+    }
 
     private func findRecentFiles(minutes: Int) -> [URL] {
         let fm = FileManager.default

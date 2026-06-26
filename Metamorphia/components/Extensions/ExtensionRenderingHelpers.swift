@@ -30,18 +30,35 @@ extension AtollColorDescriptor {
         if isAccent {
             return .accentColor
         }
-        return Color(red: red, green: green, blue: blue, opacity: alpha)
+        return Color(
+            red: Self.clampComponent(red),
+            green: Self.clampComponent(green),
+            blue: Self.clampComponent(blue),
+            opacity: Self.clampComponent(alpha)
+        )
     }
 
     var nsColor: NSColor {
         if isAccent {
             return NSColor.controlAccentColor
         }
-        return NSColor(red: red, green: green, blue: blue, alpha: alpha)
+        return NSColor(
+            red: Self.clampComponent(red),
+            green: Self.clampComponent(green),
+            blue: Self.clampComponent(blue),
+            alpha: Self.clampComponent(alpha)
+        )
     }
 
     func resolvedColor(fallback accent: Color) -> Color {
         isAccent ? accent : swiftUIColor
+    }
+
+    /// Extension-supplied color components are untrusted; clamp to the valid `0...1` range
+    /// so out-of-range values can't produce undefined colors or assertion failures.
+    private static func clampComponent(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, 0), 1)
     }
 }
 

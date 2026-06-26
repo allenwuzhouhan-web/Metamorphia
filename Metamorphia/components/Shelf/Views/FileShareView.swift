@@ -333,6 +333,11 @@ private struct NSViewHost: NSViewRepresentable {
     }
     
     func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async { self.view = nsView }
+        // Only write back when the binding doesn't already point at this view,
+        // to avoid a redundant state mutation on every update pass.
+        guard view !== nsView else { return }
+        DispatchQueue.main.async {
+            if self.view !== nsView { self.view = nsView }
+        }
     }
 }
