@@ -128,7 +128,7 @@ class ColorPickerPanel: NSPanel {
         contentView = hostingView
         
         // Set initial size
-        let preferredSize = CGSize(width: 460, height: 640)
+        let preferredSize = CGSize(width: 460, height: 680)
         hostingView.setFrameSize(preferredSize)
         setContentSize(preferredSize)
     }
@@ -217,7 +217,7 @@ struct ColorPickerPanelView: View {
 
             if colorPickerManager.activeSection == .palette {
                 ScrollView {
-                    ColorPaletteView(wheelDiameter: 240)
+                    ColorPaletteView(wheelDiameter: 248)
                         .padding(16)
                 }
             } else {

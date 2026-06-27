@@ -21,22 +21,51 @@ import AppKit
 import UniformTypeIdentifiers
 import Defaults
 
-/// Drop in a logo (or any image) and get its major colors back as a wheel,
-/// a swatch strip, and copyable color codes. Reused by both the floating
-/// panel and the notch tab.
+/// Drop in a logo (or any image) and get its major colors back as a wheel.
+/// Select a color and 5 variants emerge around it; switch schemes to explore
+/// tints/shades and harmonies. Reused by both the floating panel and notch tab.
 struct ColorPaletteView: View {
-    var wheelDiameter: CGFloat = 240
+    var wheelDiameter: CGFloat = 248
+    /// Tight layout for the notch: icons-only picker, color-only strips, no formats.
+    var compact: Bool = false
 
     @Default(.paletteColorCount) private var paletteColorCount
+    @Default(.paletteVariantScheme) private var scheme
     @Default(.showColorFormats) private var showColorFormats
 
     @State private var image: NSImage?
     @State private var swatches: [LogoPaletteSwatch] = []
     @State private var selected: LogoPaletteSwatch?
+    @State private var variantsActive = false
+    @State private var highlightedVariantSlot: Int?
+    @State private var formatsExpanded = false
     @State private var isExtracting = false
     @State private var isDropTargeted = false
     @State private var copiedID: UUID?
     @State private var savedToHistory = false
+
+    private let springUI = Animation.spring(response: 0.42, dampingFraction: 0.85)
+
+    // MARK: - Derived variant state
+
+    private var harmoniesDisabled: Bool {
+        (selected?.color.hsv.saturation ?? 1) < 0.08   // a near-gray has no useful harmonies
+    }
+
+    private var effectiveScheme: VariantScheme {
+        harmoniesDisabled ? .monochromatic : scheme
+    }
+
+    private var schemeBinding: Binding<VariantScheme> {
+        Binding(get: { effectiveScheme }, set: { scheme = $0 })
+    }
+
+    private var variantColors: [ColorVariant] {
+        guard let base = selected?.color else { return [] }
+        return variants(of: base, scheme: effectiveScheme)
+            .enumerated()
+            .map { ColorVariant(slot: $0.offset, color: $0.element) }
+    }
 
     var body: some View {
         VStack(spacing: 16) {
@@ -95,7 +124,7 @@ struct ColorPaletteView: View {
     // MARK: - Results state
 
     private var results: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 14) {
             sourceBar
 
             if isExtracting {
@@ -106,19 +135,56 @@ struct ColorPaletteView: View {
                 ColorWheelView(
                     swatches: swatches,
                     selectedID: selected?.id,
+                    variants: variantColors,
+                    variantsActive: variantsActive,
                     diameter: wheelDiameter,
-                    onSelect: pick
+                    growth: compact ? 1.06 : 1.10,
+                    highlightedVariantSlot: highlightedVariantSlot,
+                    onSelect: pick,
+                    onTapVariant: { copyColor($0.color) },
+                    onTapEmpty: deselectVariants
                 )
                 .frame(maxWidth: .infinity)
 
-                swatchStrip
+                if variantsActive, let sel = selected {
+                    VStack(spacing: 12) {
+                        VariantSchemePicker(
+                            scheme: schemeBinding,
+                            compact: compact,
+                            harmoniesDisabled: harmoniesDisabled
+                        )
+                        variantStripScroller(sel)
+                    }
+                    .transition(.asymmetric(
+                        insertion: .scale(scale: 0.96).combined(with: .opacity),
+                        removal: .opacity
+                    ))
+                }
 
-                if let selected {
-                    selectedDetails(selected)
+                if !(compact && variantsActive) {
+                    swatchStrip
+                }
+
+                if variantsActive, !compact, let sel = selected {
+                    formatsDisclosure(sel)
                 }
 
                 actionBar
             }
+        }
+    }
+
+    private func variantStripScroller(_ sel: LogoPaletteSwatch) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            VariantStrip(
+                base: sel.color,
+                variants: variantColors,
+                highlightedSlot: $highlightedVariantSlot,
+                compact: compact,
+                onCopy: copyColor
+            )
+            .padding(.horizontal, 2)
+            .padding(.vertical, 2)
         }
     }
 
@@ -144,7 +210,8 @@ struct ColorPaletteView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(swatches.count) major colors")
                     .font(.system(size: 14, weight: .semibold))
-                Text("Tap a dot or swatch to copy")
+                Text(variantsActive ? "Tap empty space to step back"
+                                    : "Tap a color for its variants")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -199,7 +266,7 @@ struct ColorPaletteView: View {
         return VStack(spacing: 5) {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(swatch.color.color)
-                .frame(width: 58, height: 46)
+                .frame(width: 54, height: 44)
                 .overlay(
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
                         .strokeBorder(Color.white.opacity(0.25), lineWidth: 1)
@@ -216,42 +283,48 @@ struct ColorPaletteView: View {
                         .opacity(copiedID == swatch.id ? 1 : 0)
                 )
 
-            Text(swatch.color.hexString)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.primary)
-            Text(swatch.percentText)
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
+            if !compact {
+                Text(swatch.color.hexString)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.primary)
+                Text(swatch.percentText)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
         }
         .contentShape(Rectangle())
         .onTapGesture { pick(swatch) }
     }
 
-    private func selectedDetails(_ swatch: LogoPaletteSwatch) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(swatch.color.color)
-                    .frame(width: 64, height: 48)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.25))
-                    )
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(swatch.color.hexString)
-                        .font(.system(size: 17, weight: .semibold))
-                    Text("\(swatch.percentText) of the image")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+    private func formatsDisclosure(_ swatch: LogoPaletteSwatch) -> some View {
+        VStack(spacing: 8) {
+            Button {
+                withAnimation(.smooth(duration: 0.25)) { formatsExpanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "number")
+                        .font(.system(size: 11, weight: .medium))
+                    Text("Formats")
+                        .font(.system(size: 12, weight: .semibold))
+                    Spacer()
+                    Image(systemName: formatsExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 11, weight: .semibold))
                 }
-                Spacer()
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
 
-            VStack(spacing: 2) {
-                ForEach(formats(for: swatch.color)) { format in
-                    ColorFormatDetailRow(format: format, color: swatch.color)
+            if formatsExpanded {
+                VStack(spacing: 2) {
+                    ForEach(formats(for: swatch.color)) { format in
+                        ColorFormatDetailRow(format: format, color: swatch.color)
+                    }
                 }
+                .transition(.asymmetric(
+                    insertion: .scale(scale: 0.98).combined(with: .opacity),
+                    removal: .opacity
+                ))
             }
         }
         .padding(12)
@@ -263,14 +336,12 @@ struct ColorPaletteView: View {
 
     private var actionBar: some View {
         HStack(spacing: 10) {
+            actionChip(title: "Copy All", icon: "doc.on.doc", tint: .accentColor, action: copyAll)
+            if variantsActive {
+                actionChip(title: "Copy Set", icon: "square.on.square", tint: .accentColor, action: copyVariants)
+            }
             actionChip(
-                title: "Copy All",
-                icon: "doc.on.doc",
-                tint: .accentColor,
-                action: copyAll
-            )
-            actionChip(
-                title: savedToHistory ? "Saved" : "Save to History",
+                title: savedToHistory ? "Saved" : "Save",
                 icon: savedToHistory ? "checkmark" : "tray.and.arrow.down",
                 tint: savedToHistory ? .green : .accentColor,
                 action: saveToHistory
@@ -328,14 +399,31 @@ struct ColorPaletteView: View {
     // MARK: - Actions
 
     private func pick(_ swatch: LogoPaletteSwatch) {
-        selected = swatch
-        ColorPickerManager.shared.copyToClipboard(swatch.color.hexString)
-        if Defaults[.enableHaptics] {
-            NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .default)
+        withAnimation(springUI) {
+            if selected?.id == swatch.id {
+                variantsActive.toggle()
+            } else {
+                selected = swatch
+                variantsActive = true
+            }
         }
-        withAnimation(.easeInOut(duration: 0.15)) { copiedID = swatch.id }
+        copyColor(swatch.color)
+        flash(swatch.id)
+    }
+
+    private func deselectVariants() {
+        withAnimation(springUI) { variantsActive = false }
+    }
+
+    private func copyColor(_ color: PickedColor) {
+        ColorPickerManager.shared.copyToClipboard(color.hexString)
+        haptic()
+    }
+
+    private func flash(_ id: UUID) {
+        withAnimation(.easeInOut(duration: 0.15)) { copiedID = id }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            if copiedID == swatch.id {
+            if copiedID == id {
                 withAnimation(.easeInOut(duration: 0.15)) { copiedID = nil }
             }
         }
@@ -344,9 +432,14 @@ struct ColorPaletteView: View {
     private func copyAll() {
         let text = swatches.map { $0.color.hexString }.joined(separator: "\n")
         ColorPickerManager.shared.copyToClipboard(text)
-        if Defaults[.enableHaptics] {
-            NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .default)
-        }
+        haptic()
+    }
+
+    private func copyVariants() {
+        let colors = ([selected?.color].compactMap { $0 } + variantColors.map { $0.color })
+        let text = colors.map { $0.hexString }.joined(separator: "\n")
+        ColorPickerManager.shared.copyToClipboard(text)
+        haptic()
     }
 
     private func saveToHistory() {
@@ -360,10 +453,17 @@ struct ColorPaletteView: View {
         }
     }
 
+    private func haptic() {
+        if Defaults[.enableHaptics] {
+            NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .default)
+        }
+    }
+
     private func reset() {
         image = nil
         swatches = []
         selected = nil
+        variantsActive = false
         savedToHistory = false
         isExtracting = false
     }
@@ -373,6 +473,7 @@ struct ColorPaletteView: View {
     private func setImage(_ img: NSImage) {
         image = img
         selected = nil
+        variantsActive = false
         savedToHistory = false
         isExtracting = true
         img.extractPalette(maxColors: paletteColorCount) { result in
@@ -446,7 +547,7 @@ struct ColorPaletteView: View {
 
 #Preview {
     ColorPaletteView()
-        .frame(width: 420, height: 640)
+        .frame(width: 440, height: 680)
         .padding()
         .background(Color.black)
 }

@@ -59,7 +59,7 @@ struct NotchColorPickerView: View {
             sectionPicker
 
             if colorPickerManager.activeSection == .palette {
-                ColorPaletteView(wheelDiameter: 200)
+                ColorPaletteView(wheelDiameter: 196, compact: true)
             } else if colorPickerManager.colorHistory.isEmpty {
                 emptyStateView
             } else {
