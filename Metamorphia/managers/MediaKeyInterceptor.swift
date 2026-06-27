@@ -176,6 +176,16 @@ final class MediaKeyInterceptor {
     }
 
     private func handleEvent(cgEvent: CGEvent, type: CGEventType) -> Unmanaged<CGEvent>? {
+        // macOS disables the tap if the callback runs long or under input-monitoring
+        // pressure. Re-enable it so media keys keep being intercepted.
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap = eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+                NSLog("⚠️ Media key event tap was disabled (\(type.rawValue)); re-enabled")
+            }
+            return Unmanaged.passUnretained(cgEvent)
+        }
+
         guard let systemDefinedType = systemDefinedEventType,
               type == systemDefinedType,
               let nsEvent = NSEvent(cgEvent: cgEvent),
