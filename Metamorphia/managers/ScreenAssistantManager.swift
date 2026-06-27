@@ -395,6 +395,8 @@ class ScreenAssistantManager: NSObject, ObservableObject {
             sendToOpenAIAPI(message: message, files: files)
         case .claude:
             sendToClaudeAPI(message: message, files: files)
+        case .cerebras:
+            sendToCerebrasAPI(message: message, files: files)
         case .local:
             sendToLocalAPI(message: message, files: files)
         }
@@ -470,7 +472,31 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         
         performClaudeRequest(url: url, requestBody: buildClaudeRequestBody(message: message, files: files, model: modelId), apiKey: apiKey)
     }
-    
+
+    private func sendToCerebrasAPI(message: String, files: [ScreenAssistantFile]) {
+        let apiKey = Defaults[.cerebrasApiKey]
+        guard !apiKey.isEmpty else {
+            print("❌ ScreenAssistant: No Cerebras API key configured")
+            addAssistantMessage("Error: No Cerebras API key configured. Please set your API key in model settings.")
+            isLoading = false
+            return
+        }
+
+        // Get selected model or default to gpt-oss-120b
+        let selectedModel = Defaults[.selectedAIModel] ?? AIModel(id: "gpt-oss-120b", name: "GPT-OSS 120B", supportsThinking: true)
+        let modelId = selectedModel.id
+
+        // Cerebras exposes an OpenAI-compatible chat completions endpoint
+        guard let url = URL(string: "https://api.cerebras.ai/v1/chat/completions") else {
+            print("❌ ScreenAssistant: Invalid Cerebras API URL")
+            addAssistantMessage("Error: Invalid API URL")
+            isLoading = false
+            return
+        }
+
+        performCerebrasRequest(url: url, requestBody: buildOpenAIRequestBody(message: message, files: files, model: modelId), apiKey: apiKey)
+    }
+
     private func sendToLocalAPI(message: String, files: [ScreenAssistantFile]) {
         let endpoint = Defaults[.localModelEndpoint]
         guard !endpoint.isEmpty else {
@@ -719,11 +745,47 @@ class ScreenAssistantManager: NSObject, ObservableObject {
                 self.handleResponse(data: data, response: response, error: error, provider: .openai)
             }
         }
-        
+
         activeRequest = task
         task?.resume()
     }
-    
+
+    private func performCerebrasRequest(url: URL, requestBody: [String: Any], apiKey: String) {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+
+        do {
+            let jsonData = try JSONSerialization.data(withJSONObject: requestBody, options: .prettyPrinted)
+            request.httpBody = jsonData
+        } catch {
+            print("❌ ScreenAssistant: Failed to encode Cerebras request - \(error)")
+            addAssistantMessage("Error: Failed to encode request - \(error.localizedDescription)")
+            isLoading = false
+            return
+        }
+
+        var task: URLSessionDataTask?
+        task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                guard let currentTask = task else { return }
+
+                // Ensure this callback belongs to the current in-flight request
+                guard self.activeRequest === currentTask else { return }
+
+                self.isLoading = false
+                self.activeRequest = nil
+
+                self.handleResponse(data: data, response: response, error: error, provider: .cerebras)
+            }
+        }
+
+        activeRequest = task
+        task?.resume()
+    }
+
     private func performClaudeRequest(url: URL, requestBody: [String: Any], apiKey: String) {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -800,6 +862,9 @@ class ScreenAssistantManager: NSObject, ObservableObject {
             parseOpenAIResponse(data: data)
         case .claude:
             parseClaudeResponse(data: data)
+        case .cerebras:
+            // Cerebras is OpenAI-compatible, so the response shape matches
+            parseOpenAIResponse(data: data)
         case .local:
             parseOllamaResponse(data: data)
         }

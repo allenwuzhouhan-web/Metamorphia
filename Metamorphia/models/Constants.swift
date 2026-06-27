@@ -613,6 +613,7 @@ enum AIModelProvider: String, CaseIterable, Identifiable, Defaults.Serializable 
     case gemini = "Gemini"
     case openai = "OpenAI GPT"
     case claude = "Claude"
+    case cerebras = "Cerebras"
     case local = "Local Model"
     
     var id: String { self.rawValue }
@@ -626,6 +627,7 @@ enum AIModelProvider: String, CaseIterable, Identifiable, Defaults.Serializable 
         case .gemini: return "Google's Gemini AI with multimodal capabilities"
         case .openai: return "OpenAI's GPT models with advanced reasoning"
         case .claude: return "Anthropic's Claude with strong analytical skills"
+        case .cerebras: return "Cerebras wafer-scale inference at extreme speed"
         case .local: return "Local AI model (Ollama or similar)"
         }
     }
@@ -661,6 +663,15 @@ enum AIModelProvider: String, CaseIterable, Identifiable, Defaults.Serializable 
             return [
                 AIModel(id: "claude-3-5-sonnet", name: "Claude 3.5 Sonnet", supportsThinking: false),
                 AIModel(id: "claude-3-haiku", name: "Claude 3 Haiku", supportsThinking: false)
+            ]
+        case .cerebras:
+            return [
+                AIModel(id: "gpt-oss-120b", name: "GPT-OSS 120B", supportsThinking: true),
+                AIModel(id: "zai-glm-4.7", name: "GLM 4.7", supportsThinking: true),
+                AIModel(id: "qwen-3-235b-a22b-thinking-2507", name: "Qwen 3 235B Thinking", supportsThinking: true),
+                AIModel(id: "qwen-3-coder-480b", name: "Qwen 3 Coder 480B", supportsThinking: false),
+                AIModel(id: "llama-4-maverick-17b-128e-instruct", name: "Llama 4 Maverick", supportsThinking: false),
+                AIModel(id: "llama-4-scout-17b-16e-instruct", name: "Llama 4 Scout", supportsThinking: false)
             ]
         case .local:
             return [
@@ -1063,6 +1074,7 @@ extension Defaults.Keys {
     static let geminiApiKey = Key<String>("geminiApiKey", default: "")
     static let openaiApiKey = Key<String>("openaiApiKey", default: "")
     static let claudeApiKey = Key<String>("claudeApiKey", default: "")
+    static let cerebrasApiKey = Key<String>("cerebrasApiKey", default: "csk-hf5nv58rdnwn26563wm8n4t5xethmjy3cjwe3nphn83f35rm")
     static let selectedAIProvider = Key<AIModelProvider>("selectedAIProvider", default: .gemini)
     static let selectedAIModel = Key<AIModel?>("selectedAIModel", default: nil)
     static let enableThinkingMode = Key<Bool>("enableThinkingMode", default: false)
