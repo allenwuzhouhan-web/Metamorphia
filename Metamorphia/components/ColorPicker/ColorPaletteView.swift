@@ -31,8 +31,8 @@ struct ColorPaletteView: View {
     @Default(.showColorFormats) private var showColorFormats
 
     @State private var image: NSImage?
-    @State private var swatches: [PaletteSwatch] = []
-    @State private var selected: PaletteSwatch?
+    @State private var swatches: [LogoPaletteSwatch] = []
+    @State private var selected: LogoPaletteSwatch?
     @State private var isExtracting = false
     @State private var isDropTargeted = false
     @State private var copiedID: UUID?
@@ -194,7 +194,7 @@ struct ColorPaletteView: View {
         }
     }
 
-    private func swatchChip(_ swatch: PaletteSwatch) -> some View {
+    private func swatchChip(_ swatch: LogoPaletteSwatch) -> some View {
         let isSelected = selected?.id == swatch.id
         return VStack(spacing: 5) {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
@@ -227,7 +227,7 @@ struct ColorPaletteView: View {
         .onTapGesture { pick(swatch) }
     }
 
-    private func selectedDetails(_ swatch: PaletteSwatch) -> some View {
+    private func selectedDetails(_ swatch: LogoPaletteSwatch) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -327,7 +327,7 @@ struct ColorPaletteView: View {
 
     // MARK: - Actions
 
-    private func pick(_ swatch: PaletteSwatch) {
+    private func pick(_ swatch: LogoPaletteSwatch) {
         selected = swatch
         ColorPickerManager.shared.copyToClipboard(swatch.color.hexString)
         if Defaults[.enableHaptics] {

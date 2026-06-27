@@ -25,7 +25,7 @@ import CoreGraphics
 
 /// One major color pulled from an image, paired with how much of the
 /// (opaque) image it covers. `weight` is a 0...1 share of sampled pixels.
-struct PaletteSwatch: Identifiable, Hashable {
+struct LogoPaletteSwatch: Identifiable, Hashable {
     let id = UUID()
     let color: PickedColor
     let weight: Double
@@ -47,7 +47,7 @@ extension NSImage {
     /// land on near-identical colors are merged, so the result is the handful of
     /// colors a person would actually name — not every anti-aliased in-between.
     /// Results are deterministic for a given image.
-    func extractPalette(maxColors: Int = 6, completion: @escaping ([PaletteSwatch]) -> Void) {
+    func extractPalette(maxColors: Int = 6, completion: @escaping ([LogoPaletteSwatch]) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             let swatches = paletteColors(from: self, maxColors: max(1, maxColors))
             DispatchQueue.main.async { completion(swatches) }
@@ -99,7 +99,7 @@ private struct ColorBin {
     var lab: Lab
 }
 
-private func paletteColors(from image: NSImage, maxColors: Int) -> [PaletteSwatch] {
+private func paletteColors(from image: NSImage, maxColors: Int) -> [LogoPaletteSwatch] {
     guard let bins = sampleBins(from: image), !bins.isEmpty else { return [] }
 
     let totalCount = bins.reduce(0.0) { $0 + $1.count }
@@ -127,7 +127,7 @@ private func paletteColors(from image: NSImage, maxColors: Int) -> [PaletteSwatc
     return kept.map { cluster in
         let nsColor = NSColor(srgbRed: clamp(cluster.r), green: clamp(cluster.g), blue: clamp(cluster.b), alpha: 1.0)
         let picked = PickedColor(nsColor: nsColor, point: .zero)
-        return PaletteSwatch(color: picked, weight: cluster.count / totalCount)
+        return LogoPaletteSwatch(color: picked, weight: cluster.count / totalCount)
     }
 }
 
