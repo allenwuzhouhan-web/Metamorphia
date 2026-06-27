@@ -41,7 +41,9 @@ final class ScratchpadWindow: NSObject, NSWindowDelegate {
     /// Open `tool` as a floating panel. `screenPoint` is the AppKit global location
     /// (bottom-left origin) to place it near — typically the drag drop point. nil centers it.
     func present(tool: ScratchTool, at screenPoint: CGPoint?) {
-        let panel = makePanel(size: NSSize(width: 380, height: 460))
+        // The palette tile hosts a color wheel + variants, so it needs more room.
+        let size = tool == .palette ? NSSize(width: 430, height: 680) : NSSize(width: 380, height: 460)
+        let panel = makePanel(size: size)
         let root = ScratchpadHostView(tool: tool, onClose: { [weak self, weak panel] in
             if let panel { self?.close(panel) }
         })
