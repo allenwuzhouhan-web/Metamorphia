@@ -12,13 +12,20 @@ import SwiftUI
 /// There is no separate tap gesture, so a quick flick can never spawn two panels.
 @MainActor public struct ScratchpadTrayView: View {
     private let onActivate: (ScratchTool, CGPoint?) -> Void
+    /// Reports when a tear-out drag begins (true) / ends (false) so the host can keep
+    /// the notch open during the drag — otherwise auto-close cancels the gesture.
+    private let onDragStateChange: ((Bool) -> Void)?
 
     /// The tool currently being dragged, so we can give it light follow/scale feedback.
     @State private var dragging: ScratchTool?
     @State private var dragTranslation: CGSize = .zero
 
-    public init(onActivate: @escaping (ScratchTool, CGPoint?) -> Void) {
+    public init(
+        onActivate: @escaping (ScratchTool, CGPoint?) -> Void,
+        onDragStateChange: ((Bool) -> Void)? = nil
+    ) {
         self.onActivate = onActivate
+        self.onDragStateChange = onDragStateChange
     }
 
     private let columns = [
@@ -89,13 +96,18 @@ import SwiftUI
         DragGesture(minimumDistance: 0)
             .onChanged { value in
                 let torn = hypot(value.translation.width, value.translation.height) > tearThreshold
-                if torn, dragging != tool { dragging = tool }
+                if torn, dragging != tool {
+                    dragging = tool
+                    // Keep the notch open for the duration of the tear-out.
+                    onDragStateChange?(true)
+                }
                 dragTranslation = torn ? value.translation : .zero
             }
             .onEnded { value in
                 defer {
                     dragging = nil
                     dragTranslation = .zero
+                    onDragStateChange?(false)
                 }
                 let distance = hypot(value.translation.width, value.translation.height)
                 // Past the threshold → tear out at the cursor; otherwise → tap in place.

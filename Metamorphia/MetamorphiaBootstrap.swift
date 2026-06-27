@@ -662,6 +662,13 @@ public enum MetamorphiaBootstrap {
             }
         }
 
+        // 8e. Defensive default restore — mirrors the `.commandBar` path so the
+        // Writing Tools hotkey is always bound even if a stale prefs import wiped it.
+        if KeyboardShortcuts.getShortcut(for: .writingTools) == nil {
+            KeyboardShortcuts.reset(.writingTools)
+            print("[MetamorphiaBootstrap] writingTools hotkey was empty — restored ⌃⌥W default.")
+        }
+
         // 8b. Keep the global KeyboardShortcuts switch ON — the commandBar
         // hotkey must survive even when the user disables per-feature
         // shortcuts. See MetamorphiaApp's `updateFeatureShortcutAvailability`
