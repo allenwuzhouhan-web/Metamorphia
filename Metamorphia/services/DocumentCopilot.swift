@@ -317,6 +317,7 @@ enum DocumentCopilot {
         let reviewVerbs = [
             "audit", "review", "comment", "critique", "revise", "rewrite",
             "finish", "improve", "polish", "tighten",
+            "proofread", "proof read", "proof-read", "spell", "grammar",
         ]
         let hasReviewVerb = reviewVerbs.contains { normalized.contains($0) }
         let requestedKind = requestedKind(in: normalized)
