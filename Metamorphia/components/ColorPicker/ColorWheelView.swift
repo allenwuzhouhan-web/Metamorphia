@@ -25,10 +25,10 @@ import SwiftUI
 /// the central value axis instead — dark low, light high — which keeps black and
 /// white from piling up on the exact center.
 struct ColorWheelView: View {
-    let swatches: [PaletteSwatch]
+    let swatches: [LogoPaletteSwatch]
     let selectedID: UUID?
     var diameter: CGFloat = 240
-    let onSelect: (PaletteSwatch) -> Void
+    let onSelect: (LogoPaletteSwatch) -> Void
 
     @State private var hoveredID: UUID?
 
@@ -81,7 +81,7 @@ struct ColorWheelView: View {
             .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
     }
 
-    private func dot(for swatch: PaletteSwatch) -> some View {
+    private func dot(for swatch: LogoPaletteSwatch) -> some View {
         let isSelected = swatch.id == selectedID
         let isHovered = swatch.id == hoveredID
         let size = dotSize(for: swatch)
@@ -103,7 +103,7 @@ struct ColorWheelView: View {
             .onTapGesture { onSelect(swatch) }
     }
 
-    private func position(for swatch: PaletteSwatch) -> CGPoint {
+    private func position(for swatch: LogoPaletteSwatch) -> CGPoint {
         let hsv = swatch.color.hsv
         let center = CGPoint(x: radius, y: radius)
 
@@ -119,13 +119,13 @@ struct ColorWheelView: View {
                        y: center.y + r * CGFloat(sin(angle)))
     }
 
-    private func dotSize(for swatch: PaletteSwatch) -> CGFloat {
+    private func dotSize(for swatch: LogoPaletteSwatch) -> CGFloat {
         18 + min(CGFloat(swatch.weight), 0.45) * 30
     }
 }
 
 #Preview {
-    let samples = PickedColor.sampleColors.map { PaletteSwatch(color: $0, weight: 0.2) }
+    let samples = PickedColor.sampleColors.map { LogoPaletteSwatch(color: $0, weight: 0.2) }
     return ColorWheelView(swatches: samples, selectedID: samples.first?.id) { _ in }
         .padding(40)
         .background(Color.black)
