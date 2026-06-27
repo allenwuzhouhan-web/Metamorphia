@@ -130,15 +130,22 @@ enum LocalCommandHelpers {
 
     /// Same as `runAppleScript`, but preserves the AppleScript error text for UI diagnostics.
     static func runAppleScriptDetailed(_ source: String) -> AppleScriptRunResult {
-        var error: NSDictionary?
-        let script = NSAppleScript(source: source)
-        let result = script?.executeAndReturnError(&error)
-        if let err = error {
-            let message = appleScriptErrorMessage(err)
-            print("[LocalCmd] AppleScript error: \(message)")
-            return AppleScriptRunResult(output: nil, errorMessage: message)
+        // NSAppleScript must run on the main thread (Carbon OSA engine). Detection
+        // calls this from background detached tasks, so hop to main to avoid nil
+        // results and OSA-engine corruption (EXC_BAD_ACCESS).
+        func work() -> AppleScriptRunResult {
+            var error: NSDictionary?
+            let script = NSAppleScript(source: source)
+            let result = script?.executeAndReturnError(&error)
+            if let err = error {
+                let message = appleScriptErrorMessage(err)
+                print("[LocalCmd] AppleScript error: \(message)")
+                return AppleScriptRunResult(output: nil, errorMessage: message)
+            }
+            return AppleScriptRunResult(output: result?.stringValue, errorMessage: nil)
         }
-        return AppleScriptRunResult(output: result?.stringValue, errorMessage: nil)
+        if Thread.isMainThread { return work() }
+        return DispatchQueue.main.sync(execute: work)
     }
 
     private static func appleScriptErrorMessage(_ error: NSDictionary) -> String {
