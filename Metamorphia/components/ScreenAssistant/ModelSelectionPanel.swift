@@ -125,6 +125,7 @@ struct ModelSelectionView: View {
     @State private var geminiApiKey: String = Defaults[.geminiApiKey]
     @State private var openaiApiKey: String = Defaults[.openaiApiKey]
     @State private var claudeApiKey: String = Defaults[.claudeApiKey]
+    @State private var cerebrasApiKey: String = Defaults[.cerebrasApiKey]
     @State private var localEndpoint: String = Defaults[.localModelEndpoint]
     
     @State private var showingApiKeyAlert = false
@@ -245,6 +246,7 @@ struct ModelSelectionView: View {
                             geminiApiKey: $geminiApiKey,
                             openaiApiKey: $openaiApiKey,
                             claudeApiKey: $claudeApiKey,
+                            cerebrasApiKey: $cerebrasApiKey,
                             localEndpoint: $localEndpoint
                         )
                     }
@@ -289,6 +291,8 @@ struct ModelSelectionView: View {
             return !openaiApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         case .claude:
             return !claudeApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .cerebras:
+            return !cerebrasApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         case .local:
             return !localEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
@@ -303,9 +307,10 @@ struct ModelSelectionView: View {
         geminiApiKey = Defaults[.geminiApiKey]
         openaiApiKey = Defaults[.openaiApiKey]
         claudeApiKey = Defaults[.claudeApiKey]
+        cerebrasApiKey = Defaults[.cerebrasApiKey]
         localEndpoint = Defaults[.localModelEndpoint]
     }
-    
+
     private func saveConfiguration() {
         Defaults[.selectedAIProvider] = selectedProvider
         Defaults[.selectedAIModel] = selectedModel
@@ -314,6 +319,7 @@ struct ModelSelectionView: View {
         Defaults[.geminiApiKey] = geminiApiKey
         Defaults[.openaiApiKey] = openaiApiKey
         Defaults[.claudeApiKey] = claudeApiKey
+        Defaults[.cerebrasApiKey] = cerebrasApiKey
         Defaults[.localModelEndpoint] = localEndpoint
         
         closePanel()
@@ -381,6 +387,7 @@ struct ProviderCard: View {
         case .gemini: return "sparkles"
         case .openai: return "brain.head.profile"
         case .claude: return "doc.text"
+        case .cerebras: return "bolt.fill"
         case .local: return "server.rack"
         }
     }
@@ -440,6 +447,7 @@ struct ApiConfigurationSection: View {
     @Binding var geminiApiKey: String
     @Binding var openaiApiKey: String
     @Binding var claudeApiKey: String
+    @Binding var cerebrasApiKey: String
     @Binding var localEndpoint: String
     
     var body: some View {
@@ -468,7 +476,15 @@ struct ApiConfigurationSection: View {
                     value: $claudeApiKey,
                     helpText: "Get your API key from Anthropic Console"
                 )
-                
+
+            case .cerebras:
+                ApiKeyField(
+                    title: "Cerebras API Key",
+                    placeholder: "Enter your Cerebras API key",
+                    value: $cerebrasApiKey,
+                    helpText: "Get your API key from Cerebras Cloud (cloud.cerebras.ai)"
+                )
+
             case .local:
                 ApiKeyField(
                     title: "Local Endpoint",
