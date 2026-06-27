@@ -18,12 +18,15 @@
 
 import AppKit
 import SwiftUI
+import QuartzCore
 
 /// A floating scratchpad panel. Unlike Writing Tools (read-only), scratchpads accept
 /// keyboard input (regex/JSON/translate editing), so this panel becomes key.
 private final class FloatingScratchPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+    /// Esc dismisses the floating scratchpad / tool picker.
+    override func cancelOperation(_ sender: Any?) { close() }
 }
 
 /// Floats scratchpad tiles as small always-on-top panels. Several can be open at
@@ -38,16 +41,38 @@ final class ScratchpadWindow: NSObject, NSWindowDelegate {
     /// Open `tool` as a floating panel. `screenPoint` is the AppKit global location
     /// (bottom-left origin) to place it near — typically the drag drop point. nil centers it.
     func present(tool: ScratchTool, at screenPoint: CGPoint?) {
-        let panel = FloatingScratchPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 460),
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
+        let panel = makePanel(size: NSSize(width: 380, height: 460))
         let root = ScratchpadHostView(tool: tool, onClose: { [weak self, weak panel] in
             if let panel { self?.close(panel) }
         })
         panel.contentViewController = NSHostingController(rootView: root)
+        animateIn(panel, at: screenPoint)
+    }
+
+    /// Float the tool PICKER (the tray of all scratchpads) — the "tear off from the
+    /// notch" target. Tapping a tool opens its scratchpad and dismisses the picker;
+    /// dragging a tool out drops it at the cursor.
+    func presentTray(at screenPoint: CGPoint?) {
+        let panel = makePanel(size: NSSize(width: 250, height: 190))
+        let root = ScratchpadTrayView(onActivate: { [weak self, weak panel] tool, point in
+            // Open the chosen tool where it was dropped, or beside the picker.
+            let origin = point ?? panel.map { NSPoint(x: $0.frame.minX, y: $0.frame.maxY) }
+            self?.present(tool: tool, at: origin)
+            if let panel { self?.close(panel) }
+        })
+        panel.contentViewController = NSHostingController(rootView: root)
+        animateIn(panel, at: screenPoint)
+    }
+
+    // MARK: - Window plumbing
+
+    private func makePanel(size: NSSize) -> FloatingScratchPanel {
+        let panel = FloatingScratchPanel(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.isMovableByWindowBackground = true
@@ -61,11 +86,26 @@ final class ScratchpadWindow: NSObject, NSWindowDelegate {
         panel.hasShadow = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.delegate = self
+        return panel
+    }
 
+    /// Position, track, and animate the panel in with a smooth fade + grow.
+    private func animateIn(_ panel: NSWindow, at screenPoint: CGPoint?) {
         position(panel, at: screenPoint)
         panels.insert(panel)
+
+        let target = panel.frame
+        let start = target.insetBy(dx: target.width * 0.06, dy: target.height * 0.06)
+        panel.setFrame(start, display: false)
+        panel.alphaValue = 0
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.22
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().alphaValue = 1
+            panel.animator().setFrame(target, display: true)
+        }
     }
 
     private func close(_ window: NSWindow) {

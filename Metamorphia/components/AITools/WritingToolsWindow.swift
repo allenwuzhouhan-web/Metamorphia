@@ -47,19 +47,46 @@ final class WritingToolsWindow: NSObject, NSWindowDelegate {
 
     func present() {
         guard Defaults[.enableWritingTools] else { return }
+        NSLog("✍️ [Metamorphia/WritingTools] hotkey ⌃⌥W pressed")
+
+        // No Accessibility permission yet → trigger the system prompt AND show a
+        // clear notice, instead of silently doing nothing.
+        guard TextFieldAccess.isTrusted else {
+            AccessibilityPermissionStore.shared.requestAuthorizationPrompt()
+            showHosting(
+                WritingToolsNoticeView(
+                    systemImage: "lock.shield",
+                    title: "Enable Accessibility",
+                    message: "Writing Tools needs Accessibility access to read your selection and write the result back. Approve Metamorphia in System Settings, then press ⌃⌥W again.",
+                    actionTitle: "Open Settings",
+                    action: { AccessibilityPermissionStore.shared.openSystemSettings() },
+                    onClose: { [weak self] in self?.dismiss() }
+                ),
+                width: 330, height: 210, activating: true
+            )
+            return
+        }
 
         // Capture the selection NOW, before our panel can disturb the focused element.
         let selection = TextFieldAccess.selectedText()
         let initialText = selection ?? TextFieldAccess.focusedWindowText(maxChars: 6000) ?? ""
         guard !initialText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            NSSound.beep()
+            showHosting(
+                WritingToolsNoticeView(
+                    systemImage: "text.cursor",
+                    title: "Select some text",
+                    message: "Highlight text in any app, then press ⌃⌥W to proofread, rewrite, summarize, or draft a reply.",
+                    actionTitle: nil,
+                    action: nil,
+                    onClose: { [weak self] in self?.dismiss() }
+                ),
+                width: 330, height: 180, activating: false
+            )
             return
         }
+
         // For Smart Reply, the surrounding window text is useful context.
         let context = selection != nil ? TextFieldAccess.focusedWindowText(maxChars: 2000) : nil
-
-        dismiss()
-
         let root = WritingToolsPanelView(
             initialText: initialText,
             sourceContext: context,
@@ -69,11 +96,22 @@ final class WritingToolsWindow: NSObject, NSWindowDelegate {
             },
             onClose: { [weak self] in self?.dismiss() }
         )
+        showHosting(root, width: 400, height: 460, activating: false)
+    }
 
-        let hosting = NSHostingController(rootView: root)
+    /// Builds and floats a borderless panel hosting `rootView`. `activating` makes the
+    /// panel take focus (used for the permission notice, which has a button); the
+    /// Writing-Tools panel itself stays non-activating so the source app keeps focus
+    /// for write-back.
+    private func showHosting<V: View>(_ rootView: V, width: CGFloat, height: CGFloat, activating: Bool) {
+        dismiss()
+        let hosting = NSHostingController(rootView: rootView)
+        let style: NSWindow.StyleMask = activating
+            ? [.borderless, .fullSizeContentView]
+            : [.nonactivatingPanel, .borderless, .fullSizeContentView]
         let newPanel = FloatingToolPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 460),
-            styleMask: [.nonactivatingPanel, .borderless, .fullSizeContentView],
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+            styleMask: style,
             backing: .buffered,
             defer: false
         )
@@ -82,7 +120,7 @@ final class WritingToolsWindow: NSObject, NSWindowDelegate {
         newPanel.level = .floating
         newPanel.hidesOnDeactivate = false
         newPanel.isFloatingPanel = true
-        newPanel.becomesKeyOnlyIfNeeded = true
+        newPanel.becomesKeyOnlyIfNeeded = !activating
         newPanel.backgroundColor = .clear
         newPanel.isOpaque = false
         newPanel.hasShadow = true
@@ -91,7 +129,12 @@ final class WritingToolsWindow: NSObject, NSWindowDelegate {
 
         position(newPanel)
         panel = newPanel
-        newPanel.orderFrontRegardless()
+        if activating {
+            newPanel.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            newPanel.orderFrontRegardless()
+        }
     }
 
     func dismiss() {
@@ -118,5 +161,64 @@ final class WritingToolsWindow: NSObject, NSWindowDelegate {
             origin.y = min(max(visible.minY + 8, origin.y), visible.maxY - size.height - 8)
         }
         panel.setFrameOrigin(origin)
+    }
+}
+
+/// Small dark panel shown when Writing Tools can't run yet — either Accessibility
+/// permission is missing or nothing is selected. Keeps the hotkey from feeling dead.
+private struct WritingToolsNoticeView: View {
+    let systemImage: String
+    let title: String
+    let message: String
+    let actionTitle: String?
+    let action: (() -> Void)?
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                Spacer()
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .frame(width: 18, height: 18)
+                        .background(Circle().fill(Color.white.opacity(0.10)))
+                }
+                .buttonStyle(.plain)
+            }
+            Text(message)
+                .font(.system(size: 12, weight: .regular, design: .rounded))
+                .foregroundStyle(.white.opacity(0.75))
+                .fixedSize(horizontal: false, vertical: true)
+            if let actionTitle, let action {
+                Button(action: action) {
+                    Text(actionTitle)
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.accentColor))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.black.opacity(0.55))
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.white.opacity(0.10), lineWidth: 0.5)
+                )
+        )
     }
 }

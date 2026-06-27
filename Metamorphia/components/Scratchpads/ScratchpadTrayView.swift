@@ -10,13 +10,20 @@ import SwiftUI
 /// `onActivate(tool, NSEvent.mouseLocation)`.
 @MainActor public struct ScratchpadTrayView: View {
     private let onActivate: (ScratchTool, CGPoint?) -> Void
+    /// Reports when a tear-out drag begins (true) / ends (false) so the host can keep
+    /// the notch open during the drag — otherwise auto-close cancels the gesture.
+    private let onDragStateChange: ((Bool) -> Void)?
 
     /// The tool currently being dragged, so we can give it light follow/scale feedback.
     @State private var dragging: ScratchTool?
     @State private var dragTranslation: CGSize = .zero
 
-    public init(onActivate: @escaping (ScratchTool, CGPoint?) -> Void) {
+    public init(
+        onActivate: @escaping (ScratchTool, CGPoint?) -> Void,
+        onDragStateChange: ((Bool) -> Void)? = nil
+    ) {
         self.onActivate = onActivate
+        self.onDragStateChange = onDragStateChange
     }
 
     private let columns = [
@@ -78,7 +85,11 @@ import SwiftUI
     private func dragGesture(for tool: ScratchTool) -> some Gesture {
         DragGesture(minimumDistance: 8)
             .onChanged { value in
-                if dragging != tool { dragging = tool }
+                if dragging != tool {
+                    dragging = tool
+                    // Keep the notch open for the duration of the tear-out.
+                    onDragStateChange?(true)
+                }
                 dragTranslation = value.translation
             }
             .onEnded { _ in
@@ -86,6 +97,7 @@ import SwiftUI
                 onActivate(tool, NSEvent.mouseLocation)
                 dragging = nil
                 dragTranslation = .zero
+                onDragStateChange?(false)
             }
             // A press that never crosses the threshold falls through to this tap.
             .exclusively(before: TapGesture().onEnded {
