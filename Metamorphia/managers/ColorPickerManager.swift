@@ -80,6 +80,19 @@ class ColorPickerManager: ObservableObject {
     @Published var showColorPickedFeedback: Bool = false
     @Published var lastPickedColor: PickedColor?
     @Published var activeSection: ColorPickerSection = .recent
+
+    /// An image handed off by a panel-wide drop, to be consumed by the palette view.
+    /// (The token is what views observe — NSImage isn't Equatable.)
+    var pendingPaletteImage: NSImage?
+    @Published var paletteImageToken = UUID()
+
+    /// Switch to the Palette section and load `image` into it, no matter which
+    /// tab the drop landed on.
+    func openPalette(with image: NSImage) {
+        pendingPaletteImage = image
+        activeSection = .palette
+        paletteImageToken = UUID()
+    }
     
     // Use NSColorSampler from Solid project - much more reliable
     private let colorSampler = NSColorSampler()

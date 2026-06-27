@@ -29,6 +29,7 @@ struct ColorPaletteView: View {
     /// Tight layout for the notch: icons-only picker, color-only strips, no formats.
     var compact: Bool = false
 
+    @ObservedObject private var manager = ColorPickerManager.shared
     @Default(.paletteColorCount) private var paletteColorCount
     @Default(.paletteVariantScheme) private var scheme
     @Default(.showColorFormats) private var showColorFormats
@@ -69,8 +70,10 @@ struct ColorPaletteView: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            if swatches.isEmpty && !isExtracting {
+            if image == nil && !isExtracting {
                 dropZone
+            } else if swatches.isEmpty && !isExtracting {
+                extractionFailedView
             } else {
                 results
             }
@@ -79,6 +82,37 @@ struct ColorPaletteView: View {
             handleDrop(providers)
         }
         .onChange(of: paletteColorCount) { _ in reextract() }
+        .onChange(of: manager.paletteImageToken) { _ in consumePendingImage() }
+        .onAppear { consumePendingImage() }
+    }
+
+    /// Pick up an image handed off by a panel-wide drop (see ColorPickerManager).
+    private func consumePendingImage() {
+        if let img = manager.pendingPaletteImage {
+            manager.pendingPaletteImage = nil
+            setImage(img)
+        }
+    }
+
+    private var extractionFailedView: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 30, weight: .light))
+                .foregroundStyle(.secondary)
+            Text("Couldn't read colors from that image")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.primary)
+            Text("Try a different image.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                pillButton(title: "Choose Image…", icon: "folder", action: chooseImage)
+                pillButton(title: "Paste", icon: "doc.on.clipboard", action: pasteImage)
+            }
+            .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 40)
     }
 
     // MARK: - Empty / drop state
@@ -471,12 +505,14 @@ struct ColorPaletteView: View {
     // MARK: - Loading images
 
     private func setImage(_ img: NSImage) {
+        NSLog("%@", "ColorPalette: setImage size=\(img.size)")
         image = img
         selected = nil
         variantsActive = false
         savedToHistory = false
         isExtracting = true
         img.extractPalette(maxColors: paletteColorCount) { result in
+            NSLog("%@", "ColorPalette: extracted \(result.count) colors")
             swatches = result
             selected = result.first
             isExtracting = false
