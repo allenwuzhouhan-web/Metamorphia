@@ -71,7 +71,7 @@ import SwiftUI
     private var tile: some View {
         switch tool {
         case .regex: RegexScratchpadView()
-        case .json: JSONScratchpadView()
+        case .notes: NotesScratchpadView()
         case .diff: DiffScratchpadView()
         case .qr: QRScratchpadView()
         case .palette: PaletteScratchpadView()
