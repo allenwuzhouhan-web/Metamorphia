@@ -71,7 +71,7 @@ struct ColorPaletteView: View {
     var body: some View {
         VStack(spacing: 16) {
             if image == nil && !isExtracting {
-                dropZone
+                if compact { compactDropZone } else { dropZone }
             } else if swatches.isEmpty && !isExtracting {
                 extractionFailedView
             } else {
@@ -87,9 +87,61 @@ struct ColorPaletteView: View {
     }
 
     /// Pick up an image handed off by a panel-wide drop (see ColorPickerManager).
+    /// The hand-off is meant for the spacious floating panel, so the compact notch
+    /// view ignores it (it handles its own drops locally).
     private func consumePendingImage() {
+        guard !compact else { return }
         if let img = manager.pendingPaletteImage {
             manager.pendingPaletteImage = nil
+            setImage(img)
+        }
+    }
+
+    // MARK: - Compact (notch) launcher
+    //
+    // The open notch is only ~200pt tall — far too short for the wheel — so in the
+    // notch the palette tab is a compact drop target that launches the full
+    // floating panel (which has room for the wheel + variants).
+
+    private var compactDropZone: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "photo.on.rectangle.angled")
+                .font(.system(size: 26, weight: .light))
+                .foregroundStyle(.secondary)
+            Text("Drop a logo to extract its colors")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.primary)
+                .multilineTextAlignment(.center)
+            HStack(spacing: 8) {
+                pillButton(title: "Choose…", icon: "folder", action: chooseImage)
+                pillButton(title: "Paste", icon: "doc.on.clipboard", action: pasteImage)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 18)
+        .padding(.horizontal, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.primary.opacity(isDropTargeted ? 0.10 : 0.04))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(
+                    isDropTargeted ? Color.accentColor : Color.secondary.opacity(0.35),
+                    style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])
+                )
+        )
+        .animation(.easeInOut(duration: 0.15), value: isDropTargeted)
+    }
+
+    /// In the notch, hand the image to the spacious floating panel (which renders
+    /// the wheel + variants) instead of trying to cram them into ~200pt. In the
+    /// panel itself, extract inline as usual.
+    private func handleImage(_ img: NSImage) {
+        if compact {
+            ColorPickerManager.shared.openPalette(with: img)
+            ColorPickerPanelManager.shared.showColorPickerPanel()
+        } else {
             setImage(img)
         }
     }
@@ -537,7 +589,7 @@ struct ColorPaletteView: View {
         if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
             provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
                 guard let data, let img = NSImage(data: data) else { return }
-                DispatchQueue.main.async { setImage(img) }
+                DispatchQueue.main.async { handleImage(img) }
             }
             return true
         }
@@ -545,7 +597,7 @@ struct ColorPaletteView: View {
         if provider.canLoadObject(ofClass: URL.self) {
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 guard let url, let img = NSImage(contentsOf: url) else { return }
-                DispatchQueue.main.async { setImage(img) }
+                DispatchQueue.main.async { handleImage(img) }
             }
             return true
         }
@@ -561,7 +613,7 @@ struct ColorPaletteView: View {
         panel.canChooseFiles = true
         panel.prompt = String(localized: "Extract")
         if panel.runModal() == .OK, let url = panel.url, let img = NSImage(contentsOf: url) {
-            setImage(img)
+            handleImage(img)
         }
     }
 
@@ -569,14 +621,14 @@ struct ColorPaletteView: View {
         let pasteboard = NSPasteboard.general
         if let images = pasteboard.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage],
            let img = images.first {
-            setImage(img)
+            handleImage(img)
             return
         }
         if let urls = pasteboard.readObjects(
             forClasses: [NSURL.self],
             options: [.urlReadingContentsConformToTypes: [UTType.image.identifier]]
         ) as? [URL], let url = urls.first, let img = NSImage(contentsOf: url) {
-            setImage(img)
+            handleImage(img)
         }
     }
 }
