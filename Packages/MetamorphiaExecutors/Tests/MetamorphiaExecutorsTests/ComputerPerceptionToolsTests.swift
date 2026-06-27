@@ -11,6 +11,16 @@ import MetamorphiaPerception
 /// headless runs skip them cleanly without failing the suite.
 final class ComputerPerceptionToolsTests: XCTestCase {
 
+    /// Bootstraps the process-global perception runtime before any perception
+    /// test runs; without it the pipeline traps in PerceptionHost and aborts the
+    /// whole test binary. Idempotent and process-global.
+    override class func setUp() {
+        super.setUp()
+        if !PerceptionRuntime.isBootstrapped {
+            PerceptionRuntime.bootstrapForTests()
+        }
+    }
+
     // MARK: - Inventory
 
     /// Single source of truth for "the seven new tools". Tests derive off this.
