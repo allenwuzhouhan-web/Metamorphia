@@ -24,7 +24,7 @@ public struct RunAppleScriptTool: ToolDefinition {
     public func execute(arguments: String) async throws -> String {
         let args = try parseArguments(arguments)
         let script = try requiredString("script", from: args)
-        return try AppleScriptRunner.runThrowing(script)
+        return try await AppleScriptRunner.runThrowing(script)
     }
 }
 

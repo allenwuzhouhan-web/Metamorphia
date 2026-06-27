@@ -323,25 +323,29 @@ public struct EntityExtractor: Sendable {
         }
 
         // --- Pass 3: bigram candidates (adj+noun, noun+noun) -----------------
-        for i in 0..<(tokens.count - 1) {
-            let a = tokens[i]
-            let b = tokens[i + 1]
+        // Guard against fewer than 2 tokens: `tokens.count - 1` underflows to a
+        // negative range and traps when punctuation-only input yields 0 tokens.
+        if tokens.count >= 2 {
+            for i in 0..<(tokens.count - 1) {
+                let a = tokens[i]
+                let b = tokens[i + 1]
 
-            let aIsAdj = a.tag == .adjective
-            let aIsNoun = a.tag == .noun
-            let bIsNoun = b.tag == .noun
+                let aIsAdj = a.tag == .adjective
+                let aIsNoun = a.tag == .noun
+                let bIsNoun = b.tag == .noun
 
-            guard (aIsAdj || aIsNoun) && bIsNoun else { continue }
+                guard (aIsAdj || aIsNoun) && bIsNoun else { continue }
 
-            // Compose: use original case for initialisms, lowercase otherwise.
-            let aKey = Self.isInitialism(a.word) ? a.word : a.lower
-            let bKey = Self.isInitialism(b.word) ? b.word : b.lower
+                // Compose: use original case for initialisms, lowercase otherwise.
+                let aKey = Self.isInitialism(a.word) ? a.word : a.lower
+                let bKey = Self.isInitialism(b.word) ? b.word : b.lower
 
-            // Filter trivial bigrams where both words are stopwords.
-            guard !Self.stopwords.contains(a.lower) || !Self.stopwords.contains(b.lower) else { continue }
+                // Filter trivial bigrams where both words are stopwords.
+                guard !Self.stopwords.contains(a.lower) || !Self.stopwords.contains(b.lower) else { continue }
 
-            let bigram = "\(aKey) \(bKey)"
-            termCounts[bigram, default: 0] += 1
+                let bigram = "\(aKey) \(bKey)"
+                termCounts[bigram, default: 0] += 1
+            }
         }
 
         guard !termCounts.isEmpty else { return [] }

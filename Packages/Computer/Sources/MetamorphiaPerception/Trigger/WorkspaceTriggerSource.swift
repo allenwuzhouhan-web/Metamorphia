@@ -165,4 +165,20 @@ public final class WorkspaceTriggerSource {
 
         started = false
     }
+
+    // MARK: - Deinit
+
+    deinit {
+        // Balance the CG reconfiguration registration so the process-global
+        // callback no longer holds this instance's (now dangling) self pointer.
+        // CGDisplayRemoveReconfigurationCallback matches on the exact
+        // (function pointer, userInfo) pair, so passing the same callback and
+        // self pointer removes precisely this instance's registration.
+        if didRegisterCGCallback {
+            CGDisplayRemoveReconfigurationCallback(
+                cgReconfigCallback,
+                Unmanaged.passUnretained(self).toOpaque()
+            )
+        }
+    }
 }

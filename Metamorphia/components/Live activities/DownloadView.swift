@@ -43,25 +43,30 @@ struct DownloadArea: View {
     @EnvironmentObject var watcher: DownloadWatcher
 
     var body: some View {
-        HStack(alignment: .center) {
-            HStack {
-                if watcher.downloadFiles.first!.browser == .safari {
-                    AppIcon(for: "com.apple.safari")
-                } else {
-                    Image(.chrome).resizable().scaledToFit().frame(width: 30, height: 30)
-                }
-                VStack(alignment: .leading) {
-                    Text("Download")
-                    Text("In progress").font(.system(.footnote)).foregroundStyle(.gray)
-                }
-            }
-            Spacer()
-            HStack(spacing: 12) {
-                VStack(alignment: .trailing) {
-                    Text(watcher.downloadFiles.first!.formattedSize)
-                    Text(watcher.downloadFiles.first!.name).font(.caption2).foregroundStyle(.gray)
-                }
-            }
+        guard let file = watcher.downloadFiles.first else {
+            return AnyView(EmptyView())
         }
+        return AnyView(
+            HStack(alignment: .center) {
+                HStack {
+                    if file.browser == .safari {
+                        AppIcon(for: "com.apple.safari")
+                    } else {
+                        Image(.chrome).resizable().scaledToFit().frame(width: 30, height: 30)
+                    }
+                    VStack(alignment: .leading) {
+                        Text("Download")
+                        Text("In progress").font(.system(.footnote)).foregroundStyle(.gray)
+                    }
+                }
+                Spacer()
+                HStack(spacing: 12) {
+                    VStack(alignment: .trailing) {
+                        Text(file.formattedSize)
+                        Text(file.name).font(.caption2).foregroundStyle(.gray)
+                    }
+                }
+            }
+        )
     }
 }

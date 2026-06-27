@@ -256,7 +256,7 @@ public final class DefaultComputerPerception: ComputerPerception, @unchecked Sen
         // the pipeline's VisualDiffState. Fall back to a fresh captureDisplay
         // if nothing was retained (e.g. permission denied or first-ever call
         // in this process).
-        let cgImage: CGImage = await {
+        let cgImage: CGImage? = await {
             if let retained = await pipeline.visualDiffState.fetch(displayIndex: mainDisplayIndex) {
                 return retained.value
             }
@@ -264,8 +264,12 @@ public final class DefaultComputerPerception: ComputerPerception, @unchecked Sen
                 return fresh
             }
             // Last-resort: main-display capture.
-            return ScreenCapture.captureMainDisplay()!
+            return ScreenCapture.captureMainDisplay()
         }()
+
+        // No image available (e.g. capture failed / permission revoked).
+        // Bail gracefully — consistent with the no-previous-map case above.
+        guard let cgImage else { return nil }
 
         return VisionDiffer.diff(
             previous: previous,

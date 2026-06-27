@@ -77,7 +77,8 @@ public enum MenuBarReader {
         let app = AXUIElementCreateApplication(pid)
         var menuBarRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXMenuBarAttribute as CFString, &menuBarRef) == .success,
-              let menuBarValue = menuBarRef else {
+              let menuBarValue = menuBarRef,
+              CFGetTypeID(menuBarValue) == AXUIElementGetTypeID() else {
             return []
         }
         let menuBar = menuBarValue as! AXUIElement
@@ -108,7 +109,8 @@ public enum MenuBarReader {
         let app = AXUIElementCreateApplication(pid)
         var menuBarRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXMenuBarAttribute as CFString, &menuBarRef) == .success,
-              let menuBarValue = menuBarRef else {
+              let menuBarValue = menuBarRef,
+              CFGetTypeID(menuBarValue) == AXUIElementGetTypeID() else {
             return false
         }
         let menuBar = menuBarValue as! AXUIElement

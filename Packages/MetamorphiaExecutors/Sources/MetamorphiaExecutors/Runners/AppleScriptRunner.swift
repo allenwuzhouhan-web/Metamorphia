@@ -13,32 +13,40 @@ public enum AppleScriptRunner {
     }
 
     /// Runs an AppleScript expression and returns the result string, or nil on failure.
+    /// `NSAppleScript` must execute on the main thread, so the work is marshalled
+    /// onto the main actor.
     @discardableResult
-    public static func run(_ source: String) -> String? {
-        let script = NSAppleScript(source: source)
-        var error: NSDictionary?
-        let result = script?.executeAndReturnError(&error)
-        if let error = error {
-            let message = error[NSAppleScript.errorMessage] as? String ?? "Unknown error"
-            print("[AppleScript Error] \(message)")
-            return nil
+    public static func run(_ source: String) async -> String? {
+        await MainActor.run {
+            let script = NSAppleScript(source: source)
+            var error: NSDictionary?
+            let result = script?.executeAndReturnError(&error)
+            if let error = error {
+                let message = error[NSAppleScript.errorMessage] as? String ?? "Unknown error"
+                print("[AppleScript Error] \(message)")
+                return nil
+            }
+            return result?.stringValue
         }
-        return result?.stringValue
     }
 
     /// Runs an AppleScript expression, throwing on error.
-    public static func runThrowing(_ source: String) throws -> String {
-        let script = NSAppleScript(source: source)
-        var error: NSDictionary?
-        let result = script?.executeAndReturnError(&error)
-        if let error = error {
-            let message = error[NSAppleScript.errorMessage] as? String ?? "Unknown AppleScript error"
-            throw ExecutorRunnerError.appleScriptFailed(message)
+    /// `NSAppleScript` must execute on the main thread, so the work is marshalled
+    /// onto the main actor.
+    public static func runThrowing(_ source: String) async throws -> String {
+        try await MainActor.run {
+            let script = NSAppleScript(source: source)
+            var error: NSDictionary?
+            let result = script?.executeAndReturnError(&error)
+            if let error = error {
+                let message = error[NSAppleScript.errorMessage] as? String ?? "Unknown AppleScript error"
+                throw ExecutorRunnerError.appleScriptFailed(message)
+            }
+            if let value = result?.stringValue, !value.isEmpty {
+                return value
+            }
+            return "ok (script executed with no return value)"
         }
-        if let value = result?.stringValue, !value.isEmpty {
-            return value
-        }
-        return "ok (script executed with no return value)"
     }
 }
 

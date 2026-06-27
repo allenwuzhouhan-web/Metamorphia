@@ -92,7 +92,7 @@ public struct QuitAppTool: ToolDefinition {
 
         let script = "tell application \"\(AppleScriptRunner.escape(name))\" to quit"
         do {
-            _ = try AppleScriptRunner.runThrowing(script)
+            _ = try await AppleScriptRunner.runThrowing(script)
             return "Asked '\(name)' to quit."
         } catch {
             return "Error quitting '\(name)': \(error.localizedDescription)"

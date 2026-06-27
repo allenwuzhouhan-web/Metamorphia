@@ -44,17 +44,19 @@ enum AXAttributes {
 
     static func getPosition(_ element: AXUIElement) -> CGPoint? {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &value) == .success else { return nil }
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &value) == .success,
+              let v = value, CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
         var point = CGPoint.zero
-        AXValueGetValue(value as! AXValue, .cgPoint, &point)
+        AXValueGetValue(v as! AXValue, .cgPoint, &point)
         return point
     }
 
     static func getSize(_ element: AXUIElement) -> CGSize? {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &value) == .success else { return nil }
+        guard AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &value) == .success,
+              let v = value, CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
         var size = CGSize.zero
-        AXValueGetValue(value as! AXValue, .cgSize, &size)
+        AXValueGetValue(v as! AXValue, .cgSize, &size)
         return size
     }
 
@@ -103,8 +105,9 @@ enum AXAttributes {
 
     static func getFocusedWindow(_ appElement: AXUIElement) -> AXUIElement? {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &value) == .success else { return nil }
-        return (value as! AXUIElement)
+        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &value) == .success,
+              let v = value, CFGetTypeID(v) == AXUIElementGetTypeID() else { return nil }
+        return (v as! AXUIElement)
     }
 
     // MARK: - State Builder

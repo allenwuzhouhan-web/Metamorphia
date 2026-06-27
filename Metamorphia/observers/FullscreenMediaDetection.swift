@@ -26,16 +26,16 @@ import SwiftUI
 
 class FullscreenMediaDetector: ObservableObject {
     static let shared = FullscreenMediaDetector()
-    private let detector: MacroVisionKit
+    // MacroVisionKit 0.2.0 exposes the detector as the `FullScreenMonitor` actor.
+    private let detector: FullScreenMonitor
     @ObservedObject private var musicManager = MusicManager.shared
     @MainActor @Published private(set) var fullscreenStatus: [String: Bool] = [:]
     private var notificationTask: Task<Void, Never>?
 
     private init() {
-        self.detector = MacroVisionKit.shared
-        detector.configuration.includeSystemApps = true
+        self.detector = FullScreenMonitor.shared
         setupNotificationObservers()
-        updateFullScreenStatus()
+        Task { [weak self] in await self?.updateFullScreenStatus() }
     }
 
     private func setupNotificationObservers() {
@@ -45,17 +45,17 @@ class FullscreenMediaDetector: ObservableObject {
                     let activeSpaceNotifications = NSWorkspace.shared.notificationCenter.notifications(
                         named: NSWorkspace.activeSpaceDidChangeNotification
                     )
-                    
+
                     for await _ in activeSpaceNotifications {
                         await self?.handleChange()
                     }
                 }
-                
+
                 group.addTask {
                     let screenParameterNotifications = NSWorkspace.shared.notificationCenter.notifications(
                         named:  NSApplication.didChangeScreenParametersNotification
                     )
-                    
+
                     for await _ in screenParameterNotifications {
                         await  self?.handleChange()
                     }
@@ -66,29 +66,49 @@ class FullscreenMediaDetector: ObservableObject {
 
     private func handleChange() async {
         try? await Task.sleep(for: .milliseconds(500))
-        self.updateFullScreenStatus()
+        await updateFullScreenStatus()
     }
 
-    private func updateFullScreenStatus() {
+    private func updateFullScreenStatus() async {
+        let screenNames = await MainActor.run { NSScreen.screens.map { $0.localizedName } }
+
         guard Defaults[.enableFullscreenMediaDetection] else {
-            let reset = Dictionary(uniqueKeysWithValues: NSScreen.screens.map { ($0.localizedName, false) })
-            if reset != fullscreenStatus {
-                fullscreenStatus = reset
+            let reset = Dictionary(uniqueKeysWithValues: screenNames.map { ($0, false) })
+            await MainActor.run {
+                if reset != self.fullscreenStatus {
+                    self.fullscreenStatus = reset
+                }
             }
             return
         }
-        
 
-        let apps = detector.detectFullscreenApps(debug: false)
-        let names = NSScreen.screens.map { $0.localizedName }
-        var newStatus: [String: Bool] = [:]
-        for name in names {
-            newStatus[name] = apps.contains { $0.screen.localizedName == name && $0.bundleIdentifier != "com.apple.finder" && ($0.bundleIdentifier == musicManager.bundleIdentifier || Defaults[.hideNotchOption] == .always) }
+        // SpaceInfo carries the fullscreen apps' bundle IDs + the display UUID; the
+        // monitor resolves the UUID back to an NSScreen on the main actor.
+        let spaces = await detector.detectFullscreenApps(debug: false)
+        let hideAlways = Defaults[.hideNotchOption] == .always
+        let musicBundleID = await MainActor.run { self.musicManager.bundleIdentifier }
+
+        var fullscreenScreenNames: Set<String> = []
+        for space in spaces {
+            guard let screenName = await detector.screen(for: space)?.localizedName else { continue }
+            let qualifies = space.runningApps.contains { bundleID in
+                bundleID != "com.apple.finder" && (bundleID == musicBundleID || hideAlways)
+            }
+            if qualifies { fullscreenScreenNames.insert(screenName) }
         }
 
-        if newStatus != fullscreenStatus {
-            fullscreenStatus = newStatus
-            NSLog("✅ Fullscreen status: \(newStatus)")
+        var newStatus: [String: Bool] = [:]
+        for name in screenNames {
+            newStatus[name] = fullscreenScreenNames.contains(name)
+        }
+
+        await MainActor.run {
+            if newStatus != self.fullscreenStatus {
+                self.fullscreenStatus = newStatus
+                #if DEBUG
+                NSLog("✅ Fullscreen status: \(newStatus)")
+                #endif
+            }
         }
     }
 

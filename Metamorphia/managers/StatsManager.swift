@@ -992,7 +992,7 @@ class StatsManager: ObservableObject {
         var usages: [CPUCoreUsage] = []
         usages.reserveCapacity(cpuCount)
         let cpuStateMax = Int(CPU_STATE_MAX)
-        if let previousCpuInfo {
+        if let previousCpuInfo, numCpuInfo == previousCpuInfoCount {
             for cpu in 0..<cpuCount {
                 let base = cpu * cpuStateMax
                 let user = cpuInfo[base + Int(CPU_STATE_USER)] - previousCpuInfo[base + Int(CPU_STATE_USER)]

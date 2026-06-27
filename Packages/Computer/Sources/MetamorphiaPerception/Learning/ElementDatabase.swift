@@ -1,6 +1,11 @@
 import Foundation
 import SQLite3
 
+/// Tells SQLite to copy bound bytes immediately, so no caller-side buffer
+/// lifetime is relied upon (SQLITE_STATIC would trust the pointer to outlive
+/// the bind call, which a temporary String/NSString buffer does not).
+private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
 /// Persistent SQLite database for learned element identities, corrections, workflows, and app profiles.
 /// Raw SQLite3 C API, WAL mode, M-series optimizations, DispatchQueue serialization.
 ///
@@ -590,12 +595,12 @@ public final class ElementDatabase: @unchecked Sendable {
     // MARK: - SQLite Helpers
 
     private func bindText(_ stmt: OpaquePointer?, _ index: Int32, _ value: String) {
-        sqlite3_bind_text(stmt, index, (value as NSString).utf8String, -1, nil)
+        value.withCString { sqlite3_bind_text(stmt, index, $0, -1, SQLITE_TRANSIENT) }
     }
 
     private func bindTextOrNull(_ stmt: OpaquePointer?, _ index: Int32, _ value: String?) {
         if let v = value {
-            sqlite3_bind_text(stmt, index, (v as NSString).utf8String, -1, nil)
+            v.withCString { sqlite3_bind_text(stmt, index, $0, -1, SQLITE_TRANSIENT) }
         } else {
             sqlite3_bind_null(stmt, index)
         }

@@ -103,7 +103,7 @@ public struct FileOperationTool: ToolDefinition {
                 end if
             end tell
             """
-            return try AppleScriptRunner.runThrowing(script)
+            return try await AppleScriptRunner.runThrowing(script)
 
         default:
             throw MetamorphiaError.invalidArguments("unknown file action: \(action)")
