@@ -207,14 +207,20 @@ private func sampleBins(from image: NSImage) -> (bins: [ColorBin], total: Double
     var i = 0
     while i < total {
         let a = px[i + 3]
-        if a >= 128 {   // skip transparent canvas — not a color
+        if a >= 8 {   // skip only the (near-)fully-transparent canvas
             let af = Double(a) / 255.0
+            // Un-premultiply to recover the pixel's TRUE color, then weight its
+            // contribution by alpha — so a uniformly semi-transparent image still
+            // reads its real colors, while anti-aliased edges don't dominate.
             let r = min(255.0, Double(px[i])     / af)
             let g = min(255.0, Double(px[i + 1]) / af)
             let b = min(255.0, Double(px[i + 2]) / af)
             let key = ((Int(r) >> 2) << 12) | ((Int(g) >> 2) << 6) | (Int(b) >> 2)
-            if var e = table[key] { e.r += r; e.g += g; e.b += b; e.c += 1; table[key] = e }
-            else { table[key] = (r, g, b, 1) }
+            if var e = table[key] {
+                e.r += r * af; e.g += g * af; e.b += b * af; e.c += af; table[key] = e
+            } else {
+                table[key] = (r * af, g * af, b * af, af)
+            }
         }
         i += 4
     }
