@@ -2333,17 +2333,16 @@ enum PowerPointCopilot {
                 return ""
             }
         }()
-        let shapeBlocks = (1...maxDirectEditShapeSlots).map { shapeIndex in
-            """
-                if shapeCount >= \(shapeIndex) then
+        let shapeBlocks = """
+            repeat with shapeIndex from 1 to shapeCount
                     try
-                        set textRef to text range of text frame of shape \(shapeIndex) of slideRef
+                        set textRef to text range of text frame of shape shapeIndex of slideRef
                         set shapeText to content of textRef
                         if shapeText is not "" then
                             set fontRef to font of textRef
                             set shapeName to ""
                             try
-                                set shapeName to name of shape \(shapeIndex) of slideRef
+                                set shapeName to name of shape shapeIndex of slideRef
                             end try
                             set fontNameValue to ""
                             set fontSizeValue to "null"
@@ -2376,7 +2375,7 @@ enum PowerPointCopilot {
                             end try
                             if snapshotItems is not "" then set snapshotItems to snapshotItems & ","
                             set snapshotItems to snapshotItems & "{"
-                            set snapshotItems to snapshotItems & q & "shapeIndex" & q & ":" & \(shapeIndex) & ","
+                            set snapshotItems to snapshotItems & q & "shapeIndex" & q & ":" & shapeIndex & ","
                             set snapshotItems to snapshotItems & q & "shapeName" & q & ":" & q & my jsonEscape(shapeName) & q & ","
                             set snapshotItems to snapshotItems & q & "text" & q & ":" & q & my jsonEscape(shapeText) & q & ","
                             set snapshotItems to snapshotItems & q & "fontName" & q & ":" & q & my jsonEscape(fontNameValue) & q & ","
@@ -2388,21 +2387,20 @@ enum PowerPointCopilot {
                             set snapshotItems to snapshotItems & q & "fontColor" & q & ":" & colorValueJSON
                             set snapshotItems to snapshotItems & "}"
                             \(applyLine)
-                            set appliedItems to my appendIndex(appliedItems, \(shapeIndex))
+                            set appliedItems to my appendIndex(appliedItems, shapeIndex)
                         else
-                            set skippedItems to my appendIndex(skippedItems, \(shapeIndex))
+                            set skippedItems to my appendIndex(skippedItems, shapeIndex)
                         end if
                     on error errMsg number errNum
-                        set skippedItems to my appendIndex(skippedItems, \(shapeIndex))
+                        set skippedItems to my appendIndex(skippedItems, shapeIndex)
                         if errorCount < 5 then
                             if errorItems is not "" then set errorItems to errorItems & ","
-                            set errorItems to errorItems & q & "#" & \(shapeIndex) & " " & errNum & ": " & my jsonEscape(errMsg) & q
+                            set errorItems to errorItems & q & "#" & shapeIndex & " " & errNum & ": " & my jsonEscape(errMsg) & q
                             set errorCount to errorCount + 1
                         end if
                     end try
-                end if
-            """
-        }.joined(separator: "\n")
+            end repeat
+        """
 
         return """
         on replaceText(findText, replacementText, sourceText)
@@ -2902,59 +2900,89 @@ enum PowerPointCopilot {
             .joined(separator: " & linefeed & ")
     }
 
-    private static var deckCaptureScript: String {
-        let shapeBlocks = (1...maxDirectEditShapeSlots).map { shapeIndex in
-            """
-                    if shapeCount >= \(shapeIndex) then
+    /// One bounded loop over a slide's shapes, building the shape JSON. Replaces a
+    /// 200x-unrolled block that produced a ~9,600-line script and crashed the OSA
+    /// engine (SIGBUS). Uses proper PowerPoint geometry properties, not raw codes.
+    private static let shapeCaptureLoop = """
+            repeat with shapeIndex from 1 to shapeCount
+                try
+                    set shp to shape shapeIndex of slideRef
+                    set shapeText to ""
+                    try
+                        set shapeText to content of text range of text frame of shp
+                    end try
+                    if shapeText is not "" then
+                        set shapeName to ""
+                        set fontNameValue to ""
+                        set fontSizeValue to "null"
+                        set boldValue to "null"
+                        set italicValue to "null"
+                        set underlineValue to "null"
+                        set alignmentValue to "null"
+                        set colorValueJSON to "null"
+                        set leftValue to "0"
+                        set topValue to "0"
+                        set widthValue to "0"
+                        set heightValue to "0"
                         try
-                            set shp to shape \(shapeIndex) of slideRef
-                            set textRef to text range of text frame of shp
-                            set shapeText to content of textRef
-                            if shapeText is not "" then
-                                set shapeName to ""
-                                set fontNameValue to ""
-                                set fontSizeValue to "null"
-                                set boldValue to "null"
-                                set italicValue to "null"
-                                set underlineValue to "null"
-                                set alignmentValue to "null"
-                                set colorValueJSON to "null"
-                                try
-                                    set shapeName to name of shp
-                                end try
-                                try
-                                    set fontRef to font of textRef
-                                    set fontNameValue to name of fontRef
-                                    set fontSizeValue to font size of fontRef as text
-                                    set boldValue to my jsonBool(bold of fontRef)
-                                    set italicValue to my jsonBool(italic of fontRef)
-                                    set underlineValue to my jsonBool(underline of fontRef)
-                                    set alignmentValue to alignment of paragraph format of textRef as integer as text
-                                    set fontColorValue to font color of fontRef
-                                    set colorValueJSON to "[" & (item 1 of fontColorValue) & "," & (item 2 of fontColorValue) & "," & (item 3 of fontColorValue) & "]"
-                                end try
-                                if shapeJSON is not "" then set shapeJSON to shapeJSON & ","
-                                set shapeJSON to shapeJSON & "{"
-                                set shapeJSON to shapeJSON & q & "index" & q & ":" & \(shapeIndex) & ","
-                                set shapeJSON to shapeJSON & q & "name" & q & ":" & q & my jsonEscape(shapeName) & q & ","
-                                set shapeJSON to shapeJSON & q & "text" & q & ":" & q & my jsonEscape(shapeText) & q & ","
-                                set shapeJSON to shapeJSON & q & "left" & q & ":" & («property plft» of shp) & ","
-                                set shapeJSON to shapeJSON & q & "top" & q & ":" & («property ptop» of shp) & ","
-                                set shapeJSON to shapeJSON & q & "width" & q & ":" & («property pwid» of shp) & ","
-                                set shapeJSON to shapeJSON & q & "height" & q & ":" & («property hght» of shp) & ","
-                                set shapeJSON to shapeJSON & q & "fontName" & q & ":" & q & my jsonEscape(fontNameValue) & q & ","
-                                set shapeJSON to shapeJSON & q & "fontSize" & q & ":" & fontSizeValue & ","
-                                set shapeJSON to shapeJSON & q & "bold" & q & ":" & boldValue & ","
-                                set shapeJSON to shapeJSON & q & "italic" & q & ":" & italicValue & ","
-                                set shapeJSON to shapeJSON & q & "underline" & q & ":" & underlineValue & ","
-                                set shapeJSON to shapeJSON & q & "alignment" & q & ":" & alignmentValue & ","
-                                set shapeJSON to shapeJSON & q & "fontColor" & q & ":" & colorValueJSON
-                                set shapeJSON to shapeJSON & "}"
-                            end if
+                            set shapeName to name of shp
                         end try
+                        try
+                            set leftValue to (left position of shp) as text
+                            set topValue to (top of shp) as text
+                            set widthValue to (width of shp) as text
+                            set heightValue to (height of shp) as text
+                        end try
+                        try
+                            set textRef to text range of text frame of shp
+                            set fontRef to font of textRef
+                            try
+                                set fontNameValue to name of fontRef
+                            end try
+                            try
+                                set fontSizeValue to (font size of fontRef) as text
+                            end try
+                            try
+                                set boldValue to my jsonBool(bold of fontRef)
+                            end try
+                            try
+                                set italicValue to my jsonBool(italic of fontRef)
+                            end try
+                            try
+                                set underlineValue to my jsonBool(underline of fontRef)
+                            end try
+                            try
+                                set alignmentValue to (alignment of paragraph format of textRef as integer) as text
+                            end try
+                            try
+                                set fontColorValue to font color of fontRef
+                                set colorValueJSON to "[" & (item 1 of fontColorValue) & "," & (item 2 of fontColorValue) & "," & (item 3 of fontColorValue) & "]"
+                            end try
+                        end try
+                        if shapeJSON is not "" then set shapeJSON to shapeJSON & ","
+                        set shapeJSON to shapeJSON & "{"
+                        set shapeJSON to shapeJSON & q & "index" & q & ":" & shapeIndex & ","
+                        set shapeJSON to shapeJSON & q & "name" & q & ":" & q & my jsonEscape(shapeName) & q & ","
+                        set shapeJSON to shapeJSON & q & "text" & q & ":" & q & my jsonEscape(shapeText) & q & ","
+                        set shapeJSON to shapeJSON & q & "left" & q & ":" & leftValue & ","
+                        set shapeJSON to shapeJSON & q & "top" & q & ":" & topValue & ","
+                        set shapeJSON to shapeJSON & q & "width" & q & ":" & widthValue & ","
+                        set shapeJSON to shapeJSON & q & "height" & q & ":" & heightValue & ","
+                        set shapeJSON to shapeJSON & q & "fontName" & q & ":" & q & my jsonEscape(fontNameValue) & q & ","
+                        set shapeJSON to shapeJSON & q & "fontSize" & q & ":" & fontSizeValue & ","
+                        set shapeJSON to shapeJSON & q & "bold" & q & ":" & boldValue & ","
+                        set shapeJSON to shapeJSON & q & "italic" & q & ":" & italicValue & ","
+                        set shapeJSON to shapeJSON & q & "underline" & q & ":" & underlineValue & ","
+                        set shapeJSON to shapeJSON & q & "alignment" & q & ":" & alignmentValue & ","
+                        set shapeJSON to shapeJSON & q & "fontColor" & q & ":" & colorValueJSON
+                        set shapeJSON to shapeJSON & "}"
                     end if
-            """
-        }.joined(separator: "\n")
+                end try
+            end repeat
+    """
+
+    private static var deckCaptureScript: String {
+        let shapeBlocks = shapeCaptureLoop
 
         return """
         on replaceText(findText, replacementText, sourceText)
@@ -3001,7 +3029,12 @@ enum PowerPointCopilot {
             set presName to name of presRef
             set presPath to ""
             try
-                set presPath to POSIX path of (full name of presRef as alias)
+                set rawPath to (full name of presRef) as text
+            if rawPath starts with "/" then
+                set presPath to rawPath
+            else
+                set presPath to POSIX path of rawPath
+            end if
             end try
             set activeSlideIndex to 1
             try
@@ -3036,58 +3069,7 @@ enum PowerPointCopilot {
     }
 
     private static var currentSlideCaptureScript: String {
-        let shapeBlocks = (1...maxDirectEditShapeSlots).map { shapeIndex in
-            """
-                if shapeCount >= \(shapeIndex) then
-                    try
-                        set shp to shape \(shapeIndex) of slideRef
-                        set textRef to text range of text frame of shp
-                        set shapeText to content of textRef
-                        if shapeText is not "" then
-                            set shapeName to ""
-                            set fontNameValue to ""
-                            set fontSizeValue to "null"
-                            set boldValue to "null"
-                            set italicValue to "null"
-                            set underlineValue to "null"
-                            set alignmentValue to "null"
-                            set colorValueJSON to "null"
-                            try
-                                set shapeName to name of shp
-                            end try
-                            try
-                                set fontRef to font of textRef
-                                set fontNameValue to name of fontRef
-                                set fontSizeValue to font size of fontRef as text
-                                set boldValue to my jsonBool(bold of fontRef)
-                                set italicValue to my jsonBool(italic of fontRef)
-                                set underlineValue to my jsonBool(underline of fontRef)
-                                set alignmentValue to alignment of paragraph format of textRef as integer as text
-                                set fontColorValue to font color of fontRef
-                                set colorValueJSON to "[" & (item 1 of fontColorValue) & "," & (item 2 of fontColorValue) & "," & (item 3 of fontColorValue) & "]"
-                            end try
-                            if shapeJSON is not "" then set shapeJSON to shapeJSON & ","
-                            set shapeJSON to shapeJSON & "{"
-                            set shapeJSON to shapeJSON & q & "index" & q & ":" & \(shapeIndex) & ","
-                            set shapeJSON to shapeJSON & q & "name" & q & ":" & q & my jsonEscape(shapeName) & q & ","
-                            set shapeJSON to shapeJSON & q & "text" & q & ":" & q & my jsonEscape(shapeText) & q & ","
-                            set shapeJSON to shapeJSON & q & "left" & q & ":" & («property plft» of shp) & ","
-                            set shapeJSON to shapeJSON & q & "top" & q & ":" & («property ptop» of shp) & ","
-                            set shapeJSON to shapeJSON & q & "width" & q & ":" & («property pwid» of shp) & ","
-                            set shapeJSON to shapeJSON & q & "height" & q & ":" & («property hght» of shp) & ","
-                            set shapeJSON to shapeJSON & q & "fontName" & q & ":" & q & my jsonEscape(fontNameValue) & q & ","
-                            set shapeJSON to shapeJSON & q & "fontSize" & q & ":" & fontSizeValue & ","
-                            set shapeJSON to shapeJSON & q & "bold" & q & ":" & boldValue & ","
-                            set shapeJSON to shapeJSON & q & "italic" & q & ":" & italicValue & ","
-                            set shapeJSON to shapeJSON & q & "underline" & q & ":" & underlineValue & ","
-                            set shapeJSON to shapeJSON & q & "alignment" & q & ":" & alignmentValue & ","
-                            set shapeJSON to shapeJSON & q & "fontColor" & q & ":" & colorValueJSON
-                            set shapeJSON to shapeJSON & "}"
-                        end if
-                    end try
-                end if
-            """
-        }.joined(separator: "\n")
+        let shapeBlocks = shapeCaptureLoop
 
         return """
         on replaceText(findText, replacementText, sourceText)
@@ -3134,7 +3116,12 @@ enum PowerPointCopilot {
             set presName to name of presRef
             set presPath to ""
             try
-                set presPath to POSIX path of (full name of presRef as alias)
+                set rawPath to (full name of presRef) as text
+            if rawPath starts with "/" then
+                set presPath to rawPath
+            else
+                set presPath to POSIX path of rawPath
+            end if
             end try
 
             set slideIdx to 0
