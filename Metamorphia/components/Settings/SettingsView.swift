@@ -7301,6 +7301,7 @@ struct ColorPickerSettings: View {
     @Default(.colorPickerDisplayMode) var colorPickerDisplayMode
     @Default(.colorHistorySize) var colorHistorySize
     @Default(.showColorPickerIcon) var showColorPickerIcon
+    @Default(.paletteColorCount) var paletteColorCount
 
     private func highlightID(_ title: String) -> String {
         SettingsTab.colorPicker.highlightID(for: title)
@@ -7367,6 +7368,31 @@ struct ColorPickerSettings: View {
                     case .panel:
                         Text("Panel mode shows color picker in a floating window. Popover mode shows color picker as a dropdown attached to the color picker button.")
                     }
+                }
+
+                Section {
+                    HStack {
+                        Text("Colors to Extract")
+                        Spacer()
+                        Picker("", selection: $paletteColorCount) {
+                            ForEach(3...10, id: \.self) { count in
+                                Text("\(count) colors").tag(count)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(minWidth: 100)
+                    }
+                    .settingsHighlight(id: highlightID("Colors to Extract"))
+
+                    Button("Open Logo Palette") {
+                        colorPickerManager.activeSection = .palette
+                        ColorPickerPanelManager.shared.showColorPickerPanel()
+                    }
+                    .disabled(!enableColorPickerFeature)
+                } header: {
+                    Text("Logo Palette")
+                } footer: {
+                    Text("Drop a logo or image into the Palette tab to pull out its major colors and see them arranged on a color wheel.")
                 }
 
                 Section {

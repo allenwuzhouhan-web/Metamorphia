@@ -53,16 +53,20 @@ struct NotchColorPickerView: View {
     }
     
     private var colorPickerContent: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 14) {
             headerSection
-            
-            if colorPickerManager.colorHistory.isEmpty {
+
+            sectionPicker
+
+            if colorPickerManager.activeSection == .palette {
+                ColorPaletteView(wheelDiameter: 200)
+            } else if colorPickerManager.colorHistory.isEmpty {
                 emptyStateView
             } else {
                 colorHistoryGrid
             }
-            
-            Spacer()
+
+            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(
@@ -70,49 +74,65 @@ struct NotchColorPickerView: View {
             alignment: .topTrailing
         )
     }
+
+    private var sectionPicker: some View {
+        Picker("", selection: $colorPickerManager.activeSection) {
+            ForEach(ColorPickerSection.allCases, id: \.self) { section in
+                Text(section.title).tag(section)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+    }
     
+    private var isPalette: Bool { colorPickerManager.activeSection == .palette }
+
     private var headerSection: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
-                    Image(systemName: "eyedropper.halffull")
+                    Image(systemName: isPalette ? "paintpalette.fill" : "eyedropper.halffull")
                         .font(.system(size: 16, weight: .medium))
                         .foregroundColor(.primary)
-                    
-                    Text("Recent Colors")
+
+                    Text(isPalette ? "Logo Palette" : "Recent Colors")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(.primary)
                 }
-                
-                Text("\(colorPickerManager.colorHistory.count) colors")
+
+                Text(isPalette
+                     ? String(localized: "Pull the major colors from an image")
+                     : String(localized: "\(colorPickerManager.colorHistory.count) colors"))
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
             }
-            
+
             Spacer()
-            
-            // Pick Color Button
-            Button(action: {
-                colorPickerManager.startColorPicking()
-            }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.system(size: 12, weight: .medium))
-                    Text("Pick Color")
-                        .font(.system(size: 12, weight: .medium))
+
+            // Pick Color Button (screen eyedropper — only meaningful for history)
+            if !isPalette {
+                Button(action: {
+                    colorPickerManager.startColorPicking()
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 12, weight: .medium))
+                        Text("Pick Color")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.blue)
+                    .cornerRadius(8)
                 }
-                .foregroundColor(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Color.blue)
-                .cornerRadius(8)
-            }
-            .buttonStyle(PlainButtonStyle())
-            .onHover { isHovering in
-                if isHovering {
-                    NSCursor.pointingHand.push()
-                } else {
-                    NSCursor.pop()
+                .buttonStyle(PlainButtonStyle())
+                .onHover { isHovering in
+                    if isHovering {
+                        NSCursor.pointingHand.push()
+                    } else {
+                        NSCursor.pop()
+                    }
                 }
             }
         }

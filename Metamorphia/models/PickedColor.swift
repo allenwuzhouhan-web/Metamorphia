@@ -88,6 +88,12 @@ struct PickedColor: Identifiable, Codable, Hashable, Defaults.Serializable {
         return String(format: "UIColor(red: %.3f, green: %.3f, blue: %.3f, alpha: %.3f)", red, green, blue, alpha)
     }
     
+    /// Hue (0–360°), saturation and value (0–1). Used to place the color on the wheel.
+    var hsv: (hue: Double, saturation: Double, value: Double) {
+        let c = rgbToHsv(red: red, green: green, blue: blue)
+        return (hue: c.h, saturation: c.s, value: c.v)
+    }
+
     var allFormats: [ColorFormat] {
         return [
             ColorFormat(name: "HEX", value: hexString, copyValue: hexString),

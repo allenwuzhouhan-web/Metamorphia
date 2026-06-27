@@ -128,7 +128,7 @@ class ColorPickerPanel: NSPanel {
         contentView = hostingView
         
         // Set initial size
-        let preferredSize = CGSize(width: 450, height: 600)
+        let preferredSize = CGSize(width: 460, height: 640)
         hostingView.setFrameSize(preferredSize)
         setContentSize(preferredSize)
     }
@@ -209,11 +209,20 @@ struct ColorPickerPanelView: View {
     var body: some View {
         VStack(spacing: 0) {
             headerSection
-            
+
+            sectionPicker
+
             Divider()
                 .background(Color.gray.opacity(0.3))
-            
-            contentSection
+
+            if colorPickerManager.activeSection == .palette {
+                ScrollView {
+                    ColorPaletteView(wheelDiameter: 240)
+                        .padding(16)
+                }
+            } else {
+                contentSection
+            }
         }
         .background(ColorPickerVisualEffectView(material: .hudWindow, blendingMode: .behindWindow))
         .cornerRadius(12)
@@ -229,6 +238,18 @@ struct ColorPickerPanelView: View {
         }
     }
     
+    private var sectionPicker: some View {
+        Picker("", selection: $colorPickerManager.activeSection) {
+            ForEach(ColorPickerSection.allCases, id: \.self) { section in
+                Text(section.title).tag(section)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .padding(.horizontal, 16)
+        .padding(.bottom, 12)
+    }
+
     private var headerSection: some View {
         VStack(spacing: 12) {
             // Title and controls
