@@ -1,186 +1,274 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
-/// A live regex tester sized for the floating notch panel.
+/// A two-mode text-pattern tool for the notch.
 ///
-/// Pattern field + flag toggles + a multi-line test editor. As you type,
-/// every match is highlighted in the test string, the count is shown, and
-/// the capture groups of the selected match are listed. Invalid patterns
-/// surface a red inline error and never crash (NSRegularExpression's throw
-/// is caught and rendered, not force-unwrapped).
+/// **Find** is dead-simple literal lookup — a word or phrase, optionally whole-word.
+/// **Patterns** is a searchable library of pre-built linguistic / entity patterns grouped
+/// by topic → subtopic. Stack several (e.g. `/preposition + /verb`) and every match of any
+/// of them lights up, each in its own colour. Regexes are compiled once and cached, and
+/// matches recompute only when the text or the selection changes — so it stays fast.
 @MainActor public struct RegexScratchpadView: View {
-    @State private var pattern: String = "(\\w+)@(\\w+)"
-    @State private var testString: String = "Reach me at ada@analytic or grace@navy."
+    private enum Mode: String { case find, patterns }
 
-    @State private var caseInsensitive = true
-    @State private var multiline = false
-    @State private var dotMatchesNewline = false
+    @AppStorage("regexScratchMode") private var modeRaw = Mode.patterns.rawValue
+    @AppStorage("regexScratchText") private var text = RegexScratchpadView.sampleText
+    @AppStorage("regexScratchStack") private var stackRaw = "preposition"
+    @AppStorage("regexFindQuery") private var findQuery = ""
+    @AppStorage("regexFindWholeWord") private var wholeWord = false
+    @AppStorage("regexFindCaseInsensitive") private var findCaseInsensitive = true
 
-    /// Index into `matches` whose capture groups are detailed below.
-    @State private var selectedMatch = 0
+    @State private var search = ""
+    @State private var expanded: Set<String> = ["Parts of Speech"]
+    @State private var highlights: [Highlight] = []
 
-    /// The single source of truth for the current pattern/flags/test string,
-    /// recomputed once per change rather than on every body render. `error` is
-    /// set when the pattern fails to compile; `results` holds the full matches.
-    @State private var compiledError: String?
-    @State private var results: [NSTextCheckingResult] = []
+    /// An uploaded document: its name, and — only when it's too big to preview inline —
+    /// its full text (kept out of the editor). Small docs load straight into `text`.
+    @State private var docName: String?
+    @State private var largeDocText: String?
+    @State private var docNotice: String?
+
+    /// Above this length an uploaded doc is searched out-of-line into an exported copy.
+    private let inlineLimit = 12_000
 
     public init() {}
 
+    private struct Highlight { let range: NSRange; let colorIndex: Int }
+
+    private static let palette: [Color] = [.cyan, .purple, .orange, .green, .pink, .yellow, .mint, .teal]
+
+    private static let sampleText = "The quick brown fox jumped over the lazy dog near the river. She is running quickly and will arrive at 9:30am. Email me at hello@example.com or visit https://example.com — it costs $19.99 (about 20%). Honestly, it was was a really great great day!"
+
+    /// Per-pattern match colors for the exported .docx. AppKit's OOXML writer drops
+    /// background highlights, but bold + colored text + underline all survive — so these
+    /// are saturated foreground colors, readable on a white page.
+    private static let nsPalette: [NSColor] = [
+        NSColor(srgbRed: 0.00, green: 0.48, blue: 0.80, alpha: 1),
+        NSColor(srgbRed: 0.55, green: 0.20, blue: 0.80, alpha: 1),
+        NSColor(srgbRed: 0.85, green: 0.45, blue: 0.00, alpha: 1),
+        NSColor(srgbRed: 0.10, green: 0.60, blue: 0.25, alpha: 1),
+        NSColor(srgbRed: 0.80, green: 0.10, blue: 0.45, alpha: 1),
+        NSColor(srgbRed: 0.62, green: 0.52, blue: 0.00, alpha: 1),
+        NSColor(srgbRed: 0.00, green: 0.55, blue: 0.55, alpha: 1),
+        NSColor(srgbRed: 0.30, green: 0.30, blue: 0.85, alpha: 1),
+    ]
+
+    private var mode: Mode { Mode(rawValue: modeRaw) ?? .patterns }
+    private var stack: [String] { stackRaw.split(separator: ",").map(String.init).filter { !$0.isEmpty } }
+
+    /// What matching runs against: a large doc's text, otherwise the editor text.
+    private var sourceText: String { largeDocText ?? text }
+    private var isLargeDoc: Bool { largeDocText != nil }
+
+    private var charCountText: String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        return formatter.string(from: NSNumber(value: sourceText.count)) ?? "\(sourceText.count)"
+    }
+
     public var body: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 12) {
-                patternField
-                flagRow
-                testEditor
-                Divider().overlay(Color.white.opacity(0.08))
-                resultSection
-            }
-            .padding(14)
+        VStack(spacing: 10) {
+            topBar
+            if mode == .find { findBar } else { patternBar }
+            if docName != nil { docStatus }
+            if isLargeDoc { largeDocCard } else { editor }
         }
-        .background(Color.black.opacity(0.001)) // make whole tile hit-testable
+        .padding(12)
         .onAppear(perform: recompute)
-        .onChange(of: pattern) { _, _ in recompute() }
-        .onChange(of: testString) { _, _ in recompute() }
-        .onChange(of: caseInsensitive) { _, _ in recompute() }
-        .onChange(of: multiline) { _, _ in recompute() }
-        .onChange(of: dotMatchesNewline) { _, _ in recompute() }
+        .onChange(of: text) { _, _ in recompute() }
+        .onChange(of: modeRaw) { _, _ in recompute() }
+        .onChange(of: stackRaw) { _, _ in recompute() }
+        .onChange(of: findQuery) { _, _ in recompute() }
+        .onChange(of: wholeWord) { _, _ in recompute() }
+        .onChange(of: findCaseInsensitive) { _, _ in recompute() }
     }
 
-    // MARK: Pattern
+    // MARK: Top bar
 
-    private var patternField: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            label("Pattern")
-            HStack(spacing: 6) {
-                Text("/")
-                    .foregroundStyle(.white.opacity(0.35))
-                    .font(.system(size: 13, design: .monospaced))
-                TextField("regular expression", text: $pattern)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.92))
-                Text("/")
-                    .foregroundStyle(.white.opacity(0.35))
-                    .font(.system(size: 13, design: .monospaced))
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(fieldBackground(error: compiledError != nil))
-
-            if let message = compiledError {
-                inlineError(message)
-            }
+    private var topBar: some View {
+        HStack(spacing: 8) {
+            modePicker
+            uploadButton
         }
     }
 
-    private var flagRow: some View {
+    private var uploadButton: some View {
+        Button(action: uploadDoc) {
+            Image(systemName: "doc.badge.plus")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.8))
+                .frame(width: 34, height: 30)
+                .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.white.opacity(0.06)))
+        }
+        .buttonStyle(.plain)
+        .help("Upload a Word document (.docx)")
+    }
+
+    private var docStatus: some View {
         HStack(spacing: 6) {
-            RegexFlagToggle(symbol: "Aa", title: "Ignore case", isOn: $caseInsensitive)
-            RegexFlagToggle(symbol: "¶", title: "Multiline", isOn: $multiline)
-            RegexFlagToggle(symbol: ".∗", title: "Dotall", isOn: $dotMatchesNewline)
+            Image(systemName: "doc.text.fill").font(.system(size: 10)).foregroundStyle(.white.opacity(0.5))
+            Text(docName ?? "").font(.system(size: 11, weight: .medium, design: .rounded)).foregroundStyle(.white.opacity(0.75)).lineLimit(1)
+            Text("· \(charCountText) chars").font(.system(size: 10, design: .rounded)).foregroundStyle(.white.opacity(0.4))
+            Spacer(minLength: 4)
+            Button(action: clearDoc) {
+                Image(systemName: "xmark.circle.fill").font(.system(size: 11)).foregroundStyle(.white.opacity(0.35))
+            }.buttonStyle(.plain)
         }
+        .padding(.horizontal, 10).padding(.vertical, 5)
+        .background(Capsule().fill(Color.white.opacity(0.05)))
     }
 
-    // MARK: Test string
+    // MARK: Mode picker
 
-    private var testEditor: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                label("Test string")
-                Spacer(minLength: 0)
-                countBadge
+    private var modePicker: some View {
+        HStack(spacing: 0) {
+            modeButton("Find", .find, "magnifyingglass")
+            modeButton("Patterns", .patterns, "wand.and.stars")
+        }
+        .padding(3)
+        .background(Capsule().fill(Color.white.opacity(0.06)))
+    }
+
+    private func modeButton(_ title: String, _ value: Mode, _ icon: String) -> some View {
+        let on = mode == value
+        return Button { modeRaw = value.rawValue } label: {
+            HStack(spacing: 5) {
+                Image(systemName: icon).font(.system(size: 11, weight: .semibold))
+                Text(title).font(.system(size: 12, weight: .semibold, design: .rounded))
             }
-            // Highlighted, read-only mirror layered behind the editable field
-            // so matches render in place without a custom NSTextView.
-            highlightedEditor
+            .foregroundStyle(on ? .black : .white.opacity(0.7))
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity)
+            .background(Capsule().fill(on ? Color.white.opacity(0.9) : .clear))
         }
+        .buttonStyle(.plain)
     }
 
-    private var highlightedEditor: some View {
-        ZStack(alignment: .topLeading) {
-            // Highlight backdrop.
-            Text(highlightedTest)
-                .font(.system(size: 13, design: .monospaced))
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-                .padding(8)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
+    // MARK: Find mode
 
-            // Editable layer with clear text so backdrop highlights show through.
-            TextEditor(text: $testString)
-                .font(.system(size: 13, design: .monospaced))
-                .foregroundStyle(Color.clear)
-                .scrollContentBackground(.hidden)
-                .frame(minHeight: 96)
-                .padding(.horizontal, 3)
-                .padding(.vertical, 1)
-                .tint(.white.opacity(0.7))
-        }
-        .background(fieldBackground(error: false))
-    }
-
-    /// The test string with all matches tinted; first/selected match brighter.
-    private var highlightedTest: AttributedString {
-        var attributed = AttributedString(testString)
-        attributed.foregroundColor = .white.opacity(0.9)
-
-        for (index, result) in results.enumerated() {
-            let range = result.range
-            guard let bounds = Range(range, in: testString),
-                  let lower = AttributedString.Index(bounds.lowerBound, within: attributed),
-                  let upper = AttributedString.Index(bounds.upperBound, within: attributed)
-            else { continue }
-            let isSelected = index == clampedSelection
-            attributed[lower..<upper].backgroundColor = isSelected
-                ? Color.accentColor.opacity(0.45)
-                : Color.accentColor.opacity(0.20)
-        }
-        return attributed
-    }
-
-    // MARK: Results
-
-    private var resultSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if compiledError != nil {
-                Text("Fix the pattern to see matches.")
-                    .font(.system(size: 12, weight: .regular, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.4))
-            } else if results.isEmpty {
-                Text("No matches.")
-                    .font(.system(size: 12, weight: .regular, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.4))
-            } else {
-                matchPicker
-                captureGroups
+    private var findBar: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(.white.opacity(0.4))
+                TextField("Find a word or phrase…", text: $findQuery)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.92))
             }
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.white.opacity(0.05)))
+
+            toggleChip("Whole word", isOn: $wholeWord)
+            toggleChip("Match case", isOn: matchCaseBinding)
+            countBadge
         }
     }
 
-    private var matchPicker: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            label("Match \(clampedSelection + 1) of \(results.count)")
-            if results.count > 1 {
-                ScrollView(.horizontal, showsIndicators: false) {
+    private var matchCaseBinding: Binding<Bool> {
+        Binding(get: { !findCaseInsensitive }, set: { findCaseInsensitive = !$0 })
+    }
+
+    private func toggleChip(_ title: String, isOn: Binding<Bool>) -> some View {
+        Button { isOn.wrappedValue.toggle() } label: {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(isOn.wrappedValue ? Color.accentColor : .white.opacity(0.55))
+                .padding(.horizontal, 9).padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(isOn.wrappedValue ? Color.accentColor.opacity(0.15) : Color.white.opacity(0.05))
+                )
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+    }
+
+    // MARK: Patterns mode
+
+    private var patternBar: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(.white.opacity(0.4))
+                TextField("Search patterns — preposition, email, passive…", text: $search)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.92))
+                if !search.isEmpty {
+                    Button { search = "" } label: {
+                        Image(systemName: "xmark.circle.fill").font(.system(size: 12)).foregroundStyle(.white.opacity(0.3))
+                    }.buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.white.opacity(0.05)))
+
+            if !stack.isEmpty { stackChips }
+
+            ScrollView(.vertical, showsIndicators: true) {
+                if search.isEmpty { browseList } else { searchResults }
+            }
+            .frame(maxHeight: docName != nil ? 132 : 168)
+
+            HStack { countBadge; Spacer(minLength: 0) }
+        }
+    }
+
+    private var stackChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(Array(stack.enumerated()), id: \.element) { index, slug in
+                    if index > 0 {
+                        Text("+").font(.system(size: 12, weight: .bold)).foregroundStyle(.white.opacity(0.3))
+                    }
+                    chip(slug: slug, color: Self.palette[index % Self.palette.count])
+                }
+                Button { stackRaw = "" } label: {
+                    Text("Clear").font(.system(size: 11, weight: .medium, design: .rounded)).foregroundStyle(.white.opacity(0.45))
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, 2)
+            }
+            .padding(.vertical, 1)
+        }
+    }
+
+    private func chip(slug: String, color: Color) -> some View {
+        HStack(spacing: 4) {
+            Text("/\(slug)").font(.system(size: 11, weight: .semibold, design: .rounded))
+            Button { toggle(slug) } label: {
+                Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+            }.buttonStyle(.plain)
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .background(Capsule().fill(color.opacity(0.16)))
+        .overlay(Capsule().stroke(color.opacity(0.35), lineWidth: 1))
+    }
+
+    private var browseList: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            ForEach(RegexPatternLibrary.topics, id: \.self) { topic in
+                Button { toggleExpand(topic) } label: {
                     HStack(spacing: 6) {
-                        ForEach(results.indices, id: \.self) { index in
-                            Button {
-                                selectedMatch = index
-                            } label: {
-                                Text("\(index + 1)")
-                                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                                    .foregroundStyle(index == clampedSelection
-                                                     ? Color.accentColor
-                                                     : .white.opacity(0.6))
-                                    .frame(width: 24, height: 24)
-                                    .background(
-                                        Circle().fill(index == clampedSelection
-                                                      ? Color.accentColor.opacity(0.18)
-                                                      : Color.white.opacity(0.06))
-                                    )
-                            }
-                            .buttonStyle(.plain)
+                        Image(systemName: expanded.contains(topic) ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .bold)).foregroundStyle(.white.opacity(0.4)).frame(width: 10)
+                        Text(topic).font(.system(size: 12, weight: .bold, design: .rounded)).foregroundStyle(.white.opacity(0.85))
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.vertical, 3)
+
+                if expanded.contains(topic) {
+                    ForEach(RegexPatternLibrary.subtopics(in: topic), id: \.self) { sub in
+                        Text(sub.uppercased())
+                            .font(.system(size: 9, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.3))
+                            .padding(.leading, 16).padding(.top, 3)
+                        ForEach(RegexPatternLibrary.patterns(topic: topic, subtopic: sub)) { pattern in
+                            patternRow(pattern, showCount: false).padding(.leading, 8)
                         }
                     }
                 }
@@ -188,213 +276,253 @@ import AppKit
         }
     }
 
-    private var captureGroups: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(groupsForSelectedMatch, id: \.index) { group in
-                RegexCaptureGroupRow(index: group.index, name: group.name, value: group.value)
+    private var searchResults: some View {
+        let results = RegexPatternLibrary.search(search)
+        return VStack(alignment: .leading, spacing: 2) {
+            if results.isEmpty {
+                Text("No patterns match “\(search)”.")
+                    .font(.system(size: 12)).foregroundStyle(.white.opacity(0.4)).padding(.vertical, 10)
+            } else {
+                ForEach(results) { pattern in patternRow(pattern, showCount: !isLargeDoc) }
             }
         }
+    }
+
+    private func patternRow(_ pattern: RegexPattern, showCount: Bool) -> some View {
+        let selected = stack.contains(pattern.slug)
+        return Button { toggle(pattern.slug) } label: {
+            HStack(spacing: 8) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "plus.circle")
+                    .font(.system(size: 13)).foregroundStyle(selected ? Color.accentColor : .white.opacity(0.3))
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 6) {
+                        Text(pattern.name).font(.system(size: 12, weight: .semibold, design: .rounded)).foregroundStyle(.white.opacity(0.9))
+                        Text("/\(pattern.slug)").font(.system(size: 10, weight: .regular, design: .rounded)).foregroundStyle(.white.opacity(0.32))
+                    }
+                    Text(pattern.detail).font(.system(size: 10)).foregroundStyle(.white.opacity(0.45)).lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                if showCount {
+                    let n = RegexPatternLibrary.count(of: pattern, in: text)
+                    Text("\(n)")
+                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                        .foregroundStyle(n > 0 ? Color.accentColor : .white.opacity(0.35))
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Capsule().fill(Color.white.opacity(0.06)))
+                }
+            }
+            .padding(.horizontal, 8).padding(.vertical, 5)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? Color.accentColor.opacity(0.10) : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var countBadge: some View {
-        Text("\(results.count) match\(results.count == 1 ? "" : "es")")
+        Text("\(highlights.count) match\(highlights.count == 1 ? "" : "es")")
             .font(.system(size: 11, weight: .semibold, design: .rounded))
-            .foregroundStyle(compiledError == nil && !results.isEmpty
-                             ? Color.accentColor
-                             : .white.opacity(0.4))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(
-                Capsule().fill(Color.white.opacity(0.06))
-            )
+            .foregroundStyle(highlights.isEmpty ? .white.opacity(0.35) : Color.accentColor)
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(Capsule().fill(Color.white.opacity(0.06)))
     }
 
-    // MARK: Derived state
+    // MARK: Editor
 
-    /// Compile the pattern and run matching once, into `@State`, whenever an
-    /// input changes. Everything below derives from the stored `results` so a
-    /// single body render no longer recompiles the regex or re-runs matching.
+    private var editor: some View {
+        ZStack(alignment: .topLeading) {
+            Text(highlightedText)
+                .font(.system(size: 13))
+                .foregroundStyle(.white.opacity(0.9))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(8)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            TextEditor(text: $text)
+                .font(.system(size: 13))
+                .foregroundStyle(.clear)
+                .scrollContentBackground(.hidden)
+                .tint(.white.opacity(0.6))
+                .padding(.horizontal, 3).padding(.vertical, 7)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.white.opacity(0.04)))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+    }
+
+    private var highlightedText: AttributedString {
+        var attributed = AttributedString(text)
+        for highlight in highlights {
+            guard let range = Range(highlight.range, in: text),
+                  let lower = AttributedString.Index(range.lowerBound, within: attributed),
+                  let upper = AttributedString.Index(range.upperBound, within: attributed)
+            else { continue }
+            attributed[lower..<upper].backgroundColor = Self.palette[highlight.colorIndex % Self.palette.count].opacity(0.4)
+        }
+        return attributed
+    }
+
+    // MARK: Large document
+
+    private var largeDocCard: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 28))
+                .foregroundStyle(.white.opacity(0.45))
+            VStack(spacing: 3) {
+                Text("Large document")
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.9))
+                Text("\(charCountText) characters — too long to preview inline.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .multilineTextAlignment(.center)
+                Text("\(highlights.count) match\(highlights.count == 1 ? "" : "es") for the current \(mode == .find ? "search" : "patterns")")
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(highlights.isEmpty ? .white.opacity(0.4) : Color.accentColor)
+                    .padding(.top, 1)
+            }
+            Button(action: exportHighlightedDoc) {
+                HStack(spacing: 6) {
+                    Image(systemName: "square.and.arrow.down")
+                    Text("Export highlighted .docx")
+                }
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(.black)
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(Capsule().fill(highlights.isEmpty ? Color.white.opacity(0.25) : Color.white.opacity(0.9)))
+            }
+            .buttonStyle(.plain)
+            .disabled(highlights.isEmpty)
+            if let docNotice {
+                Text(docNotice)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.green.opacity(0.85))
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(16)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.white.opacity(0.04)))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+    }
+
+    // MARK: Compute
+
     private func recompute() {
-        let trimmed = pattern
-        guard !trimmed.isEmpty else {
-            compiledError = nil
-            results = []
+        var result: [Highlight] = []
+        let source = sourceText
+        let full = NSRange(location: 0, length: (source as NSString).length)
+
+        if mode == .find {
+            if !findQuery.isEmpty,
+               let regex = RegexPatternLibrary.literalRegex(findQuery, wholeWord: wholeWord, caseInsensitive: findCaseInsensitive) {
+                regex.enumerateMatches(in: source, range: full) { match, _, _ in
+                    if let match, match.range.length > 0 { result.append(Highlight(range: match.range, colorIndex: 0)) }
+                }
+            }
+        } else {
+            for (index, slug) in stack.enumerated() {
+                guard let pattern = RegexPatternLibrary.pattern(slug: slug),
+                      let regex = RegexPatternLibrary.regex(for: pattern) else { continue }
+                regex.enumerateMatches(in: source, range: full) { match, _, _ in
+                    if let match, match.range.length > 0 { result.append(Highlight(range: match.range, colorIndex: index)) }
+                }
+            }
+        }
+        highlights = result
+    }
+
+    // MARK: Mutations
+
+    private func toggle(_ slug: String) {
+        var current = stack
+        if let index = current.firstIndex(of: slug) { current.remove(at: index) } else { current.append(slug) }
+        stackRaw = current.joined(separator: ",")
+    }
+
+    private func toggleExpand(_ topic: String) {
+        if expanded.contains(topic) { expanded.remove(topic) } else { expanded.insert(topic) }
+    }
+
+    // MARK: Documents
+
+    private func uploadDoc() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a document"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        var types: [UTType] = [.rtf, .plainText]
+        if let docx = UTType(filenameExtension: "docx") { types.insert(docx, at: 0) }
+        if let doc = UTType(filenameExtension: "doc") { types.append(doc) }
+        panel.allowedContentTypes = types
+
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let attributed = try? NSAttributedString(url: url, options: [:], documentAttributes: nil) else {
+            docName = url.lastPathComponent
+            largeDocText = nil
+            docNotice = "Couldn't read that document."
             return
         }
-        var options: NSRegularExpression.Options = []
-        if caseInsensitive { options.insert(.caseInsensitive) }
-        if multiline { options.insert(.anchorsMatchLines) }
-        if dotMatchesNewline { options.insert(.dotMatchesLineSeparators) }
+        let content = attributed.string
+        docName = url.lastPathComponent
+        docNotice = nil
+        if content.count > inlineLimit {
+            largeDocText = content        // keep it out of the editor; search exports a copy
+        } else {
+            largeDocText = nil
+            text = content                // small enough to read and highlight inline
+        }
+        recompute()
+    }
+
+    private func clearDoc() {
+        docName = nil
+        largeDocText = nil
+        docNotice = nil
+        recompute()
+    }
+
+    /// Build a new .docx from the large document with every current match highlighted,
+    /// then save it where the user chooses and open it.
+    private func exportHighlightedDoc() {
+        guard let docText = largeDocText, !highlights.isEmpty else { return }
+        let attributed = NSMutableAttributedString(string: docText)
+        let full = NSRange(location: 0, length: (docText as NSString).length)
+        attributed.addAttribute(.font, value: NSFont.systemFont(ofSize: 12), range: full)
+        attributed.addAttribute(.foregroundColor, value: NSColor.black, range: full)
+        // AppKit won't export a Word background highlight, so mark matches with bold +
+        // a per-pattern color + underline — all of which survive the .docx round-trip.
+        let boldFont = NSFontManager.shared.convert(NSFont.systemFont(ofSize: 12), toHaveTrait: .boldFontMask)
+        for highlight in highlights {
+            let color = Self.nsPalette[highlight.colorIndex % Self.nsPalette.count]
+            attributed.addAttribute(.font, value: boldFont, range: highlight.range)
+            attributed.addAttribute(.foregroundColor, value: color, range: highlight.range)
+            attributed.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: highlight.range)
+        }
+
+        let save = NSSavePanel()
+        save.title = "Save highlighted document"
+        if let docx = UTType(filenameExtension: "docx") { save.allowedContentTypes = [docx] }
+        let base = docName.map { ($0 as NSString).deletingPathExtension } ?? "document"
+        save.nameFieldStringValue = "\(base)-highlighted.docx"
+
+        NSApp.activate(ignoringOtherApps: true)
+        guard save.runModal() == .OK, let url = save.url else { return }
+        guard let data = try? attributed.data(
+            from: full,
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.officeOpenXML]
+        ) else {
+            docNotice = "Export failed."
+            return
+        }
         do {
-            let regex = try NSRegularExpression(pattern: trimmed, options: options)
-            let full = NSRange(testString.startIndex..., in: testString)
-            compiledError = nil
-            results = regex.matches(in: testString, options: [], range: full)
+            try data.write(to: url)
+            docNotice = "Exported \(url.lastPathComponent)"
+            NSWorkspace.shared.open(url)
         } catch {
-            compiledError = friendlyMessage(from: error)
-            results = []
+            docNotice = "Couldn't save the file."
         }
-    }
-
-    /// Selection clamped to the available matches so a shrinking match set
-    /// never indexes out of bounds.
-    private var clampedSelection: Int {
-        guard !results.isEmpty else { return 0 }
-        return min(max(selectedMatch, 0), results.count - 1)
-    }
-
-    private struct RegexScratchpadMatch {
-        let index: Int
-        let name: String?
-        let value: String?
-    }
-
-    /// Capture groups (including group 0, the whole match) for the selected
-    /// match, derived from the already-computed `results`.
-    private var groupsForSelectedMatch: [RegexScratchpadMatch] {
-        guard !results.isEmpty, clampedSelection < results.count else { return [] }
-        let result = results[clampedSelection]
-
-        var rows: [RegexScratchpadMatch] = []
-        for groupIndex in 0..<result.numberOfRanges {
-            let range = result.range(at: groupIndex)
-            let value: String?
-            if range.location == NSNotFound {
-                value = nil
-            } else if let swiftRange = Range(range, in: testString) {
-                value = String(testString[swiftRange])
-            } else {
-                value = nil
-            }
-            rows.append(RegexScratchpadMatch(index: groupIndex, name: nil, value: value))
-        }
-        return rows
-    }
-
-    // MARK: Helpers
-
-    private func friendlyMessage(from error: Error) -> String {
-        let ns = error as NSError
-        if let reason = ns.userInfo[NSLocalizedDescriptionKey] as? String {
-            return reason
-        }
-        return ns.localizedDescription
-    }
-
-    private func label(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 11, weight: .semibold, design: .rounded))
-            .foregroundStyle(.white.opacity(0.5))
-    }
-
-    private func inlineError(_ message: String) -> some View {
-        HStack(alignment: .top, spacing: 5) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.red)
-                .padding(.top, 1)
-            Text(message)
-                .font(.system(size: 11, weight: .regular, design: .rounded))
-                .foregroundStyle(.red.opacity(0.9))
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Color.red.opacity(0.08))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(Color.red.opacity(0.2), lineWidth: 1)
-        )
-    }
-
-    private func fieldBackground(error: Bool) -> some View {
-        RoundedRectangle(cornerRadius: 9, style: .continuous)
-            .fill(Color.white.opacity(0.05))
-            .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .strokeBorder(error ? Color.red.opacity(0.35) : Color.white.opacity(0.08),
-                                  lineWidth: 1)
-            )
-    }
-}
-
-// MARK: - Flag toggle
-
-private struct RegexFlagToggle: View {
-    let symbol: String
-    let title: String
-    @Binding var isOn: Bool
-
-    var body: some View {
-        Button {
-            isOn.toggle()
-        } label: {
-            VStack(spacing: 2) {
-                Text(symbol)
-                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                Text(title)
-                    .font(.system(size: 8.5, weight: .medium, design: .rounded))
-            }
-            .foregroundStyle(isOn ? Color.accentColor : .white.opacity(0.5))
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 7)
-            .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(isOn ? Color.accentColor.opacity(0.15) : Color.white.opacity(0.05))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .strokeBorder(isOn ? Color.accentColor.opacity(0.3) : Color.white.opacity(0.08),
-                                  lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-        .help(title)
-    }
-}
-
-// MARK: - Capture group row
-
-private struct RegexCaptureGroupRow: View {
-    let index: Int
-    let name: String?
-    let value: String?
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Text(label)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.55))
-                .frame(width: 52, alignment: .leading)
-            if let value {
-                Text(value.isEmpty ? "(empty)" : value)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .foregroundStyle(value.isEmpty ? .white.opacity(0.35) : .white.opacity(0.9))
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                Text("no match")
-                    .font(.system(size: 12, weight: .regular, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.3))
-                    .italic()
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.white.opacity(index == 0 ? 0.07 : 0.04))
-        )
-    }
-
-    private var label: String {
-        if let name { return name }
-        return index == 0 ? "whole" : "$\(index)"
     }
 }

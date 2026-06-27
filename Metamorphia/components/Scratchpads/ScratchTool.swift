@@ -4,7 +4,7 @@ import SwiftUI
 /// into floating panels. Each case maps 1:1 to a real tile view.
 public enum ScratchTool: String, CaseIterable, Identifiable, Sendable {
     case regex
-    case json
+    case notes
     case diff
     case qr
     case palette
@@ -16,7 +16,7 @@ public enum ScratchTool: String, CaseIterable, Identifiable, Sendable {
     public var title: String {
         switch self {
         case .regex: return "Regex"
-        case .json: return "JSON"
+        case .notes: return "Notes"
         case .diff: return "Diff"
         case .qr: return "QR"
         case .palette: return "Palette"
@@ -28,7 +28,7 @@ public enum ScratchTool: String, CaseIterable, Identifiable, Sendable {
     public var systemImage: String {
         switch self {
         case .regex: return "asterisk.circle"
-        case .json: return "curlybraces"
+        case .notes: return "note.text"
         case .diff: return "plusminus"
         case .qr: return "qrcode"
         case .palette: return "eyedropper.halffull"

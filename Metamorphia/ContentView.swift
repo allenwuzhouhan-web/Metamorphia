@@ -445,6 +445,9 @@ struct ContentView: View {
                                 }
                             }
                         )
+                        // Draw a scratchpad tool out of the notch: a mouse drag off the
+                        // lip starts a gooey pull; a plain click still opens the notch.
+                        .notchToolPull(enabled: Defaults[.enableScratchpads])
                         .conditionalModifier(Defaults[.enableGestures]) { view in
                             view
                                 .panGesture(direction: .down) { translation, phase in
@@ -1812,6 +1815,9 @@ struct ContentView: View {
 
     // MARK: - Private Methods
     private func openNotch() {
+        // A tool pull holds the mouse on the notch for a while; don't let that hold
+        // open the notch — it would drop the home/music panel down mid-pull.
+        guard !PullSession.shared.isEngaged else { return }
         withAnimation(.bouncy.speed(1.2)) {
             vm.open()
         }
@@ -1849,6 +1855,8 @@ struct ContentView: View {
     /// the long-term dual-activation feature, but it no longer affects
     /// the canonical click behavior.
     private func handleNotchTap() {
+        // Ignore the tap that ends a tool-pull drag.
+        guard !PullSession.shared.isEngaged else { return }
         hoverTask?.cancel()
 
         // A tap that lands on the waveform play/pause overlay or on a
@@ -1885,7 +1893,8 @@ struct ContentView: View {
     /// rationale as `handleNotchTap`.)
     private func handleNotchLongPress() {
         NSLog("🔔 [Metamorphia] handleNotchLongPress fired → open notch tabs")
-        guard vm.notchState == .closed,
+        guard !PullSession.shared.isEngaged,
+              vm.notchState == .closed,
               !isSneakPeekVisibleOnCurrentScreen else { return }
         if Defaults[.enableHaptics] {
             triggerHapticIfAllowed()

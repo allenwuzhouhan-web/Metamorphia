@@ -1,13 +1,15 @@
 import AppKit
 import SwiftUI
 
-/// The notch tray of scratchpad tools. Each tool is an icon + title button.
+/// The notch tray of scratchpad tools, laid out as square tiles.
 ///
-/// A plain TAP activates the tool in place: `onActivate(tool, nil)`.
-/// A DRAG (>~8pt) tears the tool out of the notch — on release we report the live
-/// screen cursor (`NSEvent.mouseLocation`, AppKit global / bottom-left origin) so the
-/// host can spawn a floating panel exactly where it was dropped:
-/// `onActivate(tool, NSEvent.mouseLocation)`.
+/// One press resolves to exactly one action. A single `DragGesture` decides between
+/// tap and tear in `onEnded` by how far the press travelled:
+/// - travelled ≤ 8pt → a TAP: activate in place, `onActivate(tool, nil)`;
+/// - travelled  > 8pt → a TEAR: drop at the live screen cursor
+///   (`NSEvent.mouseLocation`, AppKit global / bottom-left origin),
+///   `onActivate(tool, NSEvent.mouseLocation)`.
+/// There is no separate tap gesture, so a quick flick can never spawn two panels.
 @MainActor public struct ScratchpadTrayView: View {
     private let onActivate: (ScratchTool, CGPoint?) -> Void
 
@@ -39,27 +41,29 @@ import SwiftUI
 
     private func tile(for tool: ScratchTool) -> some View {
         let isDragging = dragging == tool
-        return VStack(spacing: 5) {
+        return VStack(spacing: 6) {
             Image(systemName: tool.systemImage)
-                .font(.system(size: 16, weight: .medium))
+                .font(.system(size: 18, weight: .medium))
                 .foregroundStyle(.white.opacity(0.85))
-                .frame(height: 20)
             Text(tool.title)
-                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .font(.system(size: 11, weight: .medium, design: .rounded))
                 .foregroundStyle(.white.opacity(0.7))
                 .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .padding(.horizontal, 4)
         }
+        // A true square: fill the grid column's width, then match height to it.
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 10)
+        .aspectRatio(1, contentMode: .fit)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(Color.white.opacity(isDragging ? 0.14 : 0.06))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(Color.white.opacity(0.10), lineWidth: 0.5)
         )
-        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         // Light tear-out feedback: the dragged tile follows the cursor slightly and lifts.
         .scaleEffect(isDragging ? 1.06 : 1.0)
         .offset(isDragging ? cappedOffset(dragTranslation) : .zero)
@@ -75,22 +79,28 @@ import SwiftUI
 
     // MARK: Gesture
 
+    /// The tear-out distance, in points, that separates a tap from a drag.
+    private let tearThreshold: CGFloat = 8
+
     private func dragGesture(for tool: ScratchTool) -> some Gesture {
-        DragGesture(minimumDistance: 8)
+        // A single gesture owns the whole press → release, so it fires `onActivate`
+        // exactly once. (The previous drag-`exclusively`-before-tap pair could both
+        // resolve on a quick flick and spawn two panels.)
+        DragGesture(minimumDistance: 0)
             .onChanged { value in
-                if dragging != tool { dragging = tool }
-                dragTranslation = value.translation
+                let torn = hypot(value.translation.width, value.translation.height) > tearThreshold
+                if torn, dragging != tool { dragging = tool }
+                dragTranslation = torn ? value.translation : .zero
             }
-            .onEnded { _ in
-                // A real drag past the threshold: drop the tool at the cursor.
-                onActivate(tool, NSEvent.mouseLocation)
-                dragging = nil
-                dragTranslation = .zero
+            .onEnded { value in
+                defer {
+                    dragging = nil
+                    dragTranslation = .zero
+                }
+                let distance = hypot(value.translation.width, value.translation.height)
+                // Past the threshold → tear out at the cursor; otherwise → tap in place.
+                onActivate(tool, distance > tearThreshold ? NSEvent.mouseLocation : nil)
             }
-            // A press that never crosses the threshold falls through to this tap.
-            .exclusively(before: TapGesture().onEnded {
-                onActivate(tool, nil)
-            })
     }
 
     /// Keep the follow feedback subtle — a hint of movement, not a full drag image.
