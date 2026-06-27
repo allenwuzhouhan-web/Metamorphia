@@ -1061,6 +1061,7 @@ extension Defaults.Keys {
     static let colorPickerDisplayMode = Key<ColorPickerDisplayMode>("colorPickerDisplayMode", default: .panel)
     static let colorHistorySize = Key<Int>("colorHistorySize", default: 10)
     static let showColorPickerIcon = Key<Bool>("showColorPickerIcon", default: true)
+    static let paletteColorCount = Key<Int>("paletteColorCount", default: 6)
     
     // MARK: Clipboard Feature
     static let enableClipboardManager = Key<Bool>("enableClipboardManager", default: true)

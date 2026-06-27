@@ -57,14 +57,29 @@ struct ColorFormatter {
     }
 }
 
+/// Which face of the color picker is showing: the picked-color history, or the
+/// palette pulled from an image.
+enum ColorPickerSection: String, CaseIterable {
+    case recent
+    case palette
+
+    var title: String {
+        switch self {
+        case .recent: return String(localized: "Recent")
+        case .palette: return String(localized: "Palette")
+        }
+    }
+}
+
 class ColorPickerManager: ObservableObject {
     static let shared = ColorPickerManager()
-    
+
     @Published var colorHistory: [PickedColor] = []
     @Published var isPickingColor: Bool = false
     @Published var isShowingPanel: Bool = false
     @Published var showColorPickedFeedback: Bool = false
     @Published var lastPickedColor: PickedColor?
+    @Published var activeSection: ColorPickerSection = .recent
     
     // Use NSColorSampler from Solid project - much more reliable
     private let colorSampler = NSColorSampler()
