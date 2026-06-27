@@ -72,6 +72,15 @@ final class SystemVolumeController {
     private var muteElement: AudioObjectPropertyElement?
     private let silenceThreshold: Float = 0.001 // Treat very low values as mute requests.
 
+    // Track the device-scoped listener blocks so they can be removed when the
+    // default output device changes; otherwise stale listeners accumulate on
+    // every route change and keep firing redundant state notifications.
+    private var listenerDeviceID: AudioDeviceID = 0
+    private var volumeListenerBlock: AudioObjectPropertyListenerBlock?
+    private var volumeListenerElement: AudioObjectPropertyElement?
+    private var muteListenerBlock: AudioObjectPropertyListenerBlock?
+    private var muteListenerElement: AudioObjectPropertyElement?
+
     private let candidateElements: [AudioObjectPropertyElement] = [
         kAudioObjectPropertyElementMain,
         AudioObjectPropertyElement(1),
@@ -214,27 +223,54 @@ final class SystemVolumeController {
     }
 
     private func installVolumeListeners(for deviceID: AudioDeviceID) {
+        listenerDeviceID = deviceID
+
         if let element = resolveElement(selector: kAudioDevicePropertyVolumeScalar, deviceID: deviceID) {
             volumeElement = element
             var address = makeAddress(selector: kAudioDevicePropertyVolumeScalar, element: element)
-            AudioObjectAddPropertyListenerBlock(deviceID, &address, callbackQueue) { [weak self] _, _ in
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
                 self?.notifyCurrentState()
             }
+            AudioObjectAddPropertyListenerBlock(deviceID, &address, callbackQueue, block)
+            volumeListenerBlock = block
+            volumeListenerElement = element
         }
 
         if let element = resolveElement(selector: kAudioDevicePropertyMute, deviceID: deviceID) {
             muteElement = element
             var address = makeAddress(selector: kAudioDevicePropertyMute, element: element)
-            AudioObjectAddPropertyListenerBlock(deviceID, &address, callbackQueue) { [weak self] _, _ in
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
                 self?.notifyCurrentState()
             }
+            AudioObjectAddPropertyListenerBlock(deviceID, &address, callbackQueue, block)
+            muteListenerBlock = block
+            muteListenerElement = element
         }
+    }
+
+    private func uninstallVolumeListeners() {
+        if let block = volumeListenerBlock, let element = volumeListenerElement {
+            var address = makeAddress(selector: kAudioDevicePropertyVolumeScalar, element: element)
+            AudioObjectRemovePropertyListenerBlock(listenerDeviceID, &address, callbackQueue, block)
+        }
+        volumeListenerBlock = nil
+        volumeListenerElement = nil
+
+        if let block = muteListenerBlock, let element = muteListenerElement {
+            var address = makeAddress(selector: kAudioDevicePropertyMute, element: element)
+            AudioObjectRemovePropertyListenerBlock(listenerDeviceID, &address, callbackQueue, block)
+        }
+        muteListenerBlock = nil
+        muteListenerElement = nil
     }
 
     private func handleDefaultDeviceChanged() {
         callbackQueue.async { [weak self] in
             guard let self else { return }
-            self.currentDeviceID = self.resolveDefaultDevice()
+            let newDeviceID = self.resolveDefaultDevice()
+            guard newDeviceID != self.currentDeviceID else { return }
+            self.uninstallVolumeListeners()
+            self.currentDeviceID = newDeviceID
             self.refreshPropertyElements()
             self.installVolumeListeners(for: self.currentDeviceID)
             self.notifyCurrentState()

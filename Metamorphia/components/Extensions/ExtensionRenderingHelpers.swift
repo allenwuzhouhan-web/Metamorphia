@@ -314,11 +314,16 @@ private final class ExtensionLottieCache {
     static let shared = ExtensionLottieCache()
     private let queue = DispatchQueue(label: "com.metamorphia.extension-lottie-cache")
     private var cache: [String: URL] = [:]
+    /// Keys ordered least- to most-recently used; the head is evicted first.
+    private var accessOrder: [String] = []
+    /// Maximum number of distinct animation payloads kept on disk at once.
+    private let maxEntries = 32
 
     func url(for data: Data) -> URL? {
         queue.sync {
             let key = Self.hash(data: data)
             if let existing = cache[key], FileManager.default.fileExists(atPath: existing.path) {
+                touch(key)
                 return existing
             }
 
@@ -326,10 +331,29 @@ private final class ExtensionLottieCache {
             do {
                 try data.write(to: url, options: .atomic)
                 cache[key] = url
+                touch(key)
+                evictIfNeeded()
                 return url
             } catch {
                 cache.removeValue(forKey: key)
+                accessOrder.removeAll { $0 == key }
                 return nil
+            }
+        }
+    }
+
+    /// Marks `key` as most-recently used.
+    private func touch(_ key: String) {
+        accessOrder.removeAll { $0 == key }
+        accessOrder.append(key)
+    }
+
+    /// Drops least-recently-used entries (and their temp files) until within `maxEntries`.
+    private func evictIfNeeded() {
+        while accessOrder.count > maxEntries, let oldest = accessOrder.first {
+            accessOrder.removeFirst()
+            if let url = cache.removeValue(forKey: oldest) {
+                try? FileManager.default.removeItem(at: url)
             }
         }
     }
@@ -499,7 +523,7 @@ struct ExtensionCountdownTextView: View {
     let customColor: Color?
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
+        TimelineView(CountdownSchedule(target: targetDate)) { context in
             let remainingText = formattedRemaining(since: context.date)
             Text(remainingText)
                 .font(font.swiftUIFont())
@@ -519,6 +543,29 @@ struct ExtensionCountdownTextView: View {
             return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
         }
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+}
+
+/// A 1 Hz timeline schedule that emits entries only until the countdown target,
+/// then a single terminal entry, after which SwiftUI stops re-evaluating the body.
+/// Unlike `.periodic`, this drives the countdown down to 00:00 and then stops ticking.
+private struct CountdownSchedule: TimelineSchedule {
+    let target: Date
+
+    func entries(from startDate: Date, mode: TimelineScheduleMode) -> AnyIterator<Date> {
+        var date = startDate
+        var emittedTerminal = false
+        return AnyIterator {
+            if date <= target {
+                defer { date = date.addingTimeInterval(1) }
+                return date
+            }
+            // Emit one final entry past the target so the display settles at 00:00,
+            // then end the sequence so re-rendering stops.
+            guard !emittedTerminal else { return nil }
+            emittedTerminal = true
+            return target
+        }
     }
 }
 

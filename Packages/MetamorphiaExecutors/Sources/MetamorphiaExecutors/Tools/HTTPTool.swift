@@ -69,6 +69,7 @@ public struct HTTPRequestTool: ToolDefinition {
             delegate: followRedirects ? nil : NoRedirectDelegate(),
             delegateQueue: nil
         )
+        defer { session.finishTasksAndInvalidate() }
 
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {

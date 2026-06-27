@@ -369,6 +369,7 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         // Add user message to chat
         let userMessage = ScreenAssistantChatMessage(content: message, isFromUser: true, attachedFiles: attachedFiles.isEmpty ? nil : attachedFiles)
         chatMessages.append(userMessage)
+        trimChatHistory()
         
         // Print attached files details
         for (index, file) in attachedFiles.enumerated() {
@@ -1155,6 +1156,19 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         print("💬 ScreenAssistant: Adding assistant message: \(content.prefix(100))...")
         let assistantMessage = ScreenAssistantChatMessage(content: content, isFromUser: false)
         chatMessages.append(assistantMessage)
+        trimChatHistory()
+    }
+
+    // Cap the live transcript so a long session can't grow the array without bound.
+    // The API paths only ever read chatMessages.suffix(10); this preserves ample UI
+    // scrollback while dropping the oldest entries. Backing screenshot/audio files are
+    // not deleted here — messages hold only path strings and those files are managed
+    // separately via attachedFiles.
+    private func trimChatHistory() {
+        let maxMessages = 100
+        if chatMessages.count > maxMessages {
+            chatMessages.removeFirst(chatMessages.count - maxMessages)
+        }
     }
     
     private func handleAPIError(statusCode: Int, provider: AIModelProvider) {

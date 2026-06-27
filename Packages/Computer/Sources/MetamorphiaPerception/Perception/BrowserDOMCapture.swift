@@ -97,6 +97,22 @@ public actor BrowserDOMFetcher {
     /// lose a reply to unrelated interleaved events.
     private var cdpSockets: [URL: CDPSocket] = [:]
 
+    /// Last-use timestamp per pooled socket, used to evict idle/stale entries
+    /// and to pick the LRU victim when the pool is at capacity. Kept in lockstep
+    /// with `cdpSockets` — every insert/remove updates both.
+    private var cdpSocketLastUse: [URL: Date] = [:]
+
+    /// Idle entries older than this are torn down on the next `socketForWS`
+    /// call. A tab the user stopped interacting with goes quiet within seconds,
+    /// so 30 s comfortably covers an active tab between dispatches while still
+    /// reclaiming the socket/URLSession/receive-loop of an abandoned tab.
+    private static let cdpSocketIdleTimeout: TimeInterval = 30
+
+    /// Hard cap on live pooled sockets. The user only has one frontmost tab at
+    /// a time; a few slots absorb rapid tab toggling without letting one socket
+    /// per visited tab accumulate over a browsing session.
+    private static let cdpSocketPoolLimit = 6
+
     // MARK: - Public API
 
     /// True when `bundleID` is a browser this fetcher knows how to drive.
@@ -131,6 +147,7 @@ public actor BrowserDOMFetcher {
         cachedCapture = nil
         let toTeardown = Array(cdpSockets.values)
         cdpSockets.removeAll()
+        cdpSocketLastUse.removeAll()
         Task { for s in toTeardown { await s.teardown() } }
     }
 
@@ -529,19 +546,75 @@ public actor BrowserDOMFetcher {
             // Transport went south — drop the cached entry so the next
             // caller re-establishes cleanly.
             cdpSockets.removeValue(forKey: wsURL)
+            cdpSocketLastUse.removeValue(forKey: wsURL)
             await socket.teardown()
         }
         return response
     }
 
     private func socketForWS(_ wsURL: URL) -> CDPSocket {
+        let now = Date()
+        pruneSockets(now: now, keeping: wsURL)
         if let existing = cdpSockets[wsURL], !existing.isBroken {
+            cdpSocketLastUse[wsURL] = now
             return existing
+        }
+        // The entry may exist but be broken — drop it before re-creating.
+        if let stale = cdpSockets.removeValue(forKey: wsURL) {
+            cdpSocketLastUse.removeValue(forKey: wsURL)
+            Task { await stale.teardown() }
         }
         let socket = CDPSocket(wsURL: wsURL)
         cdpSockets[wsURL] = socket
+        cdpSocketLastUse[wsURL] = now
         socket.start()
         return socket
+    }
+
+    /// Bound the pooled-socket count and reclaim stale ones. Evicts (a) any
+    /// socket whose transport is broken, (b) any socket idle longer than
+    /// `cdpSocketIdleTimeout`, and (c) the least-recently-used socket(s) until
+    /// the pool fits under `cdpSocketPoolLimit` once `wsURL` is accounted for.
+    /// `wsURL` is never evicted, so the caller's about-to-be-used entry always
+    /// survives. Every evicted socket is `teardown()`-ed (in a detached Task,
+    /// since this runs on the synchronous get-or-create path) so its
+    /// URLSession and receive-loop Task are actually released — `removeValue`
+    /// alone would leak them.
+    private func pruneSockets(now: Date, keeping wsURL: URL) {
+        var victims: [URL] = []
+        for (key, socket) in cdpSockets where key != wsURL {
+            if socket.isBroken {
+                victims.append(key)
+            } else if let last = cdpSocketLastUse[key],
+                      now.timeIntervalSince(last) > Self.cdpSocketIdleTimeout {
+                victims.append(key)
+            }
+        }
+
+        // LRU-evict survivors until the pool fits. After this call exactly one
+        // entry for `wsURL` is present (kept or freshly inserted), so the other
+        // sockets must number at most `poolLimit - 1`.
+        let limit = max(Self.cdpSocketPoolLimit - 1, 0)
+        var survivorCount = cdpSockets.keys.filter { $0 != wsURL && !victims.contains($0) }.count
+        if survivorCount > limit {
+            let lruOrder = cdpSockets.keys
+                .filter { $0 != wsURL && !victims.contains($0) }
+                .sorted { (cdpSocketLastUse[$0] ?? .distantPast) < (cdpSocketLastUse[$1] ?? .distantPast) }
+            for key in lruOrder where survivorCount > limit {
+                victims.append(key)
+                survivorCount -= 1
+            }
+        }
+
+        guard !victims.isEmpty else { return }
+        var toTeardown: [CDPSocket] = []
+        for key in victims {
+            if let socket = cdpSockets.removeValue(forKey: key) {
+                toTeardown.append(socket)
+            }
+            cdpSocketLastUse.removeValue(forKey: key)
+        }
+        Task { for s in toTeardown { await s.teardown() } }
     }
 
     // MARK: - AppleScript helper (Safari path)

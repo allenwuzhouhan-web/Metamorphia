@@ -433,6 +433,7 @@ public final class AICommandViewModel: ObservableObject {
                 isStreaming: false,
                 isError: isError
             ))
+            capConversation()
             liveStatus = nil
             agentTree = nil
             return
@@ -462,6 +463,7 @@ public final class AICommandViewModel: ObservableObject {
                 isStreaming: false,
                 isError: isError
             ))
+            capConversation()
             liveStatus = nil
             agentTree = nil
             return
@@ -623,6 +625,7 @@ public final class AICommandViewModel: ObservableObject {
             richContent: functionSpec.map { .functionGraph($0) }
         )
         conversation.append(turn)
+        capConversation()
 
         let chainedSystemPrompt = injectSkillBodies(
             base: systemPrompt,
@@ -864,6 +867,7 @@ public final class AICommandViewModel: ObservableObject {
             isStaged: true
         )
         conversation.append(turn)
+        capConversation()
         return true
     }
 
@@ -938,6 +942,7 @@ public final class AICommandViewModel: ObservableObject {
             trace: trace
         )
         conversation.append(turn)
+        capConversation()
         inputBarState = .result(message: hit.message)
 
         if AppDelegate.shared?.vm.notchState == .minimized {
@@ -982,6 +987,7 @@ public final class AICommandViewModel: ObservableObject {
             trace: trace
         )
         conversation.append(turn)
+        capConversation()
         protectedTerminalTurnIDs.insert(turn.id)
 
         if AppDelegate.shared?.vm.notchState == .minimized {
@@ -1013,6 +1019,7 @@ public final class AICommandViewModel: ObservableObject {
             trace: nil
         )
         conversation.append(turn)
+        capConversation()
         protectedTerminalTurnIDs.insert(turn.id)
         if AppDelegate.shared?.vm.notchState == .minimized {
             hasUnseenCompletion = true
@@ -1313,6 +1320,7 @@ public final class AICommandViewModel: ObservableObject {
                 prompt: prompt, result: hit.message,
                 toolPills: [pill], isStreaming: false
             ))
+            capConversation()
             inputBarState = .result(message: hit.message)
             return
         }
@@ -1334,6 +1342,7 @@ public final class AICommandViewModel: ObservableObject {
             toolPills: [],
             isStreaming: false
         ))
+        capConversation()
     }
     public func setActiveAgent(_ profile: AgentProfile) {
         guard profile.id != currentAgent.id else { return }
@@ -1590,6 +1599,28 @@ public final class AICommandViewModel: ObservableObject {
         )
     }
 
+    /// Cap the live `conversation` array so a long-running menu-bar session
+    /// doesn't accumulate turns (full text + RichTurnContent + AgentTrace)
+    /// without bound. Called right after every runtime append.
+    ///
+    /// Drops the oldest turns past `keep`, then releases the heavy per-turn
+    /// payloads (`trace`, `richContent`) for all but the most recent few.
+    /// Neither is persisted, so nilling them is a display-only loss for old
+    /// turns and safe.
+    private func capConversation() {
+        let keep = 40
+        if conversation.count > keep {
+            conversation.removeFirst(conversation.count - keep)
+        }
+        let heavyKeep = 6
+        if conversation.count > heavyKeep {
+            for i in 0..<(conversation.count - heavyKeep) {
+                if conversation[i].trace != nil { conversation[i].trace = nil }
+                if conversation[i].richContent != nil { conversation[i].richContent = nil }
+            }
+        }
+    }
+
     private func runApplyAuditTurn(prompt: String) async {
         currentInput = ""
         errorMessage = nil
@@ -1622,6 +1653,7 @@ public final class AICommandViewModel: ObservableObject {
             trace: nil
         )
         conversation.append(turn)
+        capConversation()
         let turnID = turn.id
 
         let outcome = await DocumentCopilot.applyCurrentWordAuditComments()
@@ -1659,6 +1691,7 @@ public final class AICommandViewModel: ObservableObject {
             trace: nil
         )
         conversation.append(turn)
+        capConversation()
         inputBarState = success ? .result(message: result) : .error(message: result)
         if AppDelegate.shared?.vm.notchState == .minimized {
             hasUnseenCompletion = true

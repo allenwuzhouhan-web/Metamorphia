@@ -29,16 +29,17 @@ public enum ShellRunner {
 
         try process.run()
 
-        let deadline = DispatchTime.now() + timeout
-        DispatchQueue.global().asyncAfter(deadline: deadline) {
+        let timeoutWork = DispatchWorkItem {
             if process.isRunning {
                 process.terminate()
             }
         }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutWork)
 
         let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
         let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        timeoutWork.cancel()
 
         let output = String(data: outputData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let errorOutput = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

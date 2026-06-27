@@ -37,7 +37,10 @@ public final class MarketQuoteMonitor: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var previousQuotes: [String: MarketQuote] = [:]
     private var lastBriefDate: Date?
+    private var wakeObserver: Any?
     private var dismissedHintURLs: Set<String> = []
+    private var dismissedHintOrder: [String] = []
+    private static let dismissedHintCap = 200
 
     private let service = YahooFinanceService()
 
@@ -60,6 +63,11 @@ public final class MarketQuoteMonitor: ObservableObject {
     public func stop() {
         pollTimer?.invalidate()
         pollTimer = nil
+
+        if let observer = wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+            wakeObserver = nil
+        }
     }
 
     // MARK: - Tab / notch state
@@ -241,11 +249,22 @@ public final class MarketQuoteMonitor: ObservableObject {
 
     public func dismissClipboardHint() {
         if let url = clipboardSuggestion?.url {
-            dismissedHintURLs.insert(url)
+            rememberDismissedHint(url)
         }
         clipboardSuggestion = nil
         // Continuum Phase 6: user dismissed the clipboard-hint surface.
         AttentionModel.shared.recordSurfaceDismissal()
+    }
+
+    // Record a dismissed hint URL with a bounded FIFO window so the dedup set
+    // can't grow without limit over a long always-on session.
+    private func rememberDismissedHint(_ url: String) {
+        guard dismissedHintURLs.insert(url).inserted else { return }
+        dismissedHintOrder.append(url)
+        while dismissedHintOrder.count > Self.dismissedHintCap {
+            let oldest = dismissedHintOrder.removeFirst()
+            dismissedHintURLs.remove(oldest)
+        }
     }
 
     private static let financeHosts: [String] = [
@@ -287,7 +306,7 @@ public final class MarketQuoteMonitor: ObservableObject {
     // MARK: - Morning brief
 
     private func observeWake() {
-        NSWorkspace.shared.notificationCenter.addObserver(
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
             queue: .main

@@ -526,12 +526,12 @@ final class LocalSendService: NSObject, ObservableObject {
             }
 
             // Compute total bytes to provide smooth overall progress
-            let totalBytes = uploads.reduce(Int64(0)) { acc, entry in acc + Int64(entry.0.data.count) }
+            let totalBytes = uploads.reduce(Int64(0)) { acc, entry in acc + Int64(entry.0.size) }
             var bytesCompleted: Int64 = 0
 
             for (index, entry) in uploads.enumerated() {
                 let file = entry.0
-                let fileSize = Int64(file.data.count)
+                let fileSize = Int64(file.size)
 
                 try await upload(file: file, sessionID: prepare.sessionID, token: entry.1, to: target) { fileFraction in
                     if totalBytes > 0 {
@@ -830,35 +830,47 @@ final class LocalSendService: NSObject, ObservableObject {
         let id: String
         let name: String
         let mimeType: String
-        let data: Data
+        let size: Int
+        /// On-disk source for file transfers; streamed from disk by URLSession.
+        let fileURL: URL?
+        /// In-memory payload for synthesized text/link items that have no backing file.
+        let data: Data?
     }
 
     private func buildTransferFiles(from items: [Any]) async throws -> [TransferFile] {
         var result: [TransferFile] = []
         for item in items {
             if let url = item as? URL, url.isFileURL {
-                if let data = try? Data(contentsOf: url) {
-                    result.append(TransferFile(
-                        id: UUID().uuidString,
-                        name: url.lastPathComponent,
-                        mimeType: preferredTransferMimeType(for: url),
-                        data: data
-                    ))
-                }
+                // Stream the file from disk rather than materializing it in memory.
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                result.append(TransferFile(
+                    id: UUID().uuidString,
+                    name: url.lastPathComponent,
+                    mimeType: preferredTransferMimeType(for: url),
+                    size: size,
+                    fileURL: url,
+                    data: nil
+                ))
             } else if let url = item as? URL {
                 let string = url.absoluteString
+                let data = Data(string.utf8)
                 result.append(TransferFile(
                     id: UUID().uuidString,
                     name: "link.url",
                     mimeType: "text/uri-list",
-                    data: Data(string.utf8)
+                    size: data.count,
+                    fileURL: nil,
+                    data: data
                 ))
             } else if let text = item as? String {
+                let data = Data(text.utf8)
                 result.append(TransferFile(
                     id: UUID().uuidString,
                     name: "text.txt",
                     mimeType: "text/plain",
-                    data: Data(text.utf8)
+                    size: data.count,
+                    fileURL: nil,
+                    data: data
                 ))
             }
         }
@@ -880,7 +892,7 @@ final class LocalSendService: NSObject, ObservableObject {
             filesMap[file.id] = [
                 "id": file.id,
                 "fileName": file.name,
-                "size": file.data.count,
+                "size": file.size,
                 "fileType": file.mimeType,
             ]
         }
@@ -986,7 +998,7 @@ final class LocalSendService: NSObject, ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue(file.mimeType, forHTTPHeaderField: "Content-Type")
-        request.setValue("\(file.data.count)", forHTTPHeaderField: "Content-Length")
+        request.setValue("\(file.size)", forHTTPHeaderField: "Content-Length")
 
         // Use uploadTask to receive per-byte progress via delegate
         let delegate = UploadProgressDelegate { sent, expected in
@@ -998,7 +1010,7 @@ final class LocalSendService: NSObject, ObservableObject {
         let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
 
         let (data, response) = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Data, URLResponse), Error>) in
-            let task = session.uploadTask(with: request, from: file.data) { data, response, error in
+            let completion: (Data?, URLResponse?, Error?) -> Void = { data, response, error in
                 if let error = error {
                     continuation.resume(throwing: error)
                     return
@@ -1008,6 +1020,15 @@ final class LocalSendService: NSObject, ObservableObject {
                     return
                 }
                 continuation.resume(returning: (data, response))
+            }
+
+            // Stream file-backed transfers straight from disk; only synthesized
+            // text/link items carry an in-memory payload.
+            let task: URLSessionUploadTask
+            if let fileURL = file.fileURL {
+                task = session.uploadTask(with: request, fromFile: fileURL, completionHandler: completion)
+            } else {
+                task = session.uploadTask(with: request, from: file.data ?? Data(), completionHandler: completion)
             }
             task.resume()
         }

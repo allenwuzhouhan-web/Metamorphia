@@ -118,8 +118,13 @@ public struct RecallSceneTool: ToolDefinition {
             return entry.result
         }
 
-        func put(_ key: String, _ value: String) {
-            entries[key] = Entry(result: value, timestamp: Date())
+        func put(_ key: String, _ value: String, ttl: TimeInterval) {
+            // Sweep entries past the TTL before inserting so the cache is
+            // bounded to the working set within one TTL window instead of
+            // accumulating one stale entry per distinct query forever.
+            let now = Date()
+            entries = entries.filter { now.timeIntervalSince($0.value.timestamp) < ttl }
+            entries[key] = Entry(result: value, timestamp: now)
         }
     }
 
@@ -185,7 +190,7 @@ public struct RecallSceneTool: ToolDefinition {
             fallbackFiles: fileHits
         )
 
-        await Self.cache.put(cacheKey, payload)
+        await Self.cache.put(cacheKey, payload, ttl: Self.cacheTTL)
         return payload
     }
 

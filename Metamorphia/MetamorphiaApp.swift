@@ -136,6 +136,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
     private var windowsHiddenForLock = false
     private var optionalShortcutHandlersRegistered = false
+    private var audioTapObserversRegistered = false
+    private var audioTapWorkspaceObservers: [NSObjectProtocol] = []
     private weak var focusWithoutDevToolsMenuItem: NSMenuItem?
     private weak var focusUseDevToolsMenuItem: NSMenuItem?
     
@@ -208,6 +210,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     /// Setup observers for music player state changes to restart AudioTap capture
     private func setupAudioTapMusicObservers() {
+        // Install exactly once. This function is invoked at launch and again on
+        // every `enableRealTimeWaveform` toggle; without this guard each toggle
+        // would add two more permanently-registered workspace observers.
+        guard !audioTapObserversRegistered else { return }
+        audioTapObserversRegistered = true
+
         // Listen for app launches to restart capture when music apps are opened
         let targetBundleIDs = [
             "com.apple.Music",
@@ -221,7 +229,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             "com.coppertino.Vox",
         ]
         
-        NSWorkspace.shared.notificationCenter.addObserver(
+        let launchObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didLaunchApplicationNotification,
             object: nil,
             queue: .main
@@ -229,7 +237,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                   let bundleID = app.bundleIdentifier,
                   targetBundleIDs.contains(bundleID) else { return }
-            
+
             // A target music app was launched, restart capture to include it
             if Defaults[.enableRealTimeWaveform] {
                 print("🎵 [AudioTap] Music app launched: \(bundleID), restarting capture...")
@@ -239,9 +247,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
-        
+        audioTapWorkspaceObservers.append(launchObserver)
+
         // Also observe app terminations to restart capture
-        NSWorkspace.shared.notificationCenter.addObserver(
+        let terminateObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didTerminateApplicationNotification,
             object: nil,
             queue: .main
@@ -249,13 +258,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                   let bundleID = app.bundleIdentifier,
                   targetBundleIDs.contains(bundleID) else { return }
-            
+
             // A target music app was terminated, restart capture to update the list
             if Defaults[.enableRealTimeWaveform] {
                 print("🎵 [AudioTap] Music app terminated: \(bundleID), restarting capture...")
                 AudioTap.shared.restartCapture()
             }
         }
+        audioTapWorkspaceObservers.append(terminateObserver)
     }
     
     func applicationWillTerminate(_ notification: Notification) {
@@ -272,6 +282,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Cancel any pending window size updates
         windowSizeUpdateWorkItem?.cancel()
         NotificationCenter.default.removeObserver(self)
+        // The block-based workspace observers above live on the workspace
+        // notification center keyed by an opaque token, so the default-center
+        // `removeObserver(self)` call doesn't reach them — remove them by token.
+        for token in audioTapWorkspaceObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+        }
+        audioTapWorkspaceObservers.removeAll()
         extensionXPCServiceHost.stop()
         extensionRPCServer.stop()
         

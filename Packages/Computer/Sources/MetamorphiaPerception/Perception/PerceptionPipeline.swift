@@ -114,8 +114,10 @@ public final class PerceptionPipeline: @unchecked Sendable {
 
     /// Rank 8 — retains the most-recent full-resolution screenshot per display so
     /// `VisionDiffer` can crop a diff region without re-capturing. Populated at
-    /// the tail of `capture()` via a detached non-blocking store. Actor-isolated
-    /// and LRU-capped internally.
+    /// the tail of `capture()` via a detached non-blocking store, but only once a
+    /// vision-diff consumer has fetched (see `VisualDiffState.isActive`) — so the
+    /// 10 Hz perception loop doesn't pin a full-screen frame in memory when nobody
+    /// uses the vision-diff API. Actor-isolated and LRU-capped internally.
     public let visualDiffState = VisualDiffState()
 
     // MARK: - Callbacks
@@ -149,9 +151,13 @@ public final class PerceptionPipeline: @unchecked Sendable {
         // best-effort fire-and-forget: even if the Task hasn't started by
         // the time the next `capture()` call runs, that call's TTL check
         // will still miss because the actor resolves sequentially.
-        Task { [cache, ocrState] in
+        Task { [cache, ocrState, visualDiffState] in
             await cache.clear()
             await ocrState.cancelAndClear()
+            // Release the retained full-res vision-diff frame and reset
+            // retention to inactive — it re-arms the next time a vision-diff
+            // consumer fetches.
+            await visualDiffState.clear()
         }
         AXReader.invalidateCache()
     }
@@ -538,7 +544,16 @@ public final class PerceptionPipeline: @unchecked Sendable {
 
         // Rank 8 — retain the full-res image so VisionDiffer can crop without
         // re-capturing. Non-blocking (detached) so it doesn't slow `capture()`.
-        if let retainedImage = dhashResult.image {
+        //
+        // Gated on an active vision-diff session: the 10 Hz PerceptionLoop
+        // drives this path continuously, so retaining a full-screen CGImage on
+        // every tick would pin ~33–59 MB in memory for the app's lifetime even
+        // when nobody ever calls `visionDiff()`. `VisualDiffState` only flips
+        // active once a consumer fetches, and the consumers fall back to a
+        // fresh `ScreenCapture.captureDisplay()` when `fetch()` returns nil —
+        // so dropping the frame here costs at most one extra screenshot on the
+        // first vision-diff of a session.
+        if let retainedImage = dhashResult.image, await visualDiffState.isActive {
             let state = visualDiffState
             Task.detached(priority: .utility) { [state] in
                 await state.store(retainedImage, displayIndex: mainDisplayIndex)
@@ -1118,11 +1133,21 @@ public actor VisualDiffState {
     private var entriesByDisplay: [Int: Entry] = [:]
     private var lastTimestamp: Date = .distantPast
 
+    /// Whether a vision-diff consumer has run this session. Retention is pure
+    /// overhead for the common path (agent perception / OCR / delta encoding)
+    /// that never invokes the Rank 8 vision-diff API, so `store(...)` is gated
+    /// on this flag. The first `fetch`/`fetchAll` call flips it on — that call
+    /// returns nil and the consumer falls back to a fresh capture, but every
+    /// subsequent capture in the session then retains its frame here.
+    public private(set) var isActive = false
+
     public init() {}
 
     /// Store the freshest image for this display. Replaces any prior retention.
-    /// Evicts the oldest entry when the per-display cap is exceeded.
+    /// Evicts the oldest entry when the per-display cap is exceeded. No-op until
+    /// a vision-diff consumer has activated retention (see `isActive`).
     public func store(_ image: SendableImage, displayIndex: Int) {
+        guard isActive else { return }
         let now = Date()
         entriesByDisplay[displayIndex] = Entry(image: image, storedAt: now)
         lastTimestamp = now
@@ -1131,8 +1156,10 @@ public actor VisualDiffState {
 
     /// Fetch the retained image for this display, or nil if nothing is
     /// currently retained (first capture, or the store hasn't completed yet).
+    /// Also activates retention so subsequent captures begin storing frames.
     public func fetch(displayIndex: Int) -> SendableImage? {
-        entriesByDisplay[displayIndex]?.image
+        isActive = true
+        return entriesByDisplay[displayIndex]?.image
     }
 
     /// Timestamp of the most recent store (`.distantPast` if never stored).
@@ -1141,8 +1168,10 @@ public actor VisualDiffState {
     }
 
     /// Fetch every retained image keyed by display index. Used by
-    /// `VisionDiffer.diffMultiDisplay` to build per-display crops.
+    /// `VisionDiffer.diffMultiDisplay` to build per-display crops. Also
+    /// activates retention so subsequent captures begin storing frames.
     public func fetchAll() -> [Int: SendableImage] {
+        isActive = true
         var out: [Int: SendableImage] = [:]
         for (idx, entry) in entriesByDisplay {
             out[idx] = entry.image
@@ -1150,10 +1179,12 @@ public actor VisualDiffState {
         return out
     }
 
-    /// Drop every retained image. Safe to call from any task.
+    /// Drop every retained image and stop retaining until the next vision-diff
+    /// consumer activates again. Safe to call from any task.
     public func clear() {
         entriesByDisplay.removeAll(keepingCapacity: true)
         lastTimestamp = .distantPast
+        isActive = false
     }
 
     private func evictLRUIfNeeded() {
