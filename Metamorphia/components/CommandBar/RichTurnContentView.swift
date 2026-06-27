@@ -11,22 +11,31 @@ import MetamorphiaAgentKit
 struct RichTurnContentView: View {
     let content: RichTurnContent
     let onDocumentReviewAction: ((DocumentReviewAction) async -> Void)?
+    let onDocumentRecheck: (() async -> Void)?
     let onPowerPointRewriteAction: ((PowerPointRewriteAction) async -> Void)?
     let onPowerPointDesignAction: ((PowerPointDesignAction) async -> Void)?
     let onPowerPointDirectEditAction: ((PowerPointDirectEditControlAction) async -> Void)?
+    let onPowerPointFinishAction: ((PowerPointFinishAction) async -> Void)?
+    let onExcelAnalysisAction: ((ExcelAnalysisAction) async -> Void)?
 
     init(
         content: RichTurnContent,
         onDocumentReviewAction: ((DocumentReviewAction) async -> Void)?,
+        onDocumentRecheck: (() async -> Void)? = nil,
         onPowerPointRewriteAction: ((PowerPointRewriteAction) async -> Void)? = nil,
         onPowerPointDesignAction: ((PowerPointDesignAction) async -> Void)? = nil,
-        onPowerPointDirectEditAction: ((PowerPointDirectEditControlAction) async -> Void)? = nil
+        onPowerPointDirectEditAction: ((PowerPointDirectEditControlAction) async -> Void)? = nil,
+        onPowerPointFinishAction: ((PowerPointFinishAction) async -> Void)? = nil,
+        onExcelAnalysisAction: ((ExcelAnalysisAction) async -> Void)? = nil
     ) {
         self.content = content
         self.onDocumentReviewAction = onDocumentReviewAction
+        self.onDocumentRecheck = onDocumentRecheck
         self.onPowerPointRewriteAction = onPowerPointRewriteAction
         self.onPowerPointDesignAction = onPowerPointDesignAction
         self.onPowerPointDirectEditAction = onPowerPointDirectEditAction
+        self.onPowerPointFinishAction = onPowerPointFinishAction
+        self.onExcelAnalysisAction = onExcelAnalysisAction
     }
 
     var body: some View {
@@ -55,8 +64,11 @@ struct RichTurnContentView: View {
             case .documentReview(let review):
                 DocumentReviewResultCard(
                     result: review,
-                    onAction: onDocumentReviewAction
+                    onAction: onDocumentReviewAction,
+                    onRecheck: onDocumentRecheck
                 )
+            case .documentRecheck(let recheck):
+                DocumentRecheckResultCard(result: recheck)
             case .powerPointRewrite(let rewrite):
                 PowerPointRewriteResultCard(
                     result: rewrite,
@@ -71,6 +83,16 @@ struct RichTurnContentView: View {
                 PowerPointDirectEditResultCard(
                     result: edit,
                     onAction: onPowerPointDirectEditAction
+                )
+            case .powerPointFinish(let finish):
+                PowerPointFinishResultCard(
+                    result: finish,
+                    onAction: onPowerPointFinishAction
+                )
+            case .excelAnalysis(let analysis):
+                ExcelAnalysisResultCard(
+                    result: analysis,
+                    onAction: onExcelAnalysisAction
                 )
             }
         }

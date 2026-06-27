@@ -240,6 +240,9 @@ struct TranscriptView: View {
             onDocumentReviewAction: { action in
                 await viewModel.handleRichContentAction(turnID: turnID, action: action)
             },
+            onDocumentRecheck: {
+                await viewModel.handleRecheck(turnID: turnID)
+            },
             onPowerPointRewriteAction: { action in
                 await viewModel.handlePowerPointRewriteAction(turnID: turnID, action: action)
             },
@@ -248,6 +251,12 @@ struct TranscriptView: View {
             },
             onPowerPointDirectEditAction: { action in
                 await viewModel.handlePowerPointDirectEditAction(turnID: turnID, action: action)
+            },
+            onPowerPointFinishAction: { action in
+                await viewModel.handlePowerPointFinishAction(turnID: turnID, action: action)
+            },
+            onExcelAnalysisAction: { action in
+                await viewModel.handleExcelAnalysisAction(turnID: turnID, action: action)
             }
         )
     }

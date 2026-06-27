@@ -152,6 +152,69 @@ public enum RichResultParser {
         }
     }
 
+    // MARK: - PowerPoint finish marker: [PPT_FINISH] ... [/PPT_FINISH]
+
+    public static func parsePowerPointFinish(in text: String) -> RichParseResult? {
+        guard let payload = extractMarkedPayload(
+            in: text,
+            startToken: "[PPT_FINISH]",
+            endToken: "[/PPT_FINISH]"
+        ), let finish = decodePowerPointFinish(from: payload) else { return nil }
+
+        let cleaned = removeMarkedPayload(
+            from: text,
+            startToken: "[PPT_FINISH]",
+            endToken: "[/PPT_FINISH]"
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayText = cleaned.isEmpty ? finish.summary : cleaned
+        return RichParseResult(
+            content: .powerPointFinish(finish),
+            displayText: displayText
+        )
+    }
+
+    private static func decodePowerPointFinish(from payload: String) -> PowerPointFinishResult? {
+        let normalizedPayload = normalizeDocumentReviewPayload(payload)
+        guard let data = normalizedPayload.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(PowerPointFinishResult.self, from: data)
+    }
+
+    // MARK: - Excel analysis marker: [XL_ANALYSIS] ... [/XL_ANALYSIS]
+
+    /// Decodes only the model's PLAN (kind + columns + interpretation) into a
+    /// placeholder result. The view model fills the statistics via
+    /// `ExcelCopilot.computeResult` against the captured table.
+    public static func parseExcelAnalysis(in text: String) -> RichParseResult? {
+        guard let payload = extractMarkedPayload(
+            in: text,
+            startToken: "[XL_ANALYSIS]",
+            endToken: "[/XL_ANALYSIS]"
+        ) else { return nil }
+
+        let normalized = normalizeDocumentReviewPayload(payload)
+        guard let data = normalized.data(using: .utf8),
+              let plan = try? JSONDecoder().decode(ExcelAnalysisPlan.self, from: data) else { return nil }
+
+        let placeholder = ExcelAnalysisResult(
+            kind: plan.kind,
+            workbookName: "",
+            sheetName: "",
+            sourceAddress: "",
+            yColumn: plan.yColumn,
+            xColumns: plan.xColumns,
+            groupColumn: plan.groupColumn,
+            interpretation: plan.interpretation
+        )
+
+        let cleaned = removeMarkedPayload(
+            from: text,
+            startToken: "[XL_ANALYSIS]",
+            endToken: "[/XL_ANALYSIS]"
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayText = cleaned.isEmpty ? plan.interpretation : cleaned
+        return RichParseResult(content: .excelAnalysis(placeholder), displayText: displayText)
+    }
+
     // MARK: - PowerPoint rewrite marker: [PPT_REWRITE] ... [/PPT_REWRITE]
 
     public static func parsePowerPointRewrite(in text: String) -> RichParseResult? {
