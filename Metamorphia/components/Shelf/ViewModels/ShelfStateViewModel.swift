@@ -40,7 +40,13 @@ final class ShelfStateViewModel: ObservableObject {
     private var pendingBookmarkUpdates: [ShelfItem.ID: Data] = [:]
     private var updateTask: Task<Void, Never>?
 
+    // Bounded memo of resolved bookmark URLs keyed by bookmark Data, so repeated
+    // reads from SwiftUI view bodies (displayName/fileURL/icon) don't re-run the
+    // synchronous security-scoped bookmark resolve on every body recomputation.
+    private let resolvedURLCache = NSCache<NSData, NSURL>()
+
     private init() {
+        resolvedURLCache.countLimit = 256
         items = ShelfPersistenceService.shared.load()
     }
 
@@ -91,14 +97,23 @@ final class ShelfStateViewModel: ObservableObject {
             await Task.yield()
             
             guard let self = self else { return }
-            
+
+            // Apply all pending updates to a local copy and assign `items` once,
+            // so a batch of N bookmark refreshes triggers a single didSet/save
+            // instead of N.
+            var updated = self.items
+            var didChange = false
             for (itemID, bookmarkData) in self.pendingBookmarkUpdates {
-                if let idx = self.items.firstIndex(where: { $0.id == itemID }),
-                   case .file = self.items[idx].kind {
-                    self.items[idx].kind = .file(bookmark: bookmarkData)
+                if let idx = updated.firstIndex(where: { $0.id == itemID }),
+                   case .file = updated[idx].kind {
+                    updated[idx].kind = .file(bookmark: bookmarkData)
+                    didChange = true
                 }
             }
-            
+            if didChange {
+                self.items = updated
+            }
+
             self.pendingBookmarkUpdates.removeAll()
         }
     }
@@ -140,13 +155,34 @@ final class ShelfStateViewModel: ObservableObject {
 
     func resolveFileURL(for item: ShelfItem) -> URL? {
         guard case .file(let bookmarkData) = item.kind else { return nil }
+        if let cached = resolvedURLCache.object(forKey: bookmarkData as NSData) {
+            return cached as URL
+        }
         let bookmark = Bookmark(data: bookmarkData)
         let result = bookmark.resolve()
         if let refreshed = result.refreshedData, refreshed != bookmarkData {
             NSLog("Bookmark for \(item) stale; refreshing")
             scheduleDeferredBookmarkUpdate(for: item, bookmark: refreshed)
         }
+        if let url = result.url {
+            resolvedURLCache.setObject(url as NSURL, forKey: bookmarkData as NSData)
+        }
         return result.url
+    }
+
+    /// Resolves a bookmark to a file URL using the same bounded memo as
+    /// `resolveFileURL`, but never schedules a bookmark refresh. Intended for
+    /// read-only callers (e.g. SwiftUI view bodies computing a display name)
+    /// that must not mutate `items` during a view update.
+    func cachedFileURL(for bookmarkData: Data) -> URL? {
+        if let cached = resolvedURLCache.object(forKey: bookmarkData as NSData) {
+            return cached as URL
+        }
+        let url = Bookmark(data: bookmarkData).resolveURL()
+        if let url {
+            resolvedURLCache.setObject(url as NSURL, forKey: bookmarkData as NSData)
+        }
+        return url
     }
 
     func resolveAndUpdateBookmark(for item: ShelfItem) -> URL? {

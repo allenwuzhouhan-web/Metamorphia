@@ -805,7 +805,7 @@ public final class RetraceIndex: @unchecked Sendable {
     }
 
     private func bindText(_ stmt: OpaquePointer?, _ index: Int32, _ value: String) {
-        sqlite3_bind_text(stmt, index, (value as NSString).utf8String, -1, nil)
+        value.withCString { sqlite3_bind_text(stmt, index, $0, -1, SQLITE_TRANSIENT) }
     }
 
     private func bindTextOrNull(_ stmt: OpaquePointer?, _ index: Int32, _ value: String?) {

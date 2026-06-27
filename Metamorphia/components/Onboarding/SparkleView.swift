@@ -80,6 +80,17 @@ class SparkleNSView: NSView {
         super.setFrameSize(newSize)
         updateEmitterForCurrentBounds()
     }
+
+    // Pause particle emission while the view is offscreen (not in a window)
+    // so the emitter idles instead of rendering continuously.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            updateEmitterForCurrentBounds()
+        } else {
+            emitterLayer?.emitterCells?.first?.birthRate = 0
+        }
+    }
 }
 
 struct SparkleView: NSViewRepresentable {

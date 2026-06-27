@@ -24,7 +24,7 @@ import Foundation
 import OSLog
 import SwiftUI
 
-enum LogCategory: String {
+enum LogCategory: String, CaseIterable {
     case lifecycle = "🔄"
     case memory = "💾"
     case performance = "⚡️"
@@ -59,15 +59,20 @@ struct Logger {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
     }()
-    private static var osLoggerCache: [LogCategory: OSLog] = [:]
+    // Precomputed once so no runtime mutation occurs; safe to read from any thread.
+    private static let osLoggers: [LogCategory: OSLog] = {
+        var loggers: [LogCategory: OSLog] = [:]
+        for category in LogCategory.allCases {
+            loggers[category] = OSLog(subsystem: subsystem, category: category.osCategoryName)
+        }
+        return loggers
+    }()
 
     private static func osLogger(for category: LogCategory) -> OSLog {
-        if let cached = osLoggerCache[category] {
-            return cached
+        if let logger = osLoggers[category] {
+            return logger
         }
-        let logger = OSLog(subsystem: subsystem, category: category.osCategoryName)
-        osLoggerCache[category] = logger
-        return logger
+        return OSLog(subsystem: subsystem, category: category.osCategoryName)
     }
 
     static func log(

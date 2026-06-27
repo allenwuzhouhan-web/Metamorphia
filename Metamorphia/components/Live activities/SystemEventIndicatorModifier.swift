@@ -24,16 +24,8 @@ import SwiftUI
 import Defaults
 
 struct SystemEventIndicatorModifier: View {
-    @EnvironmentObject var vm: MetamorphiaViewModel
     @Binding var eventType: SneakContentType
-    @Binding var value: CGFloat {
-        didSet {
-            DispatchQueue.main.async {
-                self.sendEventBack(value)
-                self.vm.objectWillChange.send()
-            }
-        }
-    }
+    @Binding var value: CGFloat
     @Binding var icon: String
     let showSlider: Bool = false
     var sendEventBack: (CGFloat) -> Void
@@ -103,6 +95,9 @@ struct SystemEventIndicatorModifier: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .symbolVariant(.fill)
         .imageScale(.large)
+        .onChange(of: value) { _, newValue in
+            sendEventBack(newValue)
+        }
     }
     
     func SpeakerSymbol(_ value: CGFloat) -> String {

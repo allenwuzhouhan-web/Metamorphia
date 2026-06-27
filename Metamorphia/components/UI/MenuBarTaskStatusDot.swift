@@ -36,19 +36,30 @@ final class MenuBarTaskStatusStore: ObservableObject {
 
 struct MenuBarTaskStatusDot: View {
     @ObservedObject private var store = MenuBarTaskStatusStore.shared
-    @State private var pulsePhase: Double = 0
-    private let pulseTimer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        Image(nsImage: MenuBarTaskStatusImage.make(status: store.status, phase: pulsePhase))
+        Group {
+            if store.status == .inProgress {
+                // Only the in-progress state pulses, so the schedule runs solely
+                // while a task is active and stops the moment it finishes.
+                TimelineView(.animation) { context in
+                    dotImage(phase: context.date.timeIntervalSinceReferenceDate)
+                }
+            } else {
+                // Idle/static states render a single frame with no timer, so the
+                // menu-bar item can sleep and App Nap can engage.
+                dotImage(phase: 0)
+            }
+        }
+        .frame(width: 18, height: 18)
+    }
+
+    private func dotImage(phase: Double) -> some View {
+        Image(nsImage: MenuBarTaskStatusImage.make(status: store.status, phase: phase))
             .resizable()
             .interpolation(.high)
             .renderingMode(.original)
             .accessibilityLabel(accessibilityLabel)
-        .frame(width: 18, height: 18)
-            .onReceive(pulseTimer) { date in
-                pulsePhase = date.timeIntervalSinceReferenceDate
-            }
     }
 
     private var accessibilityLabel: String {

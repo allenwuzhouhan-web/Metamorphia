@@ -192,9 +192,8 @@ enum DocumentCopilot {
         let resolvedKind = candidate.kind
         if let requestedKind, requestedKind != resolvedKind { return nil }
 
-        let descriptor = await Task.detached(priority: .userInitiated) {
-            frontmostDocumentDescriptor(bundleID: bundleID)
-        }.value
+        // NSAppleScript is not thread-safe — run the descriptor probe on the main actor.
+        let descriptor = await MainActor.run { frontmostDocumentDescriptor(bundleID: bundleID) }
 
         if let descriptor,
            let path = descriptor.path,
@@ -324,14 +323,17 @@ enum DocumentCopilot {
 
         if let requestedKind,
            let bundleID = bundleID(for: requestedKind),
-           !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty,
-           frontmostDocumentDescriptor(bundleID: bundleID) != nil {
-            return (
-                bundleID: bundleID,
-                kind: requestedKind,
-                appName: displayAppName(for: requestedKind),
-                sourceDescription: "Open \(displayAppName(for: requestedKind)) file"
-            )
+           !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty {
+            // NSAppleScript is not thread-safe — run the descriptor probe on the main actor.
+            let descriptor = await MainActor.run { frontmostDocumentDescriptor(bundleID: bundleID) }
+            if descriptor != nil {
+                return (
+                    bundleID: bundleID,
+                    kind: requestedKind,
+                    appName: displayAppName(for: requestedKind),
+                    sourceDescription: "Open \(displayAppName(for: requestedKind)) file"
+                )
+            }
         }
 
         return nil
@@ -582,9 +584,8 @@ enum DocumentCopilot {
         let bundleID = candidate.bundleID
         let kind = candidate.kind
 
-        let descriptor = await Task.detached(priority: .userInitiated) {
-            frontmostDocumentDescriptor(bundleID: bundleID)
-        }.value
+        // NSAppleScript is not thread-safe — run the descriptor probe on the main actor.
+        let descriptor = await MainActor.run { frontmostDocumentDescriptor(bundleID: bundleID) }
         guard let descriptor,
               let path = descriptor.path,
               let fileURL = sanitizedFileURL(path: path) else {

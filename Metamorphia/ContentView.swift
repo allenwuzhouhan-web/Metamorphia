@@ -618,7 +618,16 @@ struct ContentView: View {
                 clearMusicControlVisibilityDeadline()
             }
             enqueueMusicControlWindowSync(forceRefresh: true)
-            startHiddenEdgeHoverPolling()
+            if shouldUseHiddenEdgeHoverPolling {
+                startHiddenEdgeHoverPolling()
+            }
+        }
+        .onChange(of: shouldUseHiddenEdgeHoverPolling) { _, needed in
+            if needed {
+                startHiddenEdgeHoverPolling()
+            } else {
+                stopHiddenEdgeHoverPolling()
+            }
         }
         .onChange(of: vm.notchState) { _, state in
             if state == .open {

@@ -35,6 +35,7 @@ struct ShelfItemView: View {
     @State private var showStack = false
     @State private var cachedPreviewImage: NSImage?
     @State private var debouncedDropTarget = false
+    @State private var dropTargetDebounceTask: Task<Void, Never>?
 
     private var isSelected: Bool { viewModel.isSelected }
     private var shouldHideDuringDrag: Bool { selection.isDragging && selection.isSelected(item.id) && false }
@@ -80,9 +81,12 @@ struct ShelfItemView: View {
         }
         .onChange(of: viewModel.isDropTargeted) { _, targeted in
             vm.dragDetectorTargeting = targeted
-            // Debounce drop target state changes
-            Task { @MainActor in
+            // Debounce drop target state changes; cancel any in-flight task so
+            // only the latest toggle takes effect and tasks don't pile up.
+            dropTargetDebounceTask?.cancel()
+            dropTargetDebounceTask = Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(50))
+                guard !Task.isCancelled else { return }
                 debouncedDropTarget = targeted
             }
         }

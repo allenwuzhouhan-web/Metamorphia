@@ -77,9 +77,8 @@ struct ShelfItem: Identifiable, Codable, Equatable, Sendable {
     var displayName: String {
         switch kind {
         case .file(let bookmarkData):
-            let bookmark = Bookmark(data: bookmarkData)
-            guard let resolvedURL = bookmark.resolveURL() else { return "" }
-            
+            guard let resolvedURL = ShelfStateViewModel.shared.cachedFileURL(for: bookmarkData) else { return "" }
+
             // Check for stored data files (text blocks, weblocs, etc.) to provide friendly names
             if resolvedURL.pathExtension.lowercased() == "json" && resolvedURL.path.contains("TextBlocks") {
                 do {

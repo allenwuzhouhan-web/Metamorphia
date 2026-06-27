@@ -39,6 +39,7 @@ class BluetoothAudioManager: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let coordinator = MetamorphiaViewCoordinator.shared
     private var pollingTimer: Timer?
+    private let pollingQueue = DispatchQueue(label: "com.dynamicisland.bluetooth.polling", qos: .utility)
     private let bluetoothPreferencesSuite = "/Library/Preferences/com.apple.Bluetooth"
     private let batteryReader = BluetoothLEBatteryReader()
     private var isLiveBatteryRefreshInFlight = false
@@ -119,50 +120,66 @@ class BluetoothAudioManager: ObservableObject {
     
     /// Starts polling for device connection changes (fallback mechanism)
     private func startPollingForChanges() {
-        print("🎧 [BluetoothAudioManager] Starting polling timer (3s interval)...")
-        
-        pollingTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+        print("🎧 [BluetoothAudioManager] Starting polling timer (10s interval)...")
+
+        // DistributedNotificationCenter observers handle the common connect/disconnect
+        // cases; this timer is a low-frequency fallback. Use a longer interval to keep
+        // the steady-state cost minimal.
+        pollingTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             self?.checkForDeviceChanges()
         }
     }
-    
-    /// Checks for device connection/disconnection changes
+
+    /// Checks for device connection/disconnection changes.
+    ///
+    /// The IOBluetooth enumeration (powerState / pairedDevices() / isAudioDevice(), which
+    /// performs synchronous SDP lookups per device) runs off the main thread; only the
+    /// comparison against the published `connectedDevices` state and any resulting mutation
+    /// hop back to the main thread.
     private func checkForDeviceChanges() {
-        // Check if Bluetooth is powered on
-        guard IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON else {
-            // Bluetooth is off - clear connected devices if any
-            if !connectedDevices.isEmpty {
-                print("🎧 [BluetoothAudioManager] ⚠️ Bluetooth powered off - clearing connected devices")
-                connectedDevices.removeAll()
-                isBluetoothAudioConnected = false
+        pollingQueue.async { [weak self] in
+            guard let self else { return }
+
+            // Check if Bluetooth is powered on
+            guard IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON else {
+                // Bluetooth is off - clear connected devices if any
+                DispatchQueue.main.async {
+                    if !self.connectedDevices.isEmpty {
+                        print("🎧 [BluetoothAudioManager] ⚠️ Bluetooth powered off - clearing connected devices")
+                        self.connectedDevices.removeAll()
+                        self.isBluetoothAudioConnected = false
+                    }
+                }
+                return
             }
-            return
-        }
-        
-        guard let pairedDevices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else {
-            return
-        }
-        
-        let currentlyConnectedAddresses = Set(
-            pairedDevices
-                .filter { $0.isConnected() && isAudioDevice($0) }
-                .compactMap { $0.addressString }
-        )
-        
-        let previousAddresses = Set(connectedDevices.map { $0.address })
-        
-        // Check for new connections
-        let newAddresses = currentlyConnectedAddresses.subtracting(previousAddresses)
-        if !newAddresses.isEmpty {
-            print("🎧 [BluetoothAudioManager] 🔍 Polling detected new connection(s)")
-            checkForNewlyConnectedDevices()
-        }
-        
-        // Check for disconnections
-        let removedAddresses = previousAddresses.subtracting(currentlyConnectedAddresses)
-        if !removedAddresses.isEmpty {
-            print("🎧 [BluetoothAudioManager] 🔍 Polling detected disconnection(s)")
-            updateConnectedDevices()
+
+            guard let pairedDevices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else {
+                return
+            }
+
+            let currentlyConnectedAddresses = Set(
+                pairedDevices
+                    .filter { $0.isConnected() && self.isAudioDevice($0) }
+                    .compactMap { $0.addressString }
+            )
+
+            DispatchQueue.main.async {
+                let previousAddresses = Set(self.connectedDevices.map { $0.address })
+
+                // Check for new connections
+                let newAddresses = currentlyConnectedAddresses.subtracting(previousAddresses)
+                if !newAddresses.isEmpty {
+                    print("🎧 [BluetoothAudioManager] 🔍 Polling detected new connection(s)")
+                    self.checkForNewlyConnectedDevices()
+                }
+
+                // Check for disconnections
+                let removedAddresses = previousAddresses.subtracting(currentlyConnectedAddresses)
+                if !removedAddresses.isEmpty {
+                    print("🎧 [BluetoothAudioManager] 🔍 Polling detected disconnection(s)")
+                    self.updateConnectedDevices()
+                }
+            }
         }
     }
     

@@ -32,6 +32,14 @@ public final class FileHarvest: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.metamorphia.retrace.fileharvest", qos: .utility)
     private let maxFileBytes: Int64 = 50 * 1024 * 1024
 
+    // FSEvent coalescing: per-root trailing-edge debounce + in-flight guard so
+    // rapid saves collapse into at most one scan per root instead of spawning
+    // overlapping full-tree re-crawls. All mutated only on `queue`.
+    private var pendingScans: [URL: Task<Void, Never>] = [:]
+    private var scanningRoots: Set<URL> = []
+    private var rescanRequested: Set<URL> = []
+    private let scanDebounceNanos: UInt64 = 400_000_000  // 400ms quiet window
+
     public init(ingest: RetraceIngest) {
         self.ingest = ingest
     }
@@ -56,6 +64,9 @@ public final class FileHarvest: @unchecked Sendable {
             guard let self else { return }
             for (_, source) in self.watches { source.cancel() }
             self.watches.removeAll()
+            for (_, task) in self.pendingScans { task.cancel() }
+            self.pendingScans.removeAll()
+            self.rescanRequested.removeAll()
         }
         rescanTask?.cancel()
     }
@@ -71,9 +82,9 @@ public final class FileHarvest: @unchecked Sendable {
             queue: queue
         )
         source.setEventHandler { [weak self] in
-            Task.detached(priority: .utility) {
-                await self?.incrementalScan(root: root)
-            }
+            // Runs on `queue`. Coalesce bursts of FSEvents into a single
+            // trailing scan per root.
+            self?.scheduleScan(root: root)
         }
         source.setCancelHandler { close(fd) }
         source.resume()
@@ -97,6 +108,44 @@ public final class FileHarvest: @unchecked Sendable {
             // Yield cooperatively every 50 files so we don't monopolize.
             if count % 50 == 0 { await Task.yield() }
             if Task.isCancelled { break }
+        }
+    }
+
+    /// Schedule a trailing-edge debounced scan for `root`. Must be called on
+    /// `queue`. Restarts the quiet timer if events keep arriving, so a burst of
+    /// saves results in one scan after things settle.
+    private func scheduleScan(root: URL) {
+        pendingScans[root]?.cancel()
+        pendingScans[root] = Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: self.scanDebounceNanos)
+            if Task.isCancelled { return }
+            self.queue.async {
+                self.pendingScans[root] = nil
+                self.runScan(root: root)
+            }
+        }
+    }
+
+    /// Start a scan for `root`, or mark a rescan pending if one is already
+    /// running so changes during the scan aren't missed. Must be called on
+    /// `queue`.
+    private func runScan(root: URL) {
+        if scanningRoots.contains(root) {
+            // A scan is in flight; remember to run one more pass afterwards.
+            rescanRequested.insert(root)
+            return
+        }
+        scanningRoots.insert(root)
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+            await self.incrementalScan(root: root)
+            self.queue.async {
+                self.scanningRoots.remove(root)
+                if self.rescanRequested.remove(root) != nil {
+                    self.runScan(root: root)
+                }
+            }
         }
     }
 

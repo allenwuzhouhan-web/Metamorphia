@@ -8034,8 +8034,20 @@ struct AppIconImage: View {
         .frame(width: size, height: size)
     }
 
+    /// Caches rasterized 32x32 thumbnails keyed by bundle identifier so repeated
+    /// body recomputes don't re-hit NSWorkspace or re-rasterize on the main thread.
+    private static let iconCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 64
+        return cache
+    }()
+
     private func resolvedIcon() -> NSImage? {
         for bundleID in bundleIdentifiers {
+            let cacheKey = bundleID as NSString
+            if let cached = Self.iconCache.object(forKey: cacheKey) {
+                return cached
+            }
             if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
                 let icon = NSWorkspace.shared.icon(forFile: appURL.path)
                 // NSWorkspace returns a valid icon even for generic apps;
@@ -8046,6 +8058,7 @@ struct AppIconImage: View {
                           from: NSRect(origin: .zero, size: icon.size),
                           operation: .copy, fraction: 1.0)
                 thumb.unlockFocus()
+                Self.iconCache.setObject(thumb, forKey: cacheKey)
                 return thumb
             }
         }

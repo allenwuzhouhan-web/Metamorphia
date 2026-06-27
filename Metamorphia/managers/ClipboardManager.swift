@@ -34,12 +34,14 @@ struct ClipboardItem: Identifiable, Codable {
     // Store different types of data - avoid large binary data in UserDefaults
     let stringData: String?
     let imageFileName: String? // Store filename instead of data
+    let imageByteCount: Int? // Cheap fingerprint for image de-dup without re-reading from disk
     let fileURLs: [String]?
     let rtfData: Data? // RTF is typically small, so we can keep this
     
     init(stringData: String, type: ClipboardItemType) {
         self.stringData = stringData
         self.imageFileName = nil
+        self.imageByteCount = nil
         self.fileURLs = nil
         self.rtfData = nil
         self.type = type
@@ -61,10 +63,12 @@ struct ClipboardItem: Identifiable, Codable {
         do {
             try imageData.write(to: fileURL)
             self.imageFileName = fileName
+            self.imageByteCount = imageData.count
             self.preview = "Image (\(ByteCountFormatter.string(fromByteCount: Int64(imageData.count), countStyle: .file)))"
         } catch {
             print("Failed to save image data: \(error)")
             self.imageFileName = nil
+            self.imageByteCount = nil
             self.preview = "Image (failed to save)"
         }
     }
@@ -72,6 +76,7 @@ struct ClipboardItem: Identifiable, Codable {
     init(fileURLs: [String]) {
         self.stringData = nil
         self.imageFileName = nil
+        self.imageByteCount = nil
         self.fileURLs = fileURLs
         self.rtfData = nil
         self.type = .file
@@ -88,6 +93,7 @@ struct ClipboardItem: Identifiable, Codable {
         // RTF data is typically small, so we can keep it in UserDefaults
         self.stringData = plainText
         self.imageFileName = nil
+        self.imageByteCount = nil
         self.fileURLs = nil
         self.rtfData = rtfData.count > 100000 ? nil : rtfData // Skip very large RTF files
         self.type = .rtf
@@ -489,7 +495,14 @@ class ClipboardManager: ObservableObject {
         case .text, .url, .unknown:
             return item1.stringData == item2.stringData
         case .image:
-            // For images, compare the actual data if both are available
+            // Same backing file is trivially the same content.
+            if item1.imageFileName == item2.imageFileName { return true }
+            // Cheap fingerprint first: differing byte counts can't be equal, so we
+            // avoid re-reading both PNGs from disk on the main-thread de-dup scan.
+            if let count1 = item1.imageByteCount, let count2 = item2.imageByteCount, count1 != count2 {
+                return false
+            }
+            // Counts match (or are unknown for legacy items): confirm with full data.
             let data1 = item1.getImageData()
             let data2 = item2.getImageData()
             return data1 == data2

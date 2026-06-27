@@ -47,7 +47,6 @@ struct LockScreenWeatherWidget: View {
 	@State private var calendarRowVisible: Bool = false
 	@State private var lastCalendarLine: String = ""
 	@State private var calendarRowRenderToken: Int = 0
-	@State private var widgetWidthRemeasureToken: Int = 0
 	@State private var lastBadgeLogKey: String = ""
 	private var currentCalendarEventID: String {
 		nextCalendarEvent?.id ?? "no_event"
@@ -496,7 +495,6 @@ struct LockScreenWeatherWidget: View {
 					.animation(.easeInOut(duration: 0.3), value: collapseOffsetForBottomRow)
 			}
 		}
-		.id(widgetWidthRemeasureToken)
 		.frame(maxWidth: .infinity, alignment: .leading)
 		.foregroundStyle(Color.white.opacity(0.65))
 		.padding(.horizontal, 10)
@@ -536,16 +534,6 @@ struct LockScreenWeatherWidget: View {
 		.onDisappear { minuteTicker.stop() }
 		.onChange(of: currentCalendarEventID) { _, _ in
 			calendarRowRenderToken &+= 1
-			if nextCalendarEvent != nil {
-				widgetWidthRemeasureToken &+= 1
-			}
-
-			DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
-				calendarRowRenderToken &+= 1
-				if nextCalendarEvent != nil {
-					widgetWidthRemeasureToken &+= 1
-				}
-			}
 		}
 		.onChange(of: currentCalendarEventID) { _, _ in
 			if let event = nextCalendarEvent {
@@ -747,7 +735,6 @@ struct LockScreenWeatherWidget: View {
 		}
 
 		let badgeColor = reminderChipColor(for: event)
-		logBadgeColor(event: event, reason: "icon-config")
 
 		if event.type.isReminder || event.calendar.isReminder {
 			if isReminderCritical(event) {

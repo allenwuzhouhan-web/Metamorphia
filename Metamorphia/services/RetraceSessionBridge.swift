@@ -22,11 +22,15 @@ final class RetraceSessionBridge {
 
     func start(stream: ActivityStream) {
         subscription?.cancel()
-        subscription = stream.events.sink { event in
-            Task.detached(priority: .background) {
-                await Self.handle(event)
+        subscription = stream.events
+            .compactMap { event -> ActivityEvent? in
+                if case .sessionClosed = event { return event } else { return nil }
             }
-        }
+            .sink { event in
+                Task.detached(priority: .background) {
+                    await Self.handle(event)
+                }
+            }
     }
 
     func stop() {

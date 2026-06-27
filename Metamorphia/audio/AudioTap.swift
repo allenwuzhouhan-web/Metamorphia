@@ -28,8 +28,11 @@ import os.log
 
 private let audioTapLog = OSLog(subsystem: "com.johannendersmith.metamorphia", category: "AudioTap")
 
-// Debug: track callback invocations
-private var callbackCount: Int = 0
+#if DEBUG
+// Debug-only: track callback invocations. Mutated atomically from the real-time
+// IOProc and reset from audioQueue, so it must be an atomic to avoid a data race.
+private var callbackCount: Int64 = 0
+#endif
 
 // CoreAudio fires this on a high-priority background real-time thread.
 let audioIOProc: AudioDeviceIOProc = {
@@ -51,22 +54,26 @@ let audioIOProc: AudioDeviceIOProc = {
 
         // Pass the mono array directly to C++
         scanner.bridge.processBuffer(floatData, count: floatCount)
-        
-        // Debug: log periodically with audio level info
-        callbackCount += 1
-        if callbackCount % 1000 == 0 {
+
+        #if DEBUG
+        // Debug-only diagnostics. The O(floatCount) scan and os_log calls must
+        // never run inside the IOProc on the real-time thread in release builds —
+        // they can take locks / allocate and cause audio glitches or watchdog kills.
+        let count = OSAtomicIncrement64(&callbackCount)
+        if count % 1000 == 0 {
             // Calculate max absolute value in buffer to check if audio is present
             var maxVal: Float = 0.0
             for i in 0..<Int(floatCount) {
                 let absVal = abs(floatData[i])
                 if absVal > maxVal { maxVal = absVal }
             }
-            os_log(.debug, log: audioTapLog, "🔊 Audio callback fired %d times, buffer size: %d, max amplitude: %f", callbackCount, floatCount, maxVal)
-            
+            os_log(.debug, log: audioTapLog, "🔊 Audio callback fired %lld times, buffer size: %d, max amplitude: %f", count, floatCount, maxVal)
+
             // Also log the current band values from the bridge
             let mags = scanner.bridge.getSmoothedMagnitudes()
             os_log(.debug, log: audioTapLog, "🎚️ Bridge magnitudes: [%f, %f, %f, %f]", mags.x, mags.y, mags.z, mags.w)
         }
+        #endif
     }
 
     return noErr
@@ -258,7 +265,13 @@ class AudioTap: NSObject {
         }
 
         captureIsRunning = true
-        callbackCount = 0
+        #if DEBUG
+        // Atomically reset the debug counter so it doesn't race with the IOProc.
+        var current = callbackCount
+        while !OSAtomicCompareAndSwap64(current, 0, &callbackCount) {
+            current = callbackCount
+        }
+        #endif
         print("🟢 [AudioTap] CoreAudio CATap flowing through Aggregate Device!")
     }
     
@@ -323,9 +336,13 @@ class AudioTap: NSObject {
         aggregateDeviceID = kAudioObjectUnknown
         ioProcID = nil
         captureIsRunning = false
-        
-        // Reset display magnitudes
-        displayMagnitudes = simd_float4(0, 0, 0, 0)
+
+        // Reset display magnitudes on the main thread. getSmoothedMagnitudes()
+        // reads and writes displayMagnitudes from the main-thread spectrum timer,
+        // so confining the reset to main keeps all access on a single thread.
+        DispatchQueue.main.async { [weak self] in
+            self?.displayMagnitudes = simd_float4(0, 0, 0, 0)
+        }
 
         print("🔴 [AudioTap] CoreAudio CATap capture stopped")
     }

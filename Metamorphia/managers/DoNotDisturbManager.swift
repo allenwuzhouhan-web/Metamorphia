@@ -50,6 +50,9 @@ final class DoNotDisturbManager: ObservableObject {
     /// Periodic task that verifies focus is still active when `isDoNotDisturbActive` is true.
     /// Catches cases where the disabled notification fails to fire.
     private var stateVerificationTask: Task<Void, Never>?
+    /// Modification date of the assertions file at the last verification re-read.
+    /// Lets the verification loop skip the disk read + JSON parse while the file is unchanged.
+    private var lastVerifiedAssertionsModificationDate: Date?
 
     @Published private(set) var monitoringMode: FocusMonitoringMode = Defaults[.focusMonitoringMode]
 
@@ -272,6 +275,7 @@ final class DoNotDisturbManager: ObservableObject {
     private func updateStateVerification(focusActive: Bool) {
         stateVerificationTask?.cancel()
         stateVerificationTask = nil
+        lastVerifiedAssertionsModificationDate = nil
 
         guard focusActive else { return }
 
@@ -282,6 +286,10 @@ final class DoNotDisturbManager: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
                 guard let self, self.isDoNotDisturbActive else { break }
+
+                // Skip the disk read + JSON parse when the assertions file is unchanged
+                // since the last check — an unchanged file yields the same active state.
+                if self.assertionsFileUnchangedSinceLastVerification() { continue }
 
                 // Check the assertions file directly (if FDA is available).
                 let focusStillActive = await self.verifyFocusActiveFromAssertions()
@@ -296,6 +304,26 @@ final class DoNotDisturbManager: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Returns `true` when the assertions file's modification date is unchanged since
+    /// the last verification re-read, so the loop can skip re-reading and re-parsing it.
+    /// Returns `false` (and records the current modification date) when the file has
+    /// changed or its date can't be read — letting the caller perform the full check.
+    private func assertionsFileUnchangedSinceLastVerification() -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: assertionsURL.path),
+              let modifiedAt = attributes[.modificationDate] as? Date else {
+            // Can't read the date — don't skip; fall through to the full check.
+            lastVerifiedAssertionsModificationDate = nil
+            return false
+        }
+
+        if let lastObserved = lastVerifiedAssertionsModificationDate, modifiedAt <= lastObserved {
+            return true
+        }
+
+        lastVerifiedAssertionsModificationDate = modifiedAt
+        return false
     }
 
     /// Read the assertions file directly to verify whether focus is truly active.

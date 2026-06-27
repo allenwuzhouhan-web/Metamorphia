@@ -31,6 +31,7 @@ struct RetraceSettingsView: View {
     @State private var forgetQuery: String = ""
     @State private var forgetResult: String?
     @State private var refreshTask: Task<Void, Never>?
+    @State private var maintenanceRunning = false
 
     var body: some View {
         Form {
@@ -82,8 +83,15 @@ struct RetraceSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Button("Prune now") {
-                    Task { await pruneNow() }
+                HStack {
+                    Button("Prune now") {
+                        Task { await pruneNow() }
+                    }
+                    .disabled(maintenanceRunning)
+                    if maintenanceRunning {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
                 }
             }
 
@@ -143,7 +151,7 @@ struct RetraceSettingsView: View {
                 } label: {
                     Text("Forget")
                 }
-                .disabled(forgetQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(maintenanceRunning || forgetQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 if let result = forgetResult {
                     Text(result)
                         .font(.caption)
@@ -157,6 +165,7 @@ struct RetraceSettingsView: View {
                 } label: {
                     Text("Clear all Retrace data")
                 }
+                .disabled(maintenanceRunning)
                 Text("This is permanent. The index, embeddings, and file watermarks will all be deleted.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -170,28 +179,40 @@ struct RetraceSettingsView: View {
     @MainActor
     private func refreshStats() {
         refreshTask?.cancel()
-        refreshTask = Task {
-            let s = RetraceSurface.shared.index?.stats()
+        let idx = RetraceSurface.shared.index
+        refreshTask = Task.detached {
+            let s = idx?.stats()
             await MainActor.run { self.stats = s }
         }
     }
 
     @MainActor
     private func pruneNow() async {
+        guard !maintenanceRunning else { return }
         guard let idx = RetraceSurface.shared.index else { return }
         let cutoff = Date().addingTimeInterval(-Double(retentionDays) * 86400)
-        let removed = idx.pruneOlderThan(cutoff)
-        idx.vacuumIncremental()
+        maintenanceRunning = true
+        let removed = await Task.detached(priority: .utility) {
+            let r = idx.pruneOlderThan(cutoff)
+            idx.vacuumIncremental()
+            return r
+        }.value
+        maintenanceRunning = false
         forgetResult = "Pruned \(removed) items."
         refreshStats()
     }
 
     @MainActor
     private func forgetEntity() async {
+        guard !maintenanceRunning else { return }
         let q = forgetQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else { return }
         guard let idx = RetraceSurface.shared.index else { return }
-        let removed = idx.deleteItemsWithEntity(canonical: q)
+        maintenanceRunning = true
+        let removed = await Task.detached(priority: .utility) {
+            idx.deleteItemsWithEntity(canonical: q)
+        }.value
+        maintenanceRunning = false
         forgetResult = "Removed \(removed) items tagged '\(q)'."
         forgetQuery = ""
         refreshStats()
@@ -199,7 +220,13 @@ struct RetraceSettingsView: View {
 
     @MainActor
     private func clearAll() async {
-        RetraceSurface.shared.index?.clearAll()
+        guard !maintenanceRunning else { return }
+        guard let idx = RetraceSurface.shared.index else { return }
+        maintenanceRunning = true
+        await Task.detached(priority: .utility) {
+            idx.clearAll()
+        }.value
+        maintenanceRunning = false
         forgetResult = "All Retrace data cleared."
         refreshStats()
     }

@@ -98,27 +98,34 @@ class ScreenshotSnippingTool: NSObject, ObservableObject {
     
     // MARK: - ScreenshotApp-Style Implementation
     private func takeScreenshot(type: ScreenshotType) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        task.arguments = type.processArguments
-        
-        do {
-            print("📸 ScreenshotTool: Running screencapture \(type.processArguments.joined(separator: " ")) command")
-            try task.run()
-            task.waitUntilExit()
-            
-            // Process completed - check if successful
-            if task.terminationStatus == 0 {
-                print("✅ ScreenshotTool: screencapture completed successfully")
-                getImageFromPasteboard()
-            } else {
-                print("❌ ScreenshotTool: screencapture failed with status: \(task.terminationStatus)")
-                finishSnipping()
+        // screencapture's interactive modes (-cw / -cs) do not exit until the
+        // user finishes selecting, so run + wait must stay off the main thread
+        // to avoid freezing the entire UI while a selection is in progress.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            task.arguments = type.processArguments
+
+            do {
+                print("📸 ScreenshotTool: Running screencapture \(type.processArguments.joined(separator: " ")) command")
+                try task.run()
+                task.waitUntilExit()
+
+                // Process completed - check if successful
+                if task.terminationStatus == 0 {
+                    print("✅ ScreenshotTool: screencapture completed successfully")
+                    self.getImageFromPasteboard()
+                } else {
+                    print("❌ ScreenshotTool: screencapture failed with status: \(task.terminationStatus)")
+                    self.finishSnipping()
+                }
+
+            } catch {
+                print("❌ ScreenshotTool: Failed to run screencapture: \(error)")
+                self.finishSnipping()
             }
-            
-        } catch {
-            print("❌ ScreenshotTool: Failed to run screencapture: \(error)")
-            finishSnipping()
         }
     }
     
