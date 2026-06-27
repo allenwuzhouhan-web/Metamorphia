@@ -560,7 +560,12 @@ enum DocumentCopilot {
         set presName to name of presRef
         set presPath to ""
         try
-            set presPath to POSIX path of (full name of presRef as alias)
+            set rawPath to (full name of presRef) as text
+            if rawPath starts with "/" then
+                set presPath to rawPath
+            else
+                set presPath to POSIX path of rawPath
+            end if
         end try
         return presName & linefeed & presPath
     end tell
@@ -573,7 +578,12 @@ enum DocumentCopilot {
         set docName to name of docRef
         set docPath to ""
         try
-            set docPath to POSIX path of (full name of docRef as alias)
+            set rawPath to (full name of docRef) as text
+            if rawPath starts with "/" then
+                set docPath to rawPath
+            else
+                set docPath to POSIX path of rawPath
+            end if
         end try
         return docName & linefeed & docPath
     end tell
