@@ -345,6 +345,16 @@ public final class AICommandViewModel: ObservableObject {
     private let userSkillsDirectory: URL?
     private var conversationSink: AnyCancellable?
 
+    /// Single ordered channel for `AgentProgressSink.publish` events. `publish`
+    /// is `nonisolated` and called from detached Tasks on the hot streaming
+    /// path (one `streamingToken` per chunk); routing every event through one
+    /// continuation drained by a single long-lived MainActor task replaces the
+    /// per-event `Task { @MainActor }` allocation with a single bounded
+    /// consumer, while preserving FIFO ordering across event kinds.
+    private let progressEvents: AsyncStream<AgentProgressEvent>
+    private let progressEventsContinuation: AsyncStream<AgentProgressEvent>.Continuation
+    private var progressConsumerTask: Task<Void, Never>?
+
     // MARK: - Continuum Phase 1: entity extraction
     private let aliasStore: EntityAliasStore
     private let entityExtractor: EntityExtractor
@@ -369,6 +379,21 @@ public final class AICommandViewModel: ObservableObject {
         self.entityExtractor = EntityExtractor(aliasStore: store, termFrequency: tf)
         self.isStubMode = false
         self.currentAgent = AgentRegistry.shared.loadPersistedActive()
+
+        var continuation: AsyncStream<AgentProgressEvent>.Continuation!
+        self.progressEvents = AsyncStream(bufferingPolicy: .unbounded) { continuation = $0 }
+        self.progressEventsContinuation = continuation
+
+        // Drain progress events on a single long-lived MainActor task instead
+        // of spawning one `Task { @MainActor }` per `publish` call. `[weak self]`
+        // so the consumer never keeps the view model alive past `deinit`.
+        let stream = self.progressEvents
+        self.progressConsumerTask = Task { @MainActor [weak self] in
+            for await event in stream {
+                guard let self else { return }
+                self.handleProgressEvent(event)
+            }
+        }
 
         // Hydrate prior session BEFORE wiring the sink so the initial
         // assignment doesn't trigger a redundant disk write.
@@ -397,6 +422,11 @@ public final class AICommandViewModel: ObservableObject {
                     Task { @MainActor in p?.record(turns: turns) }
                 }
         }
+    }
+
+    deinit {
+        progressEventsContinuation.finish()
+        progressConsumerTask?.cancel()
     }
 
     /// Submit a prompt. Cancels any in-flight run first.
@@ -1719,9 +1749,16 @@ public final class AICommandViewModel: ObservableObject {
 
 extension AICommandViewModel: AgentProgressSink {
     public nonisolated func publish(_ event: AgentProgressEvent) {
-        Task { @MainActor in
-            guard !self.isSilentRunInProgress else { return }
-            switch event.kind {
+        // Hand the event to the single ordered consumer instead of spawning a
+        // Task per call. `yield` is thread-safe and preserves FIFO order, so a
+        // high-frequency token stream no longer allocates one Task per chunk.
+        progressEventsContinuation.yield(event)
+    }
+
+    @MainActor
+    private func handleProgressEvent(_ event: AgentProgressEvent) {
+        guard !self.isSilentRunInProgress else { return }
+        switch event.kind {
             case .toolStarted(let name):
                 self.appendToolPill(name: name, step: 0, total: 0)
                 // Adopt the tool name as the currently-executing tool; step/total
@@ -1776,7 +1813,6 @@ extension AICommandViewModel: AgentProgressSink {
             case .started, .thinking, .costBudgetExceeded:
                 break
             }
-        }
     }
 
     private func handleStatus(_ label: String) {

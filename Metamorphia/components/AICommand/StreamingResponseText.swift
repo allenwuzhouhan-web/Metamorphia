@@ -11,6 +11,12 @@ import SwiftUI
 
 struct StreamingResponseText: View {
     let text: String
+    private let lines: [ParagraphLine]
+
+    init(text: String) {
+        self.text = text
+        self.lines = StreamingResponseText.tokenize(text)
+    }
 
     private struct ParagraphLine: Identifiable {
         let id: Int
@@ -22,8 +28,24 @@ struct StreamingResponseText: View {
         let text: String
     }
 
-    private var lines: [ParagraphLine] {
-        text.components(separatedBy: "\n").enumerated().map { (paraIdx, line) in
+    // Streaming appends to `text` token by token, so naive recomputation on
+    // every render is O(n^2) over the whole reply. Cache the last result and
+    // reuse it when the text is unchanged; this collapses an unchanged render
+    // back to O(1).
+    private static let cacheLock = NSLock()
+    private static var cachedText = ""
+    private static var cachedLines: [ParagraphLine] = []
+
+    private static func tokenize(_ text: String) -> [ParagraphLine] {
+        cacheLock.lock()
+        if text == cachedText {
+            let result = cachedLines
+            cacheLock.unlock()
+            return result
+        }
+        cacheLock.unlock()
+
+        let result = text.components(separatedBy: "\n").enumerated().map { (paraIdx, line) in
             let words = line
                 .split(separator: " ", omittingEmptySubsequences: true)
                 .enumerated()
@@ -32,6 +54,12 @@ struct StreamingResponseText: View {
                 }
             return ParagraphLine(id: paraIdx, words: words)
         }
+
+        cacheLock.lock()
+        cachedText = text
+        cachedLines = result
+        cacheLock.unlock()
+        return result
     }
 
     var body: some View {
@@ -51,7 +79,7 @@ struct StreamingResponseText: View {
                     .transition(.opacity)
             }
         }
-        .animation(.easeOut(duration: 0.16), value: words.map(\.id))
+        .animation(.easeOut(duration: 0.16), value: words.count)
     }
 }
 

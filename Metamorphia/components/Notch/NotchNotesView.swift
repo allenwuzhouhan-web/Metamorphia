@@ -1106,7 +1106,8 @@ struct NoteEditorView: View {
     }
 
     @FocusState private var isContentFocused: Bool
-    
+    @State private var previewImage: NSImage?
+
     var body: some View {
         VStack(spacing: 0) {
             // Toolbar
@@ -1197,7 +1198,7 @@ struct NoteEditorView: View {
                     .background(Color.white.opacity(0.05))
                 
                 // Image Overlay in Bottom Right
-                if let data = imageData, let nsImage = NSImage(data: data) {
+                if let nsImage = previewImage {
                     VStack {
                         Spacer()
                         HStack {
@@ -1254,6 +1255,11 @@ struct NoteEditorView: View {
             if isNew {
                 isContentFocused = true
             }
+        }
+        .onChange(of: imageData, initial: true) { _, newData in
+            // Decode the attached image once when it changes instead of on every
+            // body recompute (the TextEditor binding makes body run on each keystroke).
+            previewImage = newData.flatMap { NSImage(data: $0) }
         }
     }
 }

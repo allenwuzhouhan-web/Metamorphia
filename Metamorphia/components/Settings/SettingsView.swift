@@ -5351,12 +5351,33 @@ private struct LockScreenGlassVariantPreviewCell: View {
     }
 }
 
+/// Coalesces live lock-screen reposition calls so a continuous drag triggers at
+/// most one real window reposition per short interval instead of one per tick.
+@MainActor
+private final class LockScreenPositionPropagation {
+    private var pending: [String: DispatchWorkItem] = [:]
+    private let interval: TimeInterval = 1.0 / 60.0
+
+    func schedule(_ key: String, _ work: @escaping @MainActor () -> Void) {
+        pending[key]?.cancel()
+        let item = DispatchWorkItem {
+            MainActor.assumeIsolated {
+                self.pending[key] = nil
+                work()
+            }
+        }
+        pending[key] = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + interval, execute: item)
+    }
+}
+
 private struct LockScreenPositioningControls: View {
     @Default(.lockScreenWeatherVerticalOffset) private var weatherOffset
     @Default(.lockScreenMusicVerticalOffset) private var musicOffset
     @Default(.lockScreenTimerVerticalOffset) private var timerOffset
     @Default(.lockScreenMusicPanelWidth) private var musicWidth
     @Default(.lockScreenTimerWidgetWidth) private var timerWidth
+    @State private var propagation = LockScreenPositionPropagation()
     private let offsetRange: ClosedRange<Double> = -160...160
     private let musicWidthRange: ClosedRange<Double> = 320...Double(LockScreenMusicPanel.defaultCollapsedWidth)
     private let timerWidthRange: ClosedRange<Double> = 320...LockScreenTimerWidget.defaultWidth
@@ -5523,31 +5544,31 @@ private struct LockScreenPositioningControls: View {
     }
 
     private func propagateWeatherOffsetChange(animated: Bool) {
-        Task { @MainActor in
+        propagation.schedule("weatherOffset") {
             LockScreenWeatherPanelManager.shared.refreshPositionForOffsets(animated: animated)
         }
     }
 
     private func propagateTimerOffsetChange(animated: Bool) {
-        Task { @MainActor in
+        propagation.schedule("timerOffset") {
             LockScreenTimerWidgetManager.shared.refreshPositionForOffsets(animated: animated)
         }
     }
 
     private func propagateMusicOffsetChange(animated: Bool) {
-        Task { @MainActor in
+        propagation.schedule("musicOffset") {
             LockScreenPanelManager.shared.applyOffsetAdjustment(animated: animated)
         }
     }
 
     private func propagateMusicWidthChange(animated: Bool) {
-        Task { @MainActor in
+        propagation.schedule("musicWidth") {
             LockScreenPanelManager.shared.applyOffsetAdjustment(animated: animated)
         }
     }
 
     private func propagateTimerWidthChange(animated: Bool) {
-        Task { @MainActor in
+        propagation.schedule("timerWidth") {
             LockScreenTimerWidgetPanelManager.shared.refreshPosition(animated: animated)
         }
     }

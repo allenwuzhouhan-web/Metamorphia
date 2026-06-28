@@ -90,10 +90,42 @@ enum PowerPointDeckStyleExtractor {
             let error = Pipe()
             process.standardOutput = output
             process.standardError = error
+
+            // Drain stdout and stderr concurrently BEFORE waitUntilExit(): `unzip -p`
+            // streams entry contents to stdout, and any slide/presentation XML larger
+            // than the ~64KB pipe buffer would otherwise stall unzip on write() while
+            // we block on waitUntilExit() — a classic deadlock. (Mirrors DocumentCopilot.runProcess.)
+            let outputHandle = output.fileHandleForReading
+            let errorHandle = error.fileHandleForReading
+            let drainQueue = DispatchQueue(label: "com.metamorphia.unzip.drain", attributes: .concurrent)
+            let group = DispatchGroup()
+            var outputData = Data()
+            var errorData = Data()
+            group.enter()
+            drainQueue.async {
+                outputData = outputHandle.readDataToEndOfFile()
+                group.leave()
+            }
+            group.enter()
+            drainQueue.async {
+                errorData = errorHandle.readDataToEndOfFile()
+                group.leave()
+            }
+
+            // Defense in depth: if the child somehow can't be drained, don't hang the
+            // import UI (and leak the security-scoped resource) forever. Terminate a
+            // run that overshoots a generous deadline and surface it as an unreadable deck.
+            let watchdog = DispatchWorkItem { [weak process] in process?.terminate() }
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 15, execute: watchdog)
+
             try process.run()
             process.waitUntilExit()
+            watchdog.cancel()
+            group.wait()
+            _ = errorData
+
             guard process.terminationStatus == 0 else { throw ExtractionError.unreadableDeck }
-            return String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            return String(data: outputData, encoding: .utf8) ?? ""
         }.value
     }
 

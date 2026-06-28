@@ -146,6 +146,16 @@ public actor AgentLoop {
         let effective = complexity ?? Self.classifyComplexity(command)
         middlewareChain.reset()
 
+        // Pre-resolve the frontmost app name once, here in the async context,
+        // and stash it where `ImplicitContextMiddleware` can read it
+        // synchronously. This replaces a DispatchSemaphore.wait inside the
+        // synchronous middleware chain that blocked a cooperative-pool thread
+        // on an actor-isolated `await` — a priority-inversion/deadlock hazard
+        // when sub-agents saturate the pool.
+        if let appName = await systemContext.lastCapturedAppName {
+            middlewareChain.persistentStorage[ImplicitContextMiddleware.appNameKey] = appName
+        }
+
         let task = Task.detached(priority: .userInitiated) { [
             service,
             registry,

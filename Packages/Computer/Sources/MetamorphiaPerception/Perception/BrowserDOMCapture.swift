@@ -80,6 +80,17 @@ public actor BrowserDOMFetcher {
     private var cachedFingerprint: Fingerprint?
     private var cachedCapture: BrowserDOMCapture?
 
+    /// Separate fingerprint gate for `fetchInteractiveNodes`. The interactive
+    /// enumeration JS is a full-document `querySelectorAll` + per-node
+    /// `getBoundingClientRect` round-trip; on a static tab nothing in it
+    /// changes between perception ticks, so we cache the last `DOMEnumeration`
+    /// keyed on the same `(bundleID, url, title)` fingerprint and skip the
+    /// enumeration entirely on a hit. Kept separate from `cachedCapture` so a
+    /// caller that wants only the HTML capture doesn't pay for an enumeration
+    /// and vice versa.
+    private var cachedEnumFingerprint: Fingerprint?
+    private var cachedEnumeration: DOMEnumeration?
+
     /// Monotonic per-call CDP request id. Actor isolation makes the increment
     /// race-free, so parallel calls to the four Phase-C dispatch methods can
     /// run without stepping on each other's response matching. Never reset —
@@ -145,6 +156,8 @@ public actor BrowserDOMFetcher {
     public func invalidateCache() {
         cachedFingerprint = nil
         cachedCapture = nil
+        cachedEnumFingerprint = nil
+        cachedEnumeration = nil
         let toTeardown = Array(cdpSockets.values)
         cdpSockets.removeAll()
         cdpSocketLastUse.removeAll()
@@ -221,11 +234,26 @@ public actor BrowserDOMFetcher {
     /// Returns the list with stable selectors (id / data-testid / aria-label
     /// / path fallback) and viewport-relative rects. `BrowserDOMJoiner` uses
     /// this to annotate AX `ScreenElement`s with `domSelector`/`domNodeId`.
+    ///
+    /// Gated by a `(bundleID, url, title)` fingerprint cache: on an unchanged
+    /// tab the previous `DOMEnumeration` is returned after a cheap URL/title
+    /// probe, so the full-document enumeration JS doesn't fire every
+    /// perception tick.
     public func fetchInteractiveNodes(
         focusedApp: AppInfo
     ) async -> DOMEnumeration? {
         guard let bundleID = focusedApp.bundleID,
               Self.isBrowserBundle(bundleID) else { return nil }
+
+        // Fingerprint gate: the enumeration JS is a full-document scan, so on
+        // a static tab (same bundle/url/title) we return the cached result
+        // without paying for another AppleScript / CDP round-trip. The probe
+        // that resolves the fingerprint is far cheaper than the enumeration.
+        let fp = await currentFingerprint(bundleID: bundleID)
+        if let fp, fp == cachedEnumFingerprint, let cached = cachedEnumeration {
+            return cached
+        }
+
         let js = Self.interactiveEnumerationJS
         let result: String?
         if Self.safariBundleIDs.contains(bundleID) {
@@ -266,10 +294,62 @@ public actor BrowserDOMFetcher {
                 isEditable: (entry["isEditable"] as? Bool) ?? false
             )
         }
-        return DOMEnumeration(
+        let enumeration = DOMEnumeration(
             nodes: nodes,
             viewportSize: CGSize(width: innerWidth, height: innerHeight),
             scaleFactor: CGFloat(scale)
+        )
+        // Store under the fingerprint computed above so the next tick on an
+        // unchanged tab is a cache hit. Skip storing when the probe couldn't
+        // resolve a fingerprint (nil) — without one we can't detect staleness,
+        // so we'd rather re-enumerate than serve a result we can't invalidate.
+        if let fp {
+            cachedEnumFingerprint = fp
+            cachedEnumeration = enumeration
+        }
+        return enumeration
+    }
+
+    /// Cheap `(bundleID, url, title)` probe used to gate `fetchInteractiveNodes`.
+    /// Safari: the same URL+title AppleScript probe `fetchSafari` already pays
+    /// for. Chrome-family: the active page target from `cdpListTargets` (an HTTP
+    /// GET, no WebSocket). Returns `nil` if the probe can't resolve a tab, in
+    /// which case the caller re-enumerates rather than trusting a stale cache.
+    private func currentFingerprint(bundleID: String) async -> Fingerprint? {
+        if Self.safariBundleIDs.contains(bundleID) {
+            #if canImport(AppKit)
+            let probe = await runAppleScript("""
+                tell application "Safari"
+                    if (count of windows) is 0 then return ""
+                    try
+                        set theTab to current tab of front window
+                        return (URL of theTab) & "|" & (name of theTab)
+                    on error
+                        return ""
+                    end try
+                end tell
+                """)
+            guard let probe = probe, !probe.isEmpty else { return nil }
+            let parts = probe.components(separatedBy: "|")
+            guard parts.count >= 2 else { return nil }
+            return Fingerprint(
+                bundleID: bundleID,
+                url: parts[0],
+                title: parts.dropFirst().joined(separator: "|")
+            )
+            #else
+            return nil
+            #endif
+        }
+        guard let targets = await cdpListTargets() else { return nil }
+        guard let target = targets.first(where: {
+            ($0["type"] as? String) == "page" &&
+            !(($0["url"] as? String) ?? "").hasPrefix("chrome-extension://")
+        }) else { return nil }
+        return Fingerprint(
+            bundleID: bundleID,
+            url: (target["url"] as? String) ?? "",
+            title: (target["title"] as? String) ?? ""
         )
     }
 

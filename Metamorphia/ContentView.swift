@@ -1498,7 +1498,7 @@ struct ContentView: View {
                 .animation(.smooth(duration: 0.16), value: isHoveringClosedMusicWaveformControl)
                 .animation(.smooth(duration: 0.2), value: musicManager.isPlaying)
         } else {
-            LottieAnimationView()
+            LottieAnimationView(isPlaying: musicManager.isPlaying)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
@@ -1933,6 +1933,25 @@ struct ContentView: View {
         }
     }
 
+    /// Cheap, thread-safe proximity test used to gate the global/local
+    /// `.mouseMoved` monitors. The hidden-edge activation rect always hugs a
+    /// screen's top edge, so any cursor sitting well below every top edge can
+    /// be rejected without hopping to the main actor. The threshold is kept
+    /// generously larger than any realistic activation height so the gate never
+    /// produces a false negative.
+    nonisolated private static func cursorNearAnyScreenTopEdge() -> Bool {
+        let topEdgeThreshold: CGFloat = 200
+        let location = NSEvent.mouseLocation
+        for screen in NSScreen.screens {
+            let frame = screen.frame
+            guard frame.minX <= location.x, location.x <= frame.maxX else { continue }
+            if location.y >= frame.maxY - topEdgeThreshold {
+                return true
+            }
+        }
+        return false
+    }
+
     private func startHiddenEdgeHoverPolling() {
         // Event-driven top-edge detection: react only when the cursor actually
         // moves instead of waking the main thread on a fixed timer. A global
@@ -1941,6 +1960,12 @@ struct ContentView: View {
         // window and must return the event so it is not swallowed.
         if hiddenEdgeHoverGlobalMonitor == nil {
             hiddenEdgeHoverGlobalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { _ in
+                // Cheap, synchronous proximity gate: the activation rect only
+                // ever sits at a screen's top edge, so when the cursor is far
+                // from every top edge there is nothing to evaluate. This keeps
+                // the common case (cursor moving anywhere mid-screen) to a
+                // single comparison with no main-actor Task allocation.
+                guard ContentView.cursorNearAnyScreenTopEdge() else { return }
                 Task { @MainActor in
                     self.evaluateHiddenEdgeHover()
                 }
@@ -1948,6 +1973,7 @@ struct ContentView: View {
         }
         if hiddenEdgeHoverLocalMonitor == nil {
             hiddenEdgeHoverLocalMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { event in
+                guard ContentView.cursorNearAnyScreenTopEdge() else { return event }
                 Task { @MainActor in
                     self.evaluateHiddenEdgeHover()
                 }

@@ -260,13 +260,24 @@ final class LocalSendService: NSObject, ObservableObject {
         let parts = localIP.split(separator: ".")
         guard parts.count == 4 else { return }
 
+        // Prefer the ARP neighbor table so a full /24 sweep only runs as a last
+        // resort. Probing only hosts the kernel already knows about keeps the
+        // burst small instead of spraying ~254 hosts at the LAN.
+        let neighbors = arpNeighborIPs()
+        if !neighbors.isEmpty {
+            await probeExactIPs(neighbors, timeout: timeout, concurrency: 16)
+            if hasFreshDiscovery(since: Date().addingTimeInterval(-2)) { return }
+        }
+
+        guard !Task.isCancelled else { return }
+
         let prefix = parts.prefix(3).joined(separator: ".")
         let host = Int(parts[3]) ?? 0
         let candidates = (1 ... 254)
             .filter { $0 != host }
             .map { "\(prefix).\($0)" }
 
-        await probeExactIPs(candidates, timeout: timeout, concurrency: 50)
+        await probeExactIPs(candidates, timeout: timeout, concurrency: 24)
     }
 
     private func probeExactIPs(_ ips: [String], timeout: TimeInterval, concurrency: Int) async {
@@ -528,20 +539,27 @@ final class LocalSendService: NSObject, ObservableObject {
             // Compute total bytes to provide smooth overall progress
             let totalBytes = uploads.reduce(Int64(0)) { acc, entry in acc + Int64(entry.0.size) }
             var bytesCompleted: Int64 = 0
+            // Coalesce the per-chunk @Published churn: only publish when the overall
+            // fraction has moved by at least 1%. The progress ring's .animation
+            // interpolates smoothly between these coarser samples.
+            var lastPublishedProgress = -1.0
 
             for (index, entry) in uploads.enumerated() {
                 let file = entry.0
                 let fileSize = Int64(file.size)
 
                 try await upload(file: file, sessionID: prepare.sessionID, token: entry.1, to: target) { fileFraction in
+                    let overall: Double
                     if totalBytes > 0 {
                         let currentSent = Int64(Double(fileSize) * fileFraction)
-                        let overall = Double(bytesCompleted + currentSent) / Double(totalBytes)
-                        Task { @MainActor in self.sendProgress = overall }
+                        overall = Double(bytesCompleted + currentSent) / Double(totalBytes)
                     } else {
                         // Fallback to file-index-based progress when sizes unknown
-                        Task { @MainActor in self.sendProgress = Double(index) / Double(max(uploads.count, 1)) }
+                        overall = Double(index) / Double(max(uploads.count, 1))
                     }
+                    guard abs(overall - lastPublishedProgress) >= 0.01 else { return }
+                    lastPublishedProgress = overall
+                    Task { @MainActor in self.sendProgress = overall }
                 }
 
                 bytesCompleted += fileSize

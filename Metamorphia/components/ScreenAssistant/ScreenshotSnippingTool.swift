@@ -26,6 +26,11 @@ class ScreenshotSnippingTool: NSObject, ObservableObject {
     
     @Published var isSnipping = false
     private var completion: ((URL) -> Void)?
+
+    // The in-flight interactive screencapture process, guarded by `taskLock` so it
+    // can be terminated from cancelSnipping() without racing the capture thread.
+    private var currentTask: Process?
+    private let taskLock = NSLock()
     
     // MARK: - Screenshot Types (Based on ScreenshotApp)
     enum ScreenshotType {
@@ -108,10 +113,18 @@ class ScreenshotSnippingTool: NSObject, ObservableObject {
             task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
             task.arguments = type.processArguments
 
+            self.taskLock.lock()
+            self.currentTask = task
+            self.taskLock.unlock()
+
             do {
                 print("📸 ScreenshotTool: Running screencapture \(type.processArguments.joined(separator: " ")) command")
                 try task.run()
                 task.waitUntilExit()
+
+                self.taskLock.lock()
+                self.currentTask = nil
+                self.taskLock.unlock()
 
                 // Process completed - check if successful
                 if task.terminationStatus == 0 {
@@ -124,6 +137,9 @@ class ScreenshotSnippingTool: NSObject, ObservableObject {
 
             } catch {
                 print("❌ ScreenshotTool: Failed to run screencapture: \(error)")
+                self.taskLock.lock()
+                self.currentTask = nil
+                self.taskLock.unlock()
                 self.finishSnipping()
             }
         }
@@ -173,17 +189,17 @@ class ScreenshotSnippingTool: NSObject, ObservableObject {
         do {
             try pngData.write(to: screenshotURL)
             print("✅ ScreenshotTool: Screenshot saved to: \(screenshotURL.path)")
-            
-            // Execute completion callback
-            let callback = self.completion
-            self.completion = nil
-            finishSnipping()
-            
-            // Call completion on main thread
+
+            // Read/clear the stored closure and fire it on the main thread so all
+            // access to `completion` (and `isSnipping`) stays on one thread.
             DispatchQueue.main.async {
+                let callback = self.completion
+                self.completion = nil
+                self.isSnipping = false
                 callback?(screenshotURL)
+                print("✅ ScreenshotTool: Snipping process completed")
             }
-            
+
         } catch {
             print("❌ ScreenshotTool: Failed to save image: \(error)")
             finishSnipping()
@@ -203,6 +219,17 @@ class ScreenshotSnippingTool: NSObject, ObservableObject {
     
     func cancelSnipping() {
         print("❌ ScreenshotTool: Snipping cancelled")
+
+        // Terminate any in-flight interactive selection so the capture thread's
+        // waitUntilExit() returns instead of parking until the user reacts.
+        taskLock.lock()
+        let task = currentTask
+        currentTask = nil
+        taskLock.unlock()
+        if let task = task, task.isRunning {
+            task.terminate()
+        }
+
         finishSnipping()
     }
 }

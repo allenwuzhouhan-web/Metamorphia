@@ -47,6 +47,19 @@ public enum Fusion {
             originOffset = .zero
         }
 
+        // Coarse spatial index of AX bounds, bucketed into 50-point grid cells
+        // (same grid convention as VisualGridBucket below). Each AX rect is
+        // registered in every cell it spans; per-OCR overlap tests then query
+        // only the cells the OCR rect touches instead of scanning all ~1000 AX
+        // elements. Turns the merge from O(ocr×ax) into ~O(ax + ocr·k).
+        var axGrid: [GridCell: [CGRect]] = [:]
+        for el in ax {
+            guard let elBounds = el.bounds else { continue }
+            forEachGridCell(of: elBounds) { cell in
+                axGrid[cell, default: []].append(elBounds)
+            }
+        }
+
         for ocrResult in ocr {
             var screenRect = OCRReader.toScreenCoordinates(
                 ocrResult.boundingBox, imageWidth: pointWidth, imageHeight: pointHeight
@@ -56,10 +69,15 @@ public enum Fusion {
             }
             let center = CGPoint(x: screenRect.midX, y: screenRect.midY)
 
-            // Skip if this OCR text overlaps with an existing AX element
-            let overlaps = ax.contains { el in
-                guard let elBounds = el.bounds else { return false }
-                return significantOverlap(elBounds, screenRect)
+            // Skip if this OCR text overlaps with an existing AX element.
+            // Only AX rects bucketed into the cells this OCR rect spans can
+            // possibly overlap it, so test that small candidate set.
+            var overlaps = false
+            forEachGridCell(of: screenRect) { cell in
+                guard !overlaps, let candidates = axGrid[cell] else { return }
+                if candidates.contains(where: { significantOverlap($0, screenRect) }) {
+                    overlaps = true
+                }
             }
 
             guard !overlaps && ocrResult.confidence > 0.5 else { continue }
@@ -135,6 +153,33 @@ public enum Fusion {
     }
 
     // MARK: - Helpers
+
+    /// Side length (in points) of one spatial-index grid cell. Matches the
+    /// VisualGridBucket convention used elsewhere in this file.
+    private static let gridCellSize: CGFloat = 50
+
+    /// A 50-point grid cell coordinate, used to key the coarse AX spatial index.
+    private struct GridCell: Hashable {
+        let x: Int
+        let y: Int
+    }
+
+    /// Invoke `body` once for each grid cell the rect spans. A rect wider/taller
+    /// than one cell is registered in (or queried against) every cell it covers,
+    /// so overlapping rects always share at least one cell.
+    private static func forEachGridCell(of rect: CGRect, _ body: (GridCell) -> Void) {
+        guard rect.width > 0, rect.height > 0 else { return }
+        let minX = Int((rect.minX / gridCellSize).rounded(.down))
+        let maxX = Int((rect.maxX / gridCellSize).rounded(.down))
+        let minY = Int((rect.minY / gridCellSize).rounded(.down))
+        let maxY = Int((rect.maxY / gridCellSize).rounded(.down))
+        guard minX <= maxX, minY <= maxY else { return }
+        for cy in minY...maxY {
+            for cx in minX...maxX {
+                body(GridCell(x: cx, y: cy))
+            }
+        }
+    }
 
     /// Two rects overlap significantly (>50% of the smaller rect's area).
     private static func significantOverlap(_ a: CGRect, _ b: CGRect) -> Bool {

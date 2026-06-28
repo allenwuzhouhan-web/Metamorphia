@@ -55,10 +55,11 @@ public final class WorkspaceTriggerSource {
 
     // MARK: - CG callback registration guard
 
-    /// True after the CG reconfig callback has been registered. Registered only
-    /// once across start/stop cycles — CGDisplayRemoveReconfigurationCallback
-    /// requires the exact same C-function pointer, so we register once at first
-    /// start() and leave it for the process lifetime.
+    /// True while the CG reconfig callback is registered. Registered in start()
+    /// and removed in stop() so the process-global callback never outlives the
+    /// logically-stopped source. CGDisplayRemoveReconfigurationCallback matches
+    /// on the exact (function pointer, userInfo) pair, so re-registering with the
+    /// same callback and self pointer on a later start() is valid.
     private var didRegisterCGCallback = false
 
     // MARK: - Init
@@ -162,6 +163,17 @@ public final class WorkspaceTriggerSource {
 
         pasteboardPollTask?.cancel()
         pasteboardPollTask = nil
+
+        // Remove the process-global reconfiguration callback so no stale
+        // .displayConfigurationChanged events post after stop() and the callback
+        // no longer holds this instance's self pointer once it is deallocated.
+        if didRegisterCGCallback {
+            CGDisplayRemoveReconfigurationCallback(
+                cgReconfigCallback,
+                Unmanaged.passUnretained(self).toOpaque()
+            )
+            didRegisterCGCallback = false
+        }
 
         started = false
     }

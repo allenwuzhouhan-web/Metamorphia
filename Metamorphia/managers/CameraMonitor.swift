@@ -33,7 +33,9 @@ private func cameraPropertyListener(
     let monitor = Unmanaged<CameraMonitor>.fromOpaque(context).takeUnretainedValue()
     
     DispatchQueue.main.async {
+        #if DEBUG
         print("CameraMonitor: 📷 Camera property changed")
+        #endif
         monitor.checkCameraStatus()
     }
     
@@ -339,22 +341,30 @@ class CameraMonitor: ObservableObject {
         let isActive = isCMIOActive || checkCameraStatusAVFoundation()
 
         // Debug logging
+        #if DEBUG
         print("CameraMonitor: 🔍 Checking... current=\(isCameraActive), CMIO=\(isCMIOActive), final=\(isActive)")
-        
+        #endif
+
         // Update state if changed
         if isActive != isCameraActive {
+            #if DEBUG
             print("CameraMonitor: 🔄 State change detected (\(isCameraActive) -> \(isActive))")
-            
+            #endif
+
             withAnimation(.smooth) {
                 isCameraActive = isActive
             }
-            
+
             if isActive {
+                #if DEBUG
                 print("CameraMonitor: 📷 Camera ACTIVE")
+                #endif
                 // Could try to identify app here (TODO: investigate)
                 activeApp = "Unknown App"
             } else {
+                #if DEBUG
                 print("CameraMonitor: ⚪ Camera INACTIVE")
+                #endif
                 activeApp = nil
             }
         }

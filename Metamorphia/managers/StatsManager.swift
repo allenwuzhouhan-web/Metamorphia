@@ -911,7 +911,12 @@ class StatsManager: ObservableObject {
 
         networkInterfaces = snapshot.networkInterfaces
         diskDevices = snapshot.diskDevices
-        refreshProcessStatsIfNeeded(force: true)
+        // Decouple the ps/per-process walk from the 1s sampling cadence: let the
+        // processStatsUpdateInterval (2.0s) throttle apply instead of forcing a
+        // refresh on every tick. The on-demand getProcessesRankedBy* accessors
+        // already call this without force, so the cached list still refreshes
+        // promptly when the process tab actually reads it.
+        refreshProcessStatsIfNeeded()
     }
 
     private func updateHistory(value: Double, history: inout [Double]) {

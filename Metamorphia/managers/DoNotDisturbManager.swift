@@ -283,8 +283,14 @@ final class DoNotDisturbManager: ObservableObject {
             // Wait a bit before starting verification to let notifications settle.
             try? await Task.sleep(for: .seconds(5))
 
+            // Back off from a responsive initial cadence to a slow steady-state poll,
+            // so a Focus left on all day doesn't keep waking every few seconds.
+            var verificationInterval: Duration = .seconds(3)
+            let maxVerificationInterval: Duration = .seconds(30)
+
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(3))
+                try? await Task.sleep(for: verificationInterval)
+                verificationInterval = min(verificationInterval * 2, maxVerificationInterval)
                 guard let self, self.isDoNotDisturbActive else { break }
 
                 // Skip the disk read + JSON parse when the assertions file is unchanged

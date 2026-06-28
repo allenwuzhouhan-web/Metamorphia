@@ -48,7 +48,7 @@ final class YouTubeMusicController: MediaControllerProtocol {
     }
     
     var isWorking: Bool {
-        isActive() && (updateTimer != nil || webSocketClient != nil)
+        isActive() && (pollTask != nil || webSocketClient != nil)
     }
     
     // MARK: - Private Properties
@@ -57,7 +57,7 @@ final class YouTubeMusicController: MediaControllerProtocol {
     private let authManager: YouTubeMusicAuthManager
     private var webSocketClient: YouTubeMusicWebSocketClient?
     
-    private var updateTimer: Timer?
+    private var pollTask: Task<Void, Never>?
     private var appStateObserver: Task<Void, Never>?
     private var reconnectDelay: TimeInterval = 1.0
     
@@ -75,7 +75,7 @@ final class YouTubeMusicController: MediaControllerProtocol {
     }
 
     deinit {
-        updateTimer?.invalidate()
+        pollTask?.cancel()
         appStateObserver?.cancel()
         artworkFetchTask?.cancel()
     }
@@ -302,19 +302,24 @@ final class YouTubeMusicController: MediaControllerProtocol {
     
     private func startPeriodicUpdates() async {
         guard isActive() && webSocketClient == nil else { return }
-        
+
         stopPeriodicUpdates()
-        
-        updateTimer = Timer.scheduledTimer(withTimeInterval: configuration.updateInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+
+        // A cancellable Task loop instead of a Timer: it needs no run loop (so it
+        // fires reliably even when scheduled from a cooperative-pool thread) and is
+        // cancellation-safe across threads, unlike Timer.invalidate().
+        let interval = configuration.updateInterval
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
                 await self?.updatePlaybackInfo()
+                try? await Task.sleep(for: .seconds(interval))
             }
         }
     }
-    
+
     private func stopPeriodicUpdates() {
-        updateTimer?.invalidate()
-        updateTimer = nil
+        pollTask?.cancel()
+        pollTask = nil
     }
 
     func pollPlaybackState() async {

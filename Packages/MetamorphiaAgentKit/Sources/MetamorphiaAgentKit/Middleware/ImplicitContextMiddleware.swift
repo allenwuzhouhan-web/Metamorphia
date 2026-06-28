@@ -52,6 +52,12 @@ public final class ImplicitContextMiddleware: AgentMiddleware {
 
     private static let injectedKey = "ImplicitContext.injected"
 
+    /// Storage key under which the agent loop stashes a pre-resolved frontmost
+    /// app name (read once per task, off the synchronous middleware chain). The
+    /// hook reads this cached value instead of blocking a cooperative-pool
+    /// thread on an actor-isolated `await`. See `AgentLoop.submit`.
+    public static let appNameKey = "ImplicitContext.appName"
+
     // MARK: - Relevance Signals
 
     private static let deicticWords: Set<String> = [
@@ -89,7 +95,7 @@ public final class ImplicitContextMiddleware: AgentMiddleware {
 
         var contextParts: [String] = []
 
-        if let app = gatherAppContext(query: lower) {
+        if let app = gatherAppContext(query: lower, ctx: ctx) {
             contextParts.append(app)
         }
 
@@ -152,19 +158,13 @@ public final class ImplicitContextMiddleware: AgentMiddleware {
 
     // MARK: - Context Gathering
 
-    private func gatherAppContext(query: String) -> String? {
-        // Synchronous read from the SystemContextProvider is done via a
-        // semaphore-free approach: we accept that in tests the Null provider
-        // returns nil immediately. Real AppKit-backed impls in the app target
-        // read from a cached @MainActor value so this stays non-blocking.
-        var appName: String? = nil
-        let semaphore = DispatchSemaphore(value: 0)
-        Task {
-            appName = await systemContext.lastCapturedAppName
-            semaphore.signal()
-        }
-        // Cap at 50ms to never stall the agent loop on a misbehaving provider.
-        _ = semaphore.wait(timeout: .now() + .milliseconds(50))
+    private func gatherAppContext(query: String, ctx: MiddlewareContext) -> String? {
+        // The frontmost app name is resolved once per task by `AgentLoop.submit`
+        // (an `await` on the actor-isolated provider) and stashed in storage.
+        // Reading it here is a plain synchronous lookup — no `Task`/semaphore,
+        // so this hook never blocks a cooperative-pool thread waiting on a
+        // child task that needs that same pool to make progress.
+        let appName = ctx.storage[Self.appNameKey] as? String
 
         guard let name = appName, !name.isEmpty, name != "Metamorphia", name != "Executer" else {
             return nil

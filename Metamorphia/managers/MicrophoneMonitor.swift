@@ -81,39 +81,57 @@ class MicrophoneMonitor: ObservableObject {
     }
     
     deinit {
-        // Clean up listener synchronously
+        // `deinit` is nonisolated and can run on any thread, so copy the
+        // listener state into locals here (the instance is being torn down,
+        // no other code can touch it) and hop the CoreAudio removals to the
+        // main thread to avoid touching main-actor state off the main actor.
         let context = Unmanaged.passUnretained(self).toOpaque()
+        // Read the device into a local first: referencing the main-actor
+        // property inside the `&&` autoclosure would cross actor isolation.
+        let device = defaultInputDevice
+        let removeRunningListener = isListenerRegistered && device != 0
+        let removeDeviceChangeListener = isDeviceChangeListenerRegistered
 
-        // Remove property listener
-        if isListenerRegistered, defaultInputDevice != 0 {
-            var address = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMaster
-            )
+        guard removeRunningListener || removeDeviceChangeListener else { return }
 
-            AudioObjectRemovePropertyListener(
-                defaultInputDevice,
-                &address,
-                microphonePropertyListener,
-                context
-            )
+        let cleanup: () -> Void = {
+            // Remove property listener
+            if removeRunningListener {
+                var address = AudioObjectPropertyAddress(
+                    mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+                    mScope: kAudioObjectPropertyScopeGlobal,
+                    mElement: kAudioObjectPropertyElementMaster
+                )
+
+                AudioObjectRemovePropertyListener(
+                    device,
+                    &address,
+                    microphonePropertyListener,
+                    context
+                )
+            }
+
+            // Remove default-input-device change listener
+            if removeDeviceChangeListener {
+                var address = AudioObjectPropertyAddress(
+                    mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                    mScope: kAudioObjectPropertyScopeGlobal,
+                    mElement: kAudioObjectPropertyElementMaster
+                )
+
+                AudioObjectRemovePropertyListener(
+                    AudioObjectID(kAudioObjectSystemObject),
+                    &address,
+                    defaultInputDeviceListener,
+                    context
+                )
+            }
         }
 
-        // Remove default-input-device change listener
-        if isDeviceChangeListenerRegistered {
-            var address = AudioObjectPropertyAddress(
-                mSelector: kAudioHardwarePropertyDefaultInputDevice,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMaster
-            )
-
-            AudioObjectRemovePropertyListener(
-                AudioObjectID(kAudioObjectSystemObject),
-                &address,
-                defaultInputDeviceListener,
-                context
-            )
+        if Thread.isMainThread {
+            cleanup()
+        } else {
+            DispatchQueue.main.async(execute: cleanup)
         }
     }
     
