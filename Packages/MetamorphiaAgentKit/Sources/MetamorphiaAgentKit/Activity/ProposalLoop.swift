@@ -67,6 +67,13 @@ public enum ProposalGoal: String, Sendable, Hashable, Codable {
     /// activity signal (VC app, unread notification). Surface "Draft a
     /// reply?" so the workflow recorder can jump-start a template.
     case replyToMessage
+    /// A ritual window has recurred enough times to be compiled into a skill.
+    /// This goal is never emitted by `ProposalLoop` itself — it is surfaced
+    /// directly by `AmbientProposalPresenter.presentLearned(_:skill:)` after
+    /// `RitualCompilationSweep` promotes and compiles the window. The
+    /// `ProposalGoal` case exists so the presenter's `runDefaultAction` switch
+    /// is exhaustive and the skill side-channel can be keyed by `noveltyKey`.
+    case addSkill
 }
 
 // MARK: - ProposalLoop

@@ -72,20 +72,29 @@ enum NoteLocalMatcher {
 
         // Title = first 40 chars of body (matching existing MetamorphiaTools convention).
         let title = String(body.prefix(40))
-        let note = NoteItem(
-            id: UUID(),
-            title: title,
-            content: body,
-            creationDate: Date(),
-            colorIndex: 0,
-            isPinned: false,
-            imageFileName: nil
-        )
 
-        await MainActor.run {
-            var current = Defaults[.savedNotes]
-            current.append(note)
-            Defaults[.savedNotes] = current
+        if let registry = LocalCommandPipeline.registry {
+            // Escape body for JSON: replace backslashes then quotes.
+            let escaped = body
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            let argsJSON = "{\"title\":\"\(title)\",\"body\":\"\(escaped)\"}"
+            _ = try? await registry.executeDirectly(toolName: "append_note", arguments: argsJSON)
+        } else {
+            let note = NoteItem(
+                id: UUID(),
+                title: title,
+                content: body,
+                creationDate: Date(),
+                colorIndex: 0,
+                isPinned: false,
+                imageFileName: nil
+            )
+            await MainActor.run {
+                var current = Defaults[.savedNotes]
+                current.append(note)
+                Defaults[.savedNotes] = current
+            }
         }
 
         let elapsed = Date().timeIntervalSince(start)

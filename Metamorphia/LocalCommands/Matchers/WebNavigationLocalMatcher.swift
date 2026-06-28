@@ -29,7 +29,9 @@ import AppKit
 ///   - Compound workflow phrases ("open X and then Y")
 ///
 /// Uses a curated shortcut dictionary for common shortcuts (twitter → x.com, etc.).
-/// Calls `NSWorkspace.shared.open(URL)`.
+/// Routes through `LocalCommandPipeline.registry?.executeDirectly(toolName: "open_url", …)`
+/// (OpenURLTool in MetamorphiaExecutors) so the open is executed on the MainActor via the
+/// shared ToolRegistry — same as TimerLocalMatcher / NoteLocalMatcher.
 enum WebNavigationLocalMatcher {
 
     // MARK: - Curated shortcuts
@@ -153,7 +155,7 @@ enum WebNavigationLocalMatcher {
 
         // Curated shortcut lookup.
         if let urlString = shortcuts[target], let url = URL(string: urlString) {
-            return openURL(url, displayTarget: target)
+            return await openURL(url, displayTarget: target)
         }
 
         // Single-word domain with dot → prefix https://
@@ -161,13 +163,13 @@ enum WebNavigationLocalMatcher {
             let urlString = "https://\(target)"
             guard let url = URL(string: urlString),
                   url.host != nil else { return nil }
-            return openURL(url, displayTarget: target)
+            return await openURL(url, displayTarget: target)
         }
 
         // Full URL already provided.
         if (target.hasPrefix("https://") || target.hasPrefix("http://")),
            let url = URL(string: target) {
-            return openURL(url, displayTarget: target)
+            return await openURL(url, displayTarget: target)
         }
 
         return nil
@@ -175,13 +177,24 @@ enum WebNavigationLocalMatcher {
 
     // MARK: - Side-effect
 
-    private static func openURL(_ url: URL, displayTarget: String) -> LocalCommandHit {
-        NSWorkspace.shared.open(url)
+    private static func openURL(_ url: URL, displayTarget: String) async -> LocalCommandHit {
+        let start = Date()
+        let urlString = url.absoluteString
+        if let registry = LocalCommandPipeline.registry {
+            // Route through the shared ToolRegistry so OpenURLTool's MainActor dispatch
+            // and scheme validation run (same path as when the LLM calls open_url).
+            let argsJSON = "{\"url\":\"\(urlString)\"}"
+            _ = try? await registry.executeDirectly(toolName: "open_url", arguments: argsJSON)
+        } else {
+            // Fallback: call AppKit on MainActor directly (registry not yet wired).
+            await MainActor.run { _ = NSWorkspace.shared.open(url) }
+        }
+        let elapsed = Date().timeIntervalSince(start)
         return LocalCommandHit(
             matcherName: "web_navigation",
             message: "Opening \(displayTarget) in your browser.",
-            arguments: "url=\"\(url.absoluteString)\"",
-            elapsed: 0
+            arguments: "url=\"\(urlString)\"",
+            elapsed: elapsed
         )
     }
 }

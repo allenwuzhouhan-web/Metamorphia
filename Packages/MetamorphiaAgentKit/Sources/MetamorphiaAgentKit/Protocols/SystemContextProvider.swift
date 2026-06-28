@@ -42,6 +42,11 @@ public struct SystemContextSnapshot: Sendable {
     /// view of the current screen in every turn — without having to call
     /// `screen_perceive` first.
     public let perceptionSummary: PerceptionSummary?
+    /// Island state — a short (~40-token) line describing Metamorphia's own
+    /// UI state (current tab, active timer, shelf count). Populated by
+    /// `IslandStateContextProvider` in the app target. Nil when that decorator
+    /// is not in the chain or the app hasn't bootstrapped yet.
+    public let islandState: String?
 
     public init(
         frontmostApp: String? = nil,
@@ -56,7 +61,8 @@ public struct SystemContextSnapshot: Sendable {
         wifiNetworkName: String? = nil,
         activeDisplayCount: Int? = nil,
         focusMode: String? = nil,
-        perceptionSummary: PerceptionSummary? = nil
+        perceptionSummary: PerceptionSummary? = nil,
+        islandState: String? = nil
     ) {
         self.frontmostApp = frontmostApp
         self.currentTime = currentTime
@@ -71,6 +77,7 @@ public struct SystemContextSnapshot: Sendable {
         self.activeDisplayCount = activeDisplayCount
         self.focusMode = focusMode
         self.perceptionSummary = perceptionSummary
+        self.islandState = islandState
     }
 
     /// Textual addendum suitable for inclusion in an LLM system prompt.
@@ -93,6 +100,9 @@ public struct SystemContextSnapshot: Sendable {
         if let mode = focusMode { lines.append("- Focus: \(mode)") }
         if let p = perceptionSummary {
             lines.append(contentsOf: p.promptLines)
+        }
+        if let island = islandState {
+            lines.append("- Metamorphia: \(island)")
         }
         return lines.joined(separator: "\n")
     }

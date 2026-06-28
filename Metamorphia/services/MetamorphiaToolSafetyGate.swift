@@ -61,6 +61,13 @@ final class MetamorphiaToolSafetyGate: ToolSafetyGate, @unchecked Sendable {
         "kill_process",
         "write_file",
         "edit_file",
+        // Office copilot tools — mutating (design/rewrite/direct-edit/review/apply).
+        // capture_deck is read-only and does NOT appear here.
+        "design_deck",
+        "rewrite_slides",
+        "direct_edit",
+        "review_document",
+        "edit_word_comments",
     ]
 
     /// Friendly display names for the confirmation dialog. Falls back to the
@@ -76,6 +83,12 @@ final class MetamorphiaToolSafetyGate: ToolSafetyGate, @unchecked Sendable {
         "kill_process": "Kill a process",
         "write_file": "Write a file",
         "edit_file": "Edit a file",
+        // Office copilot tools
+        "design_deck": "Restyle the PowerPoint slide/deck",
+        "rewrite_slides": "Rewrite the PowerPoint slide text",
+        "direct_edit": "Apply a formatting change to the PowerPoint slide",
+        "review_document": "Review the document and add comments",
+        "edit_word_comments": "Apply tracked comments in Word",
     ]
 
     private init() {}
@@ -280,6 +293,21 @@ final class MetamorphiaToolSafetyGate: ToolSafetyGate, @unchecked Sendable {
                 preview = (args["pid"].map { "pid \($0)" }) ?? (args["name"] as? String) ?? arguments
             case "write_file", "edit_file":
                 preview = (args["path"] as? String) ?? arguments
+            // Office copilot tools
+            case "design_deck", "rewrite_slides":
+                let title = (args["presentationTitle"] as? String) ?? "current presentation"
+                let slide = (args["slideIndex"] as? Int).map { "slide \($0)" } ?? "current slide"
+                preview = "\(title) — \(slide)"
+            case "direct_edit":
+                let property = (args["property"] as? String) ?? "formatting"
+                let value = (args["value"] as? String) ?? "?"
+                preview = "Set \(property) to \(value) on all text boxes in the current slide"
+            case "review_document":
+                preview = (args["documentTitle"] as? String)
+                    ?? (args["sourceDescription"] as? String)
+                    ?? arguments
+            case "edit_word_comments":
+                preview = "Apply Metamorphia audit comments to the frontmost Word document"
             default:
                 preview = arguments
             }

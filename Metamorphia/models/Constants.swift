@@ -1185,6 +1185,7 @@ extension Defaults.Keys {
     static let enableCreateFromClipboard = Key<Bool>("enableCreateFromClipboard", default: true)
     static let enableNoteCharCount = Key<Bool>("enableNoteCharCount", default: true)
     static let savedNotes = Key<[NoteItem]>("savedNotes", default: [])
+    static let scratchpadContents = Key<String>("scratchpadContents", default: "")
     
     // Helper to determine the default media controller based on macOS version
     static var defaultMediaController: MediaControllerType {

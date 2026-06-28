@@ -93,6 +93,7 @@ public enum NotchViews {
     case markets
     case news
     case retrace
+    case capabilities
 }
 
 enum NotesLayoutState: Equatable {

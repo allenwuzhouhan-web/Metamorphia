@@ -474,69 +474,6 @@ public final class AICommandViewModel: ObservableObject {
             return
         }
 
-        if DocumentCopilot.isApplyAuditRequest(prompt) {
-            await runApplyAuditTurn(prompt: prompt)
-            return
-        }
-
-        if PowerPointCopilot.isDirectEditIntent(prompt: prompt) {
-            currentInput = ""
-            errorMessage = nil
-            inputBarState = .executing(toolName: "powerpoint_direct_edit", step: 1, total: 1)
-        }
-
-        switch await PowerPointCopilot.performDirectEditIfNeeded(prompt: prompt) {
-        case .notPowerPointDirectEditIntent:
-            break
-        case .result(let result):
-            finalizePowerPointDirectEditTurn(result, prompt: prompt)
-            return
-        case .failure(let message):
-            showModeError(message, prompt: prompt)
-            return
-        }
-
-        let powerPointDesignRoute: PowerPointDesignRoute?
-        switch await PowerPointCopilot.prepareDesignRoute(prompt: prompt) {
-        case .notPowerPointDesignIntent:
-            powerPointDesignRoute = nil
-        case .route(let route):
-            powerPointDesignRoute = route
-        case .failure(let message):
-            showModeError(message, prompt: prompt)
-            return
-        }
-
-        let powerPointRewriteRoute: PowerPointRewriteRoute?
-        if powerPointDesignRoute != nil {
-            powerPointRewriteRoute = nil
-        } else {
-            switch await PowerPointCopilot.prepareRewriteRoute(prompt: prompt) {
-            case .notPowerPointRewriteIntent:
-                powerPointRewriteRoute = nil
-            case .route(let route):
-                powerPointRewriteRoute = route
-            case .failure(let message):
-                showModeError(message, prompt: prompt)
-                return
-            }
-        }
-
-        let documentReviewRoute: DocumentReviewRoute?
-        if powerPointDesignRoute != nil || powerPointRewriteRoute != nil {
-            documentReviewRoute = nil
-        } else {
-            switch await DocumentCopilot.prepareReviewRoute(prompt: prompt, attachedFiles: attachedFiles) {
-            case .notDocumentIntent:
-                documentReviewRoute = nil
-            case .route(let route):
-                documentReviewRoute = route
-            case .failure(let message):
-                showModeError(message, prompt: prompt)
-                return
-            }
-        }
-
         // T13 — local command pipeline. Runs AFTER ModeRouter, BEFORE the
         // agent loop and T7 research/browser detection. On a hit the turn is
         // finalized immediately without touching the LLM.
@@ -617,6 +554,11 @@ public final class AICommandViewModel: ObservableObject {
         // will subscribe.
         await extractAndPostEntities(from: prompt, source: .userTurn)
 
+        // M4: pre-fetch the temporal-recall block off the async path so the
+        // synchronous RetraceRecallMiddleware can read it from persistentStorage
+        // on iteration 0. Suppressed when the focused field is sensitive.
+        await prefetchRetraceRecall(for: agentPrompt)
+
         let functionSpec = FunctionDetector.detect(in: agentPrompt)
         let turn = Turn(
             prompt: prompt, result: "", toolPills: [], isStreaming: true,
@@ -633,15 +575,6 @@ public final class AICommandViewModel: ObservableObject {
             agent: currentAgent
         )
         var primedPrompt = primedSystemPrompt(base: agentShapedPrompt, query: agentPrompt)
-        if let powerPointDesignRoute {
-            primedPrompt += powerPointDesignRoute.systemPromptSuffix
-        }
-        if let powerPointRewriteRoute {
-            primedPrompt += powerPointRewriteRoute.systemPromptSuffix
-        }
-        if let documentReviewRoute {
-            primedPrompt += documentReviewRoute.systemPromptSuffix
-        }
         if functionSpec != nil {
             primedPrompt += "\n\nThe user entered a mathematical function. A graph is being rendered. Briefly describe the function's shape and key properties. 2-3 sentences."
         }
@@ -649,15 +582,6 @@ public final class AICommandViewModel: ObservableObject {
 
         let commandWithAttachments: String
         var sections: [String] = [agentPrompt]
-        if let powerPointDesignRoute {
-            sections.append(powerPointDesignRoute.commandContextBlock)
-        }
-        if let powerPointRewriteRoute {
-            sections.append(powerPointRewriteRoute.commandContextBlock)
-        }
-        if let documentReviewRoute {
-            sections.append(documentReviewRoute.commandContextBlock)
-        }
         if !attachedFiles.isEmpty {
             let cappedFiles = FileContentExtractor.enforceTotalCap(attachedFiles)
             let block = cappedFiles.map(\.formattedForPrompt).joined(separator: "\n\n")
@@ -692,96 +616,15 @@ public final class AICommandViewModel: ObservableObject {
             conversation[idx].result = outcome.text
             conversation[idx].isStreaming = false
             conversation[idx].trace = outcome.trace
-            let parsed: RichParseResult?
-            if powerPointDesignRoute != nil {
-                parsed = RichResultParser.parsePowerPointDesign(in: outcome.text) ?? RichResultParser.parse(outcome.text)
-            } else if powerPointRewriteRoute != nil {
-                parsed = RichResultParser.parsePowerPointRewrite(in: outcome.text) ?? RichResultParser.parse(outcome.text)
-            } else if documentReviewRoute != nil {
-                parsed = RichResultParser.parseDocumentReview(in: outcome.text) ?? RichResultParser.parse(outcome.text)
-            } else {
-                parsed = RichResultParser.parse(outcome.text)
-            }
-
-            if let parsed {
-                let resolvedContent: RichTurnContent?
-                let resolveFailure: String?
-                if case .powerPointDesign(let design) = parsed.content,
-                   let powerPointDesignRoute {
-                    let resolvedDesign = PowerPointCopilot.resolvedDesign(design, route: powerPointDesignRoute)
-                    resolvedContent = .powerPointDesign(resolvedDesign)
-                    resolveFailure = nil
-                } else if case .powerPointRewrite(let rewrite) = parsed.content,
-                   let powerPointRewriteRoute {
-                    let resolvedRewrite = PowerPointCopilot.resolvedRewrite(rewrite, route: powerPointRewriteRoute)
-                    if resolvedRewrite.replacements.isEmpty {
-                        resolvedContent = nil
-                        resolveFailure = PowerPointCopilot.resolutionFailureMessage(
-                            for: rewrite,
-                            route: powerPointRewriteRoute
-                        )
-                    } else {
-                        resolvedContent = .powerPointRewrite(resolvedRewrite)
-                        resolveFailure = nil
-                    }
-                } else if case .documentReview(let review) = parsed.content,
-                   let documentReviewRoute {
-                    resolvedContent = .documentReview(review.withSourceFilePath(documentReviewRoute.filePath))
-                    resolveFailure = nil
-                } else {
-                    resolvedContent = parsed.content
-                    resolveFailure = nil
-                }
-
-                if let resolveFailure {
-                    conversation[idx].richContent = nil
-                    conversation[idx].result = resolveFailure
-                    conversation[idx].isError = true
-                    inputBarState = .error(message: resolveFailure)
-                } else if let resolvedContent {
-                    conversation[idx].richContent = conversation[idx].richContent ?? resolvedContent
-                    conversation[idx].result = parsed.displayText
-                    if let documentReviewRoute,
-                       documentReviewRoute.autoInsertNativeComments,
-                       case .documentReview(let review) = resolvedContent {
-                        let syncOutcome = await DocumentCopilot.insertReviewComments(review)
-                        if syncOutcome.success && documentReviewRoute.preferCompactDelivery {
-                            conversation[idx].richContent = nil
-                            conversation[idx].result = syncOutcome.message
-                            inputBarState = .result(message: syncOutcome.message)
-                        } else if !syncOutcome.success {
-                            conversation[idx].result = "\(parsed.displayText)\n\n\(syncOutcome.message)"
-                            inputBarState = .error(message: syncOutcome.message)
-                        }
-                    }
-                }
-                protectedTerminalTurnIDs.insert(conversation[idx].id)
-            } else if powerPointDesignRoute != nil,
-                      outcome.text.contains("[PPT_DESIGN]") {
-                let failureMessage = """
-                I drafted a PowerPoint design plan, but I couldn't parse the structured preview block needed to apply it. Re-run the design pass on the current slide.
-                """
-                conversation[idx].result = failureMessage
-                conversation[idx].isError = true
-                inputBarState = .error(message: failureMessage)
-                protectedTerminalTurnIDs.insert(conversation[idx].id)
-            } else if powerPointRewriteRoute != nil,
-                      outcome.text.contains("[PPT_REWRITE]") {
-                let failureMessage = """
-                I drafted a PowerPoint rewrite, but I couldn't parse the structured preview block needed to apply it. Re-run the rewrite on the current slide.
-                """
-                conversation[idx].result = failureMessage
-                conversation[idx].isError = true
-                inputBarState = .error(message: failureMessage)
-                protectedTerminalTurnIDs.insert(conversation[idx].id)
-            } else if documentReviewRoute != nil,
-                      outcome.text.contains("[DOC_REVIEW]") {
-                let failureMessage = """
-                I reviewed the document, but I couldn't parse the structured findings block needed to sync native comments. Re-run the audit after this update.
-                """
-                conversation[idx].result = failureMessage
-                conversation[idx].isError = true
-                inputBarState = .error(message: failureMessage)
+            // T11 — opportunistic rich-content parse. The copilot tools embed
+            // a fully-resolved [PPT_DESIGN]/[PPT_REWRITE]/[DOC_REVIEW] block
+            // (with restoreData/shapeSnapshots intact) in their return string;
+            // the model echoes that block, and RichResultParser reconstructs
+            // the bespoke result card here — Apply/Restore/Undo buttons and all.
+            if conversation[idx].richContent == nil,
+               let parsed = RichResultParser.parse(outcome.text) {
+                conversation[idx].richContent = parsed.content
+                conversation[idx].result = parsed.displayText
                 protectedTerminalTurnIDs.insert(conversation[idx].id)
             }
             for pillIdx in conversation[idx].toolPills.indices {
@@ -871,15 +714,31 @@ public final class AICommandViewModel: ObservableObject {
     /// categories, formatted as confidence-tagged bullets. Soft prior — does
     /// not constrain the model.
     private func primedSystemPrompt(base: String, query: String) -> String {
-        guard let scorer = intentScorer else { return base }
+        // Build the office-app soft hint once so it appears in both the early
+        // return (no scored categories) and the full return below.
+        let officeHint: String = {
+            guard let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else {
+                return ""
+            }
+            switch bundle {
+            case "com.microsoft.Powerpoint":
+                return "\n\nPowerPoint is frontmost. For simple slide-wide formatting (bold, italic, font size, color, alignment), call direct_edit. To restyle or rewrite the open slide/deck, call capture_deck first (for exact shape indices), then design_deck or rewrite_slides."
+            case "com.microsoft.Word":
+                return "\n\nMicrosoft Word is frontmost. To critique the open document or apply tracked comments, use review_document or edit_word_comments."
+            default:
+                return ""
+            }
+        }()
+
+        guard let scorer = intentScorer else { return base + officeHint }
         let top = scorer.scoreIntent(query: query)
             .filter { $0.score >= 0.4 }
             .prefix(4)
-        guard !top.isEmpty else { return base }
+        guard !top.isEmpty else { return base + officeHint }
         let bullets = top
             .map { "- \($0.category.rawValue) (confidence \(String(format: "%.2f", $0.score)))" }
             .joined(separator: "\n")
-        return base + "\n\n## Likely Tool Categories\n" + bullets
+        return base + "\n\n## Likely Tool Categories\n" + bullets + officeHint
     }
 
     public func setActiveAgent(_ profile: AgentProfile) {
@@ -939,50 +798,6 @@ public final class AICommandViewModel: ObservableObject {
         )
         conversation.append(turn)
         inputBarState = .result(message: hit.message)
-
-        if AppDelegate.shared?.vm.notchState == .minimized {
-            hasUnseenCompletion = true
-        }
-    }
-
-    @MainActor
-    private func finalizePowerPointDirectEditTurn(_ result: PowerPointDirectEditResult, prompt: String) {
-        currentInput = ""
-        errorMessage = nil
-        inputBarState = .result(message: result.summary)
-
-        let pill = ToolCallPill(
-            toolName: "powerpoint_direct_edit",
-            stepIndex: 1,
-            totalSteps: 1,
-            isComplete: true,
-            isSuccess: true
-        )
-        let trace = AgentTrace(goal: prompt)
-        trace.append(TraceEntry(
-            kind: .toolCall(
-                name: "powerpoint_direct_edit",
-                arguments: "slideIndex=\(result.slideIndex), affectedShapeCount=\(result.affectedShapeCount)",
-                result: result.summary,
-                durationMs: 0,
-                success: true
-            )
-        ))
-        trace.finalOutcome = .success
-        trace.endTime = Date()
-
-        let turn = Turn(
-            prompt: prompt,
-            result: result.summary,
-            toolPills: [pill],
-            isStreaming: false,
-            richContent: .powerPointDirectEdit(result),
-            isStaged: false,
-            isError: false,
-            trace: trace
-        )
-        conversation.append(turn)
-        protectedTerminalTurnIDs.insert(turn.id)
 
         if AppDelegate.shared?.vm.notchState == .minimized {
             hasUnseenCompletion = true
@@ -1077,6 +892,27 @@ public final class AICommandViewModel: ObservableObject {
 
         NotificationCenter.default.post(
             Notification.continuumEntitiesExtracted(entities: entities, source: source, text: text)
+        )
+    }
+
+    // MARK: - M4: Temporal recall pre-fetch
+
+    /// M4: Fetches the temporal-recall block via the bootstrap-wired closure and
+    /// stashes it (plus the sensitivity suppress flag) into the loop's middleware
+    /// persistentStorage so RetraceRecallMiddleware can read it synchronously.
+    private func prefetchRetraceRecall(for query: String) async {
+        // Privacy gate — never recall while a sensitive field is focused.
+        let sensitive = await MetamorphiaBootstrap.focusedFieldIsSensitive()
+        if sensitive {
+            await loop.setMiddlewareStorage(
+                [RetraceRecallMiddleware.suppressKey: true]
+            )
+            return
+        }
+        guard let fetch = MetamorphiaBootstrap.retraceRecallFetch else { return }
+        guard let block = await fetch(query) else { return }
+        await loop.setMiddlewareStorage(
+            [RetraceRecallMiddleware.recallBlockKey: block]
         )
     }
 
@@ -1298,10 +1134,6 @@ public final class AICommandViewModel: ObservableObject {
         // Package not linked yet — placeholder for compile-in-isolation.
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         if await ModeRouter.tryHandle(prompt, viewModel: self) { return }
-        if DocumentCopilot.isApplyAuditRequest(prompt) {
-            await runApplyAuditTurn(prompt: prompt)
-            return
-        }
         // T13 — local command pipeline (stub path).
         if let hit = await LocalCommandPipeline.handle(prompt: prompt) {
             let pill = ToolCallPill(
@@ -1588,59 +1420,6 @@ public final class AICommandViewModel: ObservableObject {
             result: outcome.message,
             success: outcome.success
         )
-    }
-
-    private func runApplyAuditTurn(prompt: String) async {
-        currentInput = ""
-        errorMessage = nil
-        inputBarState = .processing
-        liveStatus = "Reading audits"
-
-        let turn = Turn(
-            prompt: prompt,
-            result: "",
-            toolPills: [
-                ToolCallPill(
-                    toolName: "read_audits",
-                    stepIndex: 1,
-                    totalSteps: 2,
-                    isComplete: false,
-                    isSuccess: true
-                ),
-                ToolCallPill(
-                    toolName: "apply_in_review_mode",
-                    stepIndex: 2,
-                    totalSteps: 2,
-                    isComplete: false,
-                    isSuccess: true
-                ),
-            ],
-            isStreaming: true,
-            richContent: nil,
-            isStaged: false,
-            isError: false,
-            trace: nil
-        )
-        conversation.append(turn)
-        let turnID = turn.id
-
-        let outcome = await DocumentCopilot.applyCurrentWordAuditComments()
-
-        if let idx = conversation.firstIndex(where: { $0.id == turnID }) {
-            conversation[idx].result = outcome.message
-            conversation[idx].isStreaming = false
-            conversation[idx].isError = !outcome.success
-            for pillIdx in conversation[idx].toolPills.indices {
-                conversation[idx].toolPills[pillIdx].isComplete = true
-                conversation[idx].toolPills[pillIdx].isSuccess = outcome.success
-            }
-        }
-
-        liveStatus = nil
-        inputBarState = outcome.success ? .result(message: outcome.message) : .error(message: outcome.message)
-        if AppDelegate.shared?.vm.notchState == .minimized {
-            hasUnseenCompletion = true
-        }
     }
 
     private func appendDocumentActionTurn(

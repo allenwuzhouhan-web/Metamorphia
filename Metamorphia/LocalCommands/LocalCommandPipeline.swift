@@ -17,6 +17,7 @@
  */
 
 import Foundation
+import MetamorphiaAgentKit
 
 /// Tiered local-command dispatcher.
 ///
@@ -30,6 +31,13 @@ import Foundation
 public enum LocalCommandPipeline {
 
     private static let maxWordCount = 40
+
+    /// App bootstrap injects the shared `ToolRegistry` so Tier-1 matchers can
+    /// dispatch their side-effects through the same tool path as LLM-driven
+    /// calls (`executeDirectly` — no safety-gate prompt for local, user-trusted
+    /// intents). `nil` before bootstrap; matchers fall back to their inline
+    /// side-effect in that case.
+    nonisolated(unsafe) public static var registry: ToolRegistry?
 
     /// Attempt to handle `prompt` locally. Returns a `LocalCommandHit` on
     /// success, nil to signal that the caller should fall through to the agent.

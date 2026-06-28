@@ -106,8 +106,15 @@ enum TimerLocalMatcher {
     // MARK: - Side-effect
 
     private static func startTimer(duration: TimeInterval, name: String, start: Date) async -> LocalCommandHit {
-        await MainActor.run {
-            TimerManager.shared.startTimer(duration: duration, name: name, preset: nil)
+        if let registry = LocalCommandPipeline.registry {
+            let argsJSON = """
+            {"duration_seconds":\(Int(duration)),"label":"\(name)"}
+            """
+            _ = try? await registry.executeDirectly(toolName: "start_timer", arguments: argsJSON)
+        } else {
+            await MainActor.run {
+                TimerManager.shared.startTimer(duration: duration, name: name, preset: nil)
+            }
         }
         let elapsed = Date().timeIntervalSince(start)
         let mins = Int(duration) / 60

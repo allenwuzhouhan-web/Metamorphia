@@ -77,6 +77,24 @@ public enum MetamorphiaBootstrap {
     /// NSWorkspace observers stay registered for the lifetime of the process.
     /// AXObserverPool + PushPerceptionDriver are singletons already.
     public static private(set) var workspaceTriggerSource: WorkspaceTriggerSource?
+    /// M5-A — MCP activation. Held for process lifetime so server connections
+    /// and tool registrations survive beyond the configure() scope.
+    static var mcpManager: MCPServerManager?
+    static var mcpRegistrar: MetamorphiaMCPRegistrar?
+
+    /// M4: bridges RetraceRecallMiddleware's pre-fetch to RetraceSurface/QueryRank.
+    /// Returns a <80-token formatted recall block for `query`, or nil.
+    static var retraceRecallFetch: (@Sendable (String) async -> String?)?
+
+    /// Retained reference to the island context provider so M4's sensitivity
+    /// check can read the latest perception summary without a singleton lookup.
+    private static var _sharedIslandContext: IslandStateContextProvider?
+
+    /// M4: whether the currently focused input is a sensitive field. Reads the
+    /// latest PerceptionSummary from the live perception provider. Defaults false.
+    static func focusedFieldIsSensitive() async -> Bool {
+        await _sharedIslandContext?.currentContext().perceptionSummary?.focusedFieldIsSensitive ?? false
+    }
 
     private static var didConfigure = false
 
@@ -133,6 +151,12 @@ public enum MetamorphiaBootstrap {
         //      there doesn't also crash the loop.
         let perceptionContext = PerceptionBootstrap.makeContextProvider()
 
+        // 2b3. Island-state context — wraps the perception provider so the
+        //      agent also sees Metamorphia's own tab/timer/shelf state each turn.
+        let islandContext = IslandStateContextProvider(inner: perceptionContext)
+        // M4: stash for the sensitivity check in prefetchRetraceRecall.
+        Self._sharedIslandContext = islandContext
+
         let memory = FileMemoryStore(
             storageURL: metamorphiaSupport.appendingPathComponent("memories.json")
         )
@@ -171,6 +195,35 @@ public enum MetamorphiaBootstrap {
 
         // 4. Register Metamorphia-native tools (timer, clipboard, notes, shelf, etc.)
         MetamorphiaTools.register(into: registry)
+
+        // 4-MCP. MCP activation. Detached so server-connection latency never
+        //        blocks launch. After connectAll() the registrar pushes all
+        //        discovered tools into the registry as deferred; the user can
+        //        promote them via the Capabilities view or via `search_tools`.
+        //        connectAll() does NOT auto-register — only connectSingle /
+        //        reconnectAll do — so we call registerMCPTools explicitly here.
+        let mcpRegistrar = MetamorphiaMCPRegistrar(registry: registry)
+        Self.mcpRegistrar = mcpRegistrar
+        let mcpConfigURL = metamorphiaSupport.appendingPathComponent("mcp_servers.json")
+        let mcpManager = MCPServerManager(configURL: mcpConfigURL, registrar: mcpRegistrar)
+        Self.mcpManager = mcpManager
+        Task.detached(priority: .background) {
+            await mcpManager.connectAll()
+            let tools = await mcpManager.getDiscoveredTools()
+            if !tools.isEmpty {
+                await mcpRegistrar.registerMCPTools(tools)
+            }
+        }
+
+        // 4a1. Let local matchers dispatch through the real tool registry so
+        //      their side-effects go through the same path as LLM-driven calls.
+        LocalCommandPipeline.registry = registry
+
+        // 4a2. Office copilot tools (capture_deck, design_deck, rewrite_slides,
+        //      review_document, edit_word_comments). Replaces the old copilot
+        //      gauntlet in AICommandViewModel.submit — prompts now flow through
+        //      the agent loop and the model drives these tools directly.
+        CopilotTools.register(into: registry)
 
         // 4b. Register MetamorphiaExecutors tools (run_applescript, run_shell_command).
         MetamorphiaExecutors.register(into: registry)
@@ -408,6 +461,22 @@ public enum MetamorphiaBootstrap {
                 }
                 return RecallSceneTool.RecallResult(scenes: scenes, window: window, autoNarrowed: result.autoNarrowed)
             }
+
+            // M4: temporal-recall pre-fetch bridge for RetraceRecallMiddleware.
+            // Formats the top scenes into a <80-token block. Privacy-clean —
+            // titles + entity chips only, no bodies, no paths.
+            Self.retraceRecallFetch = { @Sendable query in
+                guard let result = await RetraceSurface.shared.search(query),
+                      !result.scenes.isEmpty else { return nil }
+                let lines = result.scenes.prefix(3).map { scene -> String in
+                    let title = scene.hero.item.title ?? "(untitled)"
+                    let chips = scene.chipEntities.prefix(3).joined(separator: ", ")
+                    return chips.isEmpty
+                        ? "- \(title)"
+                        : "- \(title) — \(chips)"
+                }
+                return lines.joined(separator: "\n")
+            }
         }
 
         // 4b4. Continuum Phase 6 — attention model.
@@ -458,17 +527,39 @@ public enum MetamorphiaBootstrap {
             await CompiledSkillCatalog.shared.attach(registry: registry)
             await SkillRecorder.shared.setEnabled(Defaults[.workflowRecorderEnabled])
         }
+        // M5 — RitualCompilationSweep. Runs every 15 minutes when workflow
+        // recording is opted-in. On each sweep it segments the SkillRecorder
+        // buffer into ritual windows, promotes recurring ones via
+        // RitualRecurrenceStore, compiles them, and surfaces an .addSkill
+        // Whisper Card proposal for the user to accept or dismiss.
+        if Defaults[.workflowRecorderEnabled] {
+            Task {
+                await RitualCompilationSweep.shared.start { skill in
+                    await MainActor.run {
+                        let proposal = Proposal(
+                            goal: .addSkill,
+                            rationale: "Turn \"\(skill.name)\" into a one-tap tool?",
+                            primaryActionLabel: "Add skill",
+                            noveltyKey: "addSkill|\(skill.id)",
+                            confidence: 0.7
+                        )
+                        AmbientProposalPresenter.shared.presentLearned(proposal, skill: skill)
+                    }
+                }
+            }
+        }
 
         // 5. Construct the agent loop with the default middleware stack.
         let chain = AgentLoop.makeDefaultMiddlewareChain(
             progressSink: NullProgressSink(),  // swapped out below once viewModel is available
             memoryStore: memory,
-            systemContext: perceptionContext,
+            systemContext: islandContext,
             clipboard: NullClipboardProvider(),
             session: NullSessionProvider(),
             toolCatalog: ToolRegistryCatalogAdapter(registry: registry),
             adaptiveResponseStorageURL: metamorphiaSupport.appendingPathComponent("response_engagement.json"),
-            interestGraph: sharedInterestGraph
+            interestGraph: sharedInterestGraph,
+            retraceRecall: { @Sendable q in await MetamorphiaBootstrap.retraceRecallFetch?(q) ?? nil }
         )
 
         let loop = AgentLoop(
@@ -577,6 +668,10 @@ public enum MetamorphiaBootstrap {
             await loop.setTreeSink(viewModel)
         }
 
+        // M4: Memory Card receipts — flash a featherweight notch confirmation
+        // whenever RetraceIngest records something new.
+        MemoryCardPresenter.shared.install(stream: activityStream)
+
         // Phase 10 (continued): wire PredictiveStaging with a dedicated
         // AgentLoop so pre-warm runs are completely isolated from the user's
         // live run. The staging loop shares the same registry / middleware
@@ -585,7 +680,7 @@ public enum MetamorphiaBootstrap {
         let stagingChain = AgentLoop.makeDefaultMiddlewareChain(
             progressSink: NullProgressSink(),
             memoryStore: memory,
-            systemContext: perceptionContext,
+            systemContext: islandContext,
             clipboard: NullClipboardProvider(),
             session: NullSessionProvider(),
             toolCatalog: ToolRegistryCatalogAdapter(registry: registry),

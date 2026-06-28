@@ -129,6 +129,13 @@ public actor AgentLoop {
         self.treeSink = sink
     }
 
+    /// Merge keys into the middleware chain's persistent storage. Used by the
+    /// host to pre-seed values (e.g. the M4 recall block) that a synchronous
+    /// middleware will read on iteration 0.
+    public func setMiddlewareStorage(_ values: [String: Any]) {
+        for (k, v) in values { middlewareChain.persistentStorage[k] = v }
+    }
+
     // MARK: - Public API
 
     /// Submit a new command. Cancels any in-flight run, then starts fresh.
@@ -773,7 +780,8 @@ public actor AgentLoop {
         session: SessionProvider = NullSessionProvider(),
         toolCatalog: ToolCatalog,
         adaptiveResponseStorageURL: URL? = nil,
-        interestGraph: InterestGraphStore? = nil
+        interestGraph: InterestGraphStore? = nil,
+        retraceRecall: @escaping @Sendable (String) async -> String? = { _ in nil }
     ) -> MiddlewareChain {
         let chain = MiddlewareChain()
         // Infrastructure
@@ -797,6 +805,10 @@ public actor AgentLoop {
             clipboard: clipboard,
             session: session
         ))
+        // M4: temporal recall — injects a pre-fetched "earlier context" block
+        // on iteration 0. Sits after ImplicitContext so screen/clipboard context
+        // appears first; the closure is unused by the sync hook (host pre-fetches).
+        chain.add(RetraceRecallMiddleware(recall: retraceRecall))
         chain.add(AdaptiveResponseMiddleware(engagementStorageURL: adaptiveResponseStorageURL))
         // Interest graph potentiation — runs before CorrectionDetector so tool
         // subjects are recorded even when the LLM gets corrected immediately after.

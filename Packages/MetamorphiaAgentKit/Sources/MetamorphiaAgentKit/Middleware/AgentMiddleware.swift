@@ -180,8 +180,11 @@ public final class MiddlewareChain: @unchecked Sendable {
         persistentStorage = ctx.storage
     }
 
-    /// Reset all state for a new task execution.
+    /// Reset all state for a new task execution. Pre-seeded keys written by the
+    /// host before submit (e.g. RetraceRecall block) are preserved for this run.
     public func reset() {
-        persistentStorage.removeAll()
+        let preserved = ["RetraceRecall.block", "RetraceRecall.suppress"]
+        let kept = persistentStorage.filter { preserved.contains($0.key) }
+        persistentStorage = kept
     }
 }

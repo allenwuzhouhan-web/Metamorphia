@@ -998,6 +998,8 @@ struct ContentView: View {
                                 }
                             case .retrace:
                                 NotchRetraceView()
+                            case .capabilities:
+                                CapabilitiesView()
                           }
                       }
                       .id(coordinator.currentView)

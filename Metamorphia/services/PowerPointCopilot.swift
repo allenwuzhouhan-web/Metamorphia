@@ -2,6 +2,15 @@ import AppKit
 import Defaults
 import Foundation
 
+/// A lightweight error that wraps a plain-string message from PowerPoint
+/// automation paths. Used as the `Failure` type for `Result` returns on the
+/// tool-facing API so Swift's `Failure: Error` requirement is satisfied.
+struct PowerPointCopilotError: Error, LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+    init(_ message: String) { self.message = message }
+}
+
 struct PowerPointRewriteRoute {
     let filePath: String?
     let commandContextBlock: String
@@ -264,6 +273,296 @@ enum PowerPointCopilot {
             activeSlideIndex: deck.activeSlideIndex,
             extractedText: extractedText
         )
+    }
+
+    // MARK: - Tool-facing capture helpers (internal, thin wrappers over private paths)
+
+    /// Capture shape metadata for the `capture_deck` agent tool.
+    /// Returns a human-readable listing with embedded shapeIndex/name/role/text
+    /// suitable for inclusion in the model's context before calling design_deck
+    /// or rewrite_slides. The private `captureCurrentSlide`/`captureDeck`
+    /// structs stay private; this wrapper exposes only a plain string.
+    static func captureShapesForTool(
+        scope: PowerPointAutomationScope
+    ) async -> Result<String, PowerPointCopilotError> {
+        switch scope {
+        case .wholeDeck:
+            switch await captureDeck() {
+            case .failure(let message):
+                return .failure(PowerPointCopilotError(message))
+            case .success(let deck):
+                var lines: [String] = [
+                    "Presentation: \(deck.presentationTitle)",
+                    "File: \(deck.filePath ?? "unavailable")",
+                    "Slides: \(deck.slideCount)  Active: \(deck.activeSlideIndex)",
+                    ""
+                ]
+                for slide in deck.slides {
+                    let title = slide.slideTitle ?? "Untitled"
+                    lines.append("Slide \(slide.slideIndex): \(title)")
+                    for shape in cappedPromptShapes(slide.shapes) {
+                        lines.append("  shapeIndex=\(shape.index) role=\(shape.role.rawValue) name=\"\(shape.name)\"")
+                        let preview = promptText(shape.text)
+                            .components(separatedBy: "\n")
+                            .prefix(2)
+                            .joined(separator: " ")
+                        if !preview.isEmpty {
+                            lines.append("    \(preview)")
+                        }
+                    }
+                }
+                return .success(lines.joined(separator: "\n"))
+            }
+        default:
+            switch await captureCurrentSlide() {
+            case .failure(let message):
+                return .failure(PowerPointCopilotError(message))
+            case .success(let context):
+                var lines: [String] = [
+                    "Presentation: \(context.presentationTitle)",
+                    "File: \(context.filePath ?? "unavailable")",
+                    "Slide \(context.slideIndex): \(context.slideTitle ?? "Untitled")",
+                    ""
+                ]
+                for shape in cappedPromptShapes(context.shapes) {
+                    lines.append("shapeIndex=\(shape.index) role=\(shape.role.rawValue) name=\"\(shape.name)\"")
+                    let preview = promptText(shape.text)
+                    if !preview.isEmpty {
+                        lines.append("  \(preview)")
+                    }
+                }
+                return .success(lines.joined(separator: "\n"))
+            }
+        }
+    }
+
+    /// Capture a `PowerPointDesignRoute` for the `design_deck` agent tool.
+    /// Runs the same capture logic as `prepareDesignRoute` but bypasses the
+    /// prompt-based intent guard so the tool can call it unconditionally.
+    static func prepareDesignRouteForTool(
+        isWholeDeck: Bool
+    ) async -> Result<PowerPointDesignRoute, PowerPointCopilotError> {
+        if isWholeDeck {
+            switch await prepareDeckDesignRoute(prompt: "design the whole deck") {
+            case .failure(let message):
+                return .failure(PowerPointCopilotError(message))
+            case .route(let route):
+                return .success(route)
+            case .notPowerPointDesignIntent:
+                return .failure(PowerPointCopilotError("Could not build a deck design route."))
+            }
+        } else {
+            let context: PowerPointSlideContext
+            switch await captureCurrentSlide() {
+            case .failure(let message):
+                return .failure(PowerPointCopilotError(message))
+            case .success(let captured):
+                context = captured
+            }
+            guard !context.shapes.isEmpty else {
+                return .failure(PowerPointCopilotError("The current PowerPoint slide does not have editable text boxes to design around."))
+            }
+            let promptShapes = cappedPromptShapes(context.shapes)
+            let restoreSnapshot = restoreData(for: context)
+            return .success(PowerPointDesignRoute(
+                filePath: context.filePath,
+                commandContextBlock: "",
+                systemPromptSuffix: "",
+                restoreData: restoreSnapshot,
+                shapeSnapshots: Dictionary(
+                    uniqueKeysWithValues: promptShapes.map {
+                        ($0.index, PowerPointShapeSnapshot(name: $0.name, text: $0.text, role: $0.role))
+                    }
+                ),
+                deckContext: nil,
+                deckRestoreData: []
+            ))
+        }
+    }
+
+    /// Execute a single deterministic formatting command on all editable text
+    /// boxes of the current PowerPoint slide. Used by the `direct_edit` agent
+    /// tool; bypasses the keyword-router so the tool can specify property/value
+    /// explicitly. Captures a restore snapshot before applying, exactly as the
+    /// legacy `performDirectEditIfNeeded` path did.
+    static func performDirectEditForTool(
+        property: PowerPointDirectEditKind,
+        value: String
+    ) async -> Result<PowerPointDirectEditResult, PowerPointCopilotError> {
+        let command: PowerPointDirectEditCommand
+        switch property {
+        case .bold:
+            let enabled = (value.lowercased() == "true" || value == "on")
+            command = PowerPointDirectEditCommand(
+                kind: .bold,
+                value: enabled ? "on" : "off",
+                appleScriptValue: enabled ? "true" : "false"
+            )
+        case .italic:
+            let enabled = (value.lowercased() == "true" || value == "on")
+            command = PowerPointDirectEditCommand(
+                kind: .italic,
+                value: enabled ? "on" : "off",
+                appleScriptValue: enabled ? "true" : "false"
+            )
+        case .underline:
+            let enabled = (value.lowercased() == "true" || value == "on")
+            command = PowerPointDirectEditCommand(
+                kind: .underline,
+                value: enabled ? "on" : "off",
+                appleScriptValue: enabled ? "true" : "false"
+            )
+        case .fontSize:
+            guard let size = Int(value.trimmingCharacters(in: .whitespaces)),
+                  (4...200).contains(size) else {
+                return .failure(PowerPointCopilotError("fontSize value must be an integer between 4 and 200, got: \(value)"))
+            }
+            command = PowerPointDirectEditCommand(
+                kind: .fontSize,
+                value: "\(size) pt",
+                appleScriptValue: "\(size)"
+            )
+        case .textColor:
+            let colorTable: [(names: [String], name: String, rgb16: (Int, Int, Int))] = [
+                (["lime green", "lime"], "lime green", (0, 65535, 0)),
+                (["black"], "black", (0, 0, 0)),
+                (["white"], "white", (65535, 65535, 65535)),
+                (["red"], "red", (65535, 0, 0)),
+                (["green"], "green", (0, 32768, 0)),
+                (["blue"], "blue", (0, 0, 65535)),
+                (["yellow"], "yellow", (65535, 65535, 0)),
+                (["orange"], "orange", (65535, 32768, 0)),
+                (["purple"], "purple", (32768, 0, 32768)),
+                (["gray", "grey"], "gray", (32768, 32768, 32768)),
+            ]
+            let normalized = value.lowercased().trimmingCharacters(in: .whitespaces)
+            if let match = colorTable.first(where: { $0.names.contains { normalized.contains($0) } }) {
+                command = PowerPointDirectEditCommand(
+                    kind: .textColor,
+                    value: match.name,
+                    appleScriptValue: "{\(match.rgb16.0), \(match.rgb16.1), \(match.rgb16.2)}"
+                )
+            } else if normalized.count == 6 || normalized.count == 7,
+                      let hex = normalized.hasPrefix("#")
+                        ? UInt32(normalized.dropFirst(), radix: 16)
+                        : UInt32(normalized, radix: 16) {
+                let r = Int((hex >> 16) & 0xFF) * 257
+                let g = Int((hex >> 8) & 0xFF) * 257
+                let b = Int(hex & 0xFF) * 257
+                command = PowerPointDirectEditCommand(
+                    kind: .textColor,
+                    value: normalized.hasPrefix("#") ? normalized : "#\(normalized)",
+                    appleScriptValue: "{\(r), \(g), \(b)}"
+                )
+            } else {
+                return .failure(PowerPointCopilotError("Unrecognized textColor value '\(value)'. Use a color name (black, white, red, blue, green, yellow, orange, purple, gray) or a hex code like #FF0000."))
+            }
+        case .alignment:
+            let alignTable: [(names: [String], value: String, appleScriptValue: String)] = [
+                (["left"], "left", "1"),
+                (["center", "centre"], "center", "2"),
+                (["right"], "right", "3"),
+                (["justify", "justified"], "justified", "4"),
+            ]
+            let normalized = value.lowercased().trimmingCharacters(in: .whitespaces)
+            if let match = alignTable.first(where: { $0.names.contains { normalized.contains($0) } }) {
+                command = PowerPointDirectEditCommand(
+                    kind: .alignment,
+                    value: match.value,
+                    appleScriptValue: match.appleScriptValue
+                )
+            } else {
+                return .failure(PowerPointCopilotError("Unrecognized alignment value '\(value)'. Use: left, center, right, or justified."))
+            }
+        case .backgroundColor:
+            return .failure(PowerPointCopilotError("direct_edit does not support backgroundColor. Use design_deck for background color changes."))
+        }
+
+        let script = directEditScript(command: command)
+        do {
+            let scriptResult = try await PowerPointExecutor.runJSON(
+                script,
+                as: PowerPointExecutor.JSONEnvelope.self,
+                timeoutSeconds: automationTimeoutSeconds
+            )
+            if scriptResult.ok == false, let scriptError = scriptResult.error {
+                return .failure(PowerPointCopilotError(scriptError))
+            }
+            let appliedIndexes = scriptResult.applied ?? []
+            let skippedIndexes = scriptResult.skipped ?? []
+            let slideIndex = scriptResult.slideIndex ?? 0
+            let presentationTitle = scriptResult.presentationTitle ?? ""
+            let sourceFilePath = normalizedOptionalString(scriptResult.filePath)
+            let slideTitle = normalizedOptionalString(scriptResult.slideTitle)
+            let warnings = scriptResult.warnings ?? []
+            let restoreData = PowerPointRestoreData(
+                presentationTitle: presentationTitle.isEmpty ? "PowerPoint presentation" : presentationTitle,
+                sourceFilePath: sourceFilePath,
+                slideIndex: slideIndex,
+                slideTitle: slideTitle,
+                snapshots: scriptResult.snapshots ?? []
+            )
+            guard !appliedIndexes.isEmpty else {
+                let shapeCount = scriptResult.shapeCount ?? 0
+                let errorSummary = warnings.joined(separator: " ")
+                let diagnosticSuffix = errorSummary.isEmpty
+                    ? " PowerPoint reported \(shapeCount) shape(s) on the slide and skipped all of them."
+                    : " PowerPoint reported \(shapeCount) shape(s). First errors: \(errorSummary)"
+                return .failure(PowerPointCopilotError("I couldn't format any editable text on the current PowerPoint slide.\(diagnosticSuffix)"))
+            }
+            let affectedCount = appliedIndexes.count
+            let skippedCount = skippedIndexes.count
+            let skippedSuffix = skippedCount == 0 ? "" : " \(skippedCount) text box(es) were skipped."
+            let result = PowerPointDirectEditResult(
+                presentationTitle: presentationTitle.isEmpty ? "PowerPoint presentation" : presentationTitle,
+                sourceFilePath: sourceFilePath,
+                slideIndex: slideIndex,
+                slideTitle: slideTitle,
+                summary: "Changed \(affectedCount) editable text box(es) on slide \(slideIndex) to \(command.value).\(skippedSuffix)",
+                actions: [
+                    PowerPointDirectEditAction(
+                        targetScope: "All editable text on current slide",
+                        property: command.kind,
+                        value: command.value,
+                        affectedShapeIndexes: appliedIndexes
+                    )
+                ],
+                skippedShapeCount: skippedCount,
+                warnings: warnings,
+                restoreData: restoreData.snapshots.isEmpty ? nil : restoreData
+            )
+            return .success(result)
+        } catch where (error as NSError).code == 408 {
+            return .failure(PowerPointCopilotError("PowerPoint did not finish the direct formatting command within \(Int(automationTimeoutSeconds)) seconds. I stopped waiting so the command bar will not stay stuck."))
+        } catch {
+            return .failure(PowerPointCopilotError("I couldn't update PowerPoint formatting: \(error.localizedDescription)"))
+        }
+    }
+
+    /// Capture a `PowerPointRewriteRoute` for the `rewrite_slides` agent tool.
+    /// Bypasses the prompt-based intent guard so the tool can call it directly.
+    static func prepareRewriteRouteForTool() async -> Result<PowerPointRewriteRoute, PowerPointCopilotError> {
+        let context: PowerPointSlideContext
+        switch await captureCurrentSlide() {
+        case .failure(let message):
+            return .failure(PowerPointCopilotError(message))
+        case .success(let captured):
+            context = captured
+        }
+        guard !context.shapes.isEmpty else {
+            return .failure(PowerPointCopilotError("The current PowerPoint slide does not have editable text boxes to rewrite."))
+        }
+        let promptShapes = cappedPromptShapes(context.shapes)
+        return .success(PowerPointRewriteRoute(
+            filePath: context.filePath,
+            commandContextBlock: "",
+            systemPromptSuffix: "",
+            shapeSnapshots: Dictionary(
+                uniqueKeysWithValues: promptShapes.map {
+                    ($0.index, PowerPointShapeSnapshot(name: $0.name, text: $0.text, role: $0.role))
+                }
+            )
+        ))
     }
 
     private static func runAppleScriptViaOSAScript(
