@@ -13,6 +13,7 @@ public actor PresentationTasteStore {
     private let securePersistence: SecurePersistence?
     private var pendingWriteTask: Task<Void, Never>?
     private let writeDebounce: TimeInterval = 0.35
+    private let sampleLimit = 50
 
     public init(location: URL? = nil) {
         let url = location ?? URL.applicationSupportDirectory
@@ -56,7 +57,20 @@ public actor PresentationTasteStore {
     public func addOrUpdate(sample: PresentationDeckSample) -> PresentationTasteProfile {
         var stored = sample
         stored.updatedAt = .now
+        // Re-importing the same deck carries a fresh id, so de-duplicate by file
+        // identity to replace the prior entry instead of accumulating duplicates.
+        let deckKey = stored.fileName.lowercased()
+        for (key, existing) in samples where existing.fileName.lowercased() == deckKey && key != stored.id {
+            samples.removeValue(forKey: key)
+        }
         samples[stored.id] = stored
+        // Bound growth: keep only the most-recent samples by recency.
+        if samples.count > sampleLimit {
+            let survivors = samples.values
+                .sorted { $0.updatedAt > $1.updatedAt }
+                .prefix(sampleLimit)
+            samples = Dictionary(uniqueKeysWithValues: survivors.map { ($0.id, $0) })
+        }
         let profile = Self.buildProfile(from: Array(samples.values))
         activeProfile = profile
         scheduleWrite()

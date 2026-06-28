@@ -49,6 +49,9 @@ class ClipboardPanelManager: ObservableObject {
     
     func hideClipboardPanel() {
         clipboardPanel?.close()
+        // Detach the SwiftUI hosting tree so its ClipboardManager subscriptions
+        // are torn down promptly rather than lingering on a closed panel.
+        clipboardPanel?.contentView = nil
         clipboardPanel = nil
     }
     

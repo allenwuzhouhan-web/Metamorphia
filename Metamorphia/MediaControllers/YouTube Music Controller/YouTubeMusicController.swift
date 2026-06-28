@@ -57,12 +57,18 @@ final class YouTubeMusicController: MediaControllerProtocol {
         self.authManager = YouTubeMusicAuthManager(httpClient: httpClient)
         
         setupAppStateObserver()
-        
+
         Task {
             await initializeIfAppActive()
         }
     }
-    
+
+    deinit {
+        updateTimer?.invalidate()
+        appStateObserver?.cancel()
+        artworkFetchTask?.cancel()
+    }
+
     // MARK: - MediaControllerProtocol Implementation
     func play() async { await sendCommand(endpoint: "/play", method: "POST") }
     

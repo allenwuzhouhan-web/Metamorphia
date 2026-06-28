@@ -85,7 +85,12 @@ class ClipboardWindowManager: ObservableObject {
     }
     
     func hideClipboardWindow() {
-        clipboardWindow?.close()
+        guard let window = clipboardWindow else { return }
+        window.close()
+        // close() does not invoke windowShouldClose(_:), so mirror the
+        // close-button path here to release the window and hosting view.
+        ScreenCaptureVisibilityManager.shared.unregister(window)
+        clipboardWindow = nil
     }
     
     func toggleClipboardWindow() {

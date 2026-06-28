@@ -1611,6 +1611,9 @@ public final class AICommandViewModel: ObservableObject {
         let keep = 40
         if conversation.count > keep {
             conversation.removeFirst(conversation.count - keep)
+            // Prune protection entries for turns that were just dropped so the
+            // set stays bounded by the same cap over a long menu-bar session.
+            protectedTerminalTurnIDs.formIntersection(Set(conversation.map(\.id)))
         }
         let heavyKeep = 6
         if conversation.count > heavyKeep {

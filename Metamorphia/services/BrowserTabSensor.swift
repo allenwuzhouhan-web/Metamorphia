@@ -139,6 +139,9 @@ public final class BrowserTabSensor {
 
     public func start() {
         guard Defaults[.observeBrowserTabs] else { return }
+        // Idempotency: a second start() without an intervening stop() must not
+        // orphan the existing observer token (which could never be removed).
+        guard workspaceObserver == nil else { return }
 
         // Subscribe to frontmost-app changes so we can wake/pause the poll loop.
         workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(

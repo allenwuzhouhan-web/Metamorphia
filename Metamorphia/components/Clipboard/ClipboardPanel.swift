@@ -79,8 +79,8 @@ class ClipboardPanel: NSPanel {
     }
     
     private func setupContentView() {
-        let contentView = ClipboardPanelView {
-            self.close()
+        let contentView = ClipboardPanelView { [weak self] in
+            self?.close()
         }
         
         let hostingView = NSHostingView(rootView: contentView)

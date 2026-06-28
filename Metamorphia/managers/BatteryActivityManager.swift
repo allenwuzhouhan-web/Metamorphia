@@ -218,11 +218,11 @@ class BatteryActivityManager {
         isProcessingNotifications = true
         
         let event = notificationQueue.removeFirst()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+        DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.notifyObservers(event: event)
             self.isProcessingNotifications = false
-            
+
             // Check if there are more items in the queue
             if !self.notificationQueue.isEmpty {
                 self.processNextNotification()

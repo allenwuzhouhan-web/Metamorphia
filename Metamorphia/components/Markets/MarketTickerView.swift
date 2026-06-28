@@ -16,7 +16,10 @@ struct MarketTickerView: View {
     @ObservedObject private var watchlist = WatchlistStore.shared
 
     @State private var rotationIndex: Int = 0
-    @State private var rotationTimer: Timer?
+
+    // Driven by a SwiftUI-owned publisher so the periodic tick is torn down with
+    // the view automatically — no orphaned RunLoop Timer if onDisappear is skipped.
+    private let rotationTick = Timer.publish(every: 4.0, on: .main, in: .common).autoconnect()
 
     var body: some View {
         Group {
@@ -27,8 +30,9 @@ struct MarketTickerView: View {
             }
         }
         .animation(.easeInOut(duration: 0.28), value: currentSymbol ?? "")
-        .onAppear(perform: startRotation)
-        .onDisappear(perform: stopRotation)
+        .onReceive(rotationTick) { _ in
+            rotationIndex &+= 1
+        }
         .onChange(of: watchlist.entries.map(\.symbol)) { _, _ in
             rotationIndex = 0
         }
@@ -64,20 +68,6 @@ struct MarketTickerView: View {
         let symbols = visibleSymbols
         guard !symbols.isEmpty else { return nil }
         return symbols[rotationIndex % symbols.count]
-    }
-
-    private func startRotation() {
-        stopRotation()
-        rotationTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { _ in
-            Task { @MainActor in
-                rotationIndex &+= 1
-            }
-        }
-    }
-
-    private func stopRotation() {
-        rotationTimer?.invalidate()
-        rotationTimer = nil
     }
 
     // MARK: - Formatting
