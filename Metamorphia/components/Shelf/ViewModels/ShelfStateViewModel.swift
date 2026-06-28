@@ -54,11 +54,14 @@ final class ShelfStateViewModel: ObservableObject {
     func add(_ newItems: [ShelfItem]) {
         guard !newItems.isEmpty else { return }
         var merged = items
-        // Deduplicate by identityKey while preserving order (existing first)
-        var seen: Set<String> = Set(merged.map { $0.identityKey })
+        // Deduplicate by identity key while preserving order (existing first).
+        // For .file items resolve through the bounded cache so a drop doesn't
+        // synchronously re-resolve every existing item's security-scoped
+        // bookmark on the main actor.
+        var seen: Set<String> = Set(merged.map { dedupKey(for: $0) })
         var addedIDs: [String] = []
         for it in newItems {
-            let key = it.identityKey
+            let key = dedupKey(for: it)
             if !seen.contains(key) {
                 merged.append(it)
                 seen.insert(key)
@@ -71,6 +74,19 @@ final class ShelfStateViewModel: ObservableObject {
         if !addedIDs.isEmpty {
             ExtensionRPCServer.shared.notifyShelfItemsChanged(itemIDs: addedIDs, action: "added")
         }
+    }
+
+    /// Deduplication key matching `ShelfItem.identityKey`'s semantics, but
+    /// resolving `.file` bookmarks through the bounded cache so repeated adds
+    /// of the same files avoid a synchronous security-scoped resolve per item.
+    private func dedupKey(for item: ShelfItem) -> String {
+        if case .file(let bookmark) = item.kind {
+            if let url = cachedFileURL(for: bookmark) {
+                return "file://" + url.standardizedFileURL.path
+            }
+            return "file://missing/" + bookmark.base64EncodedString()
+        }
+        return item.identityKey
     }
 
     func remove(_ item: ShelfItem) {

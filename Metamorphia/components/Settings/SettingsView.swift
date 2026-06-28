@@ -4391,8 +4391,30 @@ struct Appearance: View {
         return NSImage(named: fallbackName)
     }
 
+    /// Caches rasterized 64x64 thumbnails keyed by file path so repeated body
+    /// recomputes (triggered by unrelated @Default/@State changes) don't re-decode
+    /// the full-resolution icon files off disk on the main thread.
+    private static let customIconCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 64
+        return cache
+    }()
+
     private func customIconImage(for icon: CustomAppIcon) -> NSImage? {
-        NSImage(contentsOf: icon.fileURL)
+        let cacheKey = icon.fileURL.path as NSString
+        if let cached = Self.customIconCache.object(forKey: cacheKey) {
+            return cached
+        }
+        guard let full = NSImage(contentsOf: icon.fileURL) else { return nil }
+        let thumbSize = NSSize(width: 64, height: 64)
+        let thumb = NSImage(size: thumbSize)
+        thumb.lockFocus()
+        full.draw(in: NSRect(origin: .zero, size: thumbSize),
+                  from: NSRect(origin: .zero, size: full.size),
+                  operation: .copy, fraction: 1.0)
+        thumb.unlockFocus()
+        Self.customIconCache.setObject(thumb, forKey: cacheKey)
+        return thumb
     }
 
     private func appIconCard(title: String, image: NSImage?, isSelected: Bool, action: @escaping () -> Void) -> some View {
@@ -4484,6 +4506,7 @@ struct Appearance: View {
         if let index = customAppIcons.firstIndex(of: icon) {
             customAppIcons.remove(at: index)
         }
+        Self.customIconCache.removeObject(forKey: icon.fileURL.path as NSString)
         if FileManager.default.fileExists(atPath: icon.fileURL.path) {
             try? FileManager.default.removeItem(at: icon.fileURL)
         }

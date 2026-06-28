@@ -65,7 +65,7 @@ struct ShelfItemView: View {
                     viewModel: viewModel,
                     cachedPreviewImage: $cachedPreviewImage,
                     dragPreviewContent: {
-                        DragPreviewView(thumbnail: viewModel.thumbnail ?? item.icon, displayName: item.displayName)
+                        DragPreviewView(thumbnail: viewModel.thumbnail ?? viewModel.placeholderIcon ?? item.icon, displayName: viewModel.displayName)
                     },
                     onRightClick: viewModel.handleRightClick,
                     onClick: { event, nsview in
@@ -102,6 +102,11 @@ struct ShelfItemView: View {
                 quickLookService.show(urls: urls, selectFirst: true)
             }
         }
+        .onChange(of: item.kind) { _, _ in
+            // The item's bookmark can change in place (e.g. rename) while keeping
+            // the same id, so the reused view model must re-sync its cached name/icon.
+            viewModel.refresh(for: item)
+        }
         .onChange(of: viewModel.thumbnail) { _, _ in
             // Invalidate cached preview when thumbnail changes
             Task {
@@ -114,7 +119,7 @@ struct ShelfItemView: View {
     // MARK: - View Components
 
     private var iconView: some View {
-        Image(nsImage: viewModel.thumbnail ?? item.icon)
+        Image(nsImage: viewModel.thumbnail ?? viewModel.placeholderIcon ?? item.icon)
             .resizable()
             .aspectRatio(contentMode: .fit)
             .frame(width: 56, height: 56)
@@ -123,7 +128,7 @@ struct ShelfItemView: View {
     }
 
     private var textView: some View {
-        Text(item.displayName)
+        Text(viewModel.displayName)
             .font(.system(size: 12, weight: .medium))
             .foregroundStyle(Color.white)
             .lineLimit(2)
@@ -178,10 +183,10 @@ struct ShelfItemView: View {
     
     @MainActor
     private func renderDragPreview() async -> NSImage {
-        let content = DragPreviewView(thumbnail: viewModel.thumbnail ?? item.icon, displayName: item.displayName)
+        let content = DragPreviewView(thumbnail: viewModel.thumbnail ?? viewModel.placeholderIcon ?? item.icon, displayName: viewModel.displayName)
         let renderer = ImageRenderer(content: content)
         renderer.scale = NSScreen.main?.backingScaleFactor ?? 2.0
-        return renderer.nsImage ?? (viewModel.thumbnail ?? item.icon)
+        return renderer.nsImage ?? (viewModel.thumbnail ?? viewModel.placeholderIcon ?? item.icon)
     }
 
     
@@ -227,7 +232,7 @@ private struct DraggableClickHandler<Content: View>: NSViewRepresentable {
         }
         
         // Fallback to icon if rendering fails
-        return viewModel.thumbnail ?? item.icon
+        return viewModel.thumbnail ?? viewModel.placeholderIcon ?? item.icon
     }
     
     final class DraggableClickView: NSView, NSDraggingSource {

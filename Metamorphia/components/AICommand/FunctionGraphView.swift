@@ -7,6 +7,7 @@ struct FunctionGraphView: View {
     @State private var parameters: [String: Double]
     @State private var appeared = false
     @State private var curveDrawn: CGFloat = 0
+    @State private var graphCache = GraphDataCache()
 
     private let graphHeight: CGFloat = 180
     private let sampleCount = 300
@@ -67,7 +68,7 @@ struct FunctionGraphView: View {
 
     private var graphCanvas: some View {
         GeometryReader { geo in
-            let data = computeGraphData(in: geo.size)
+            let data = graphData(in: geo.size)
             ZStack {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(Color.white.opacity(0.03))
@@ -214,6 +215,29 @@ struct FunctionGraphView: View {
         let yAxisScreenX: CGFloat
         let xInterval: Double
         let yInterval: Double
+    }
+
+    /// Holds the last sampled curve so a layout pass with unchanged inputs
+    /// (notch resize, incidental re-render) reuses it instead of re-evaluating
+    /// the AST 301 times and rebuilding the path.
+    private final class GraphDataCache {
+        var key: (size: CGSize, parameters: [String: Double])?
+        var data: GraphData?
+    }
+
+    /// Returns memoized graph data, recomputing only when the canvas size or
+    /// parameter values actually change.
+    private func graphData(in size: CGSize) -> GraphData {
+        if let key = graphCache.key,
+           key.size == size,
+           key.parameters == parameters,
+           let cached = graphCache.data {
+            return cached
+        }
+        let computed = computeGraphData(in: size)
+        graphCache.key = (size, parameters)
+        graphCache.data = computed
+        return computed
     }
 
     private func computeGraphData(in size: CGSize) -> GraphData {

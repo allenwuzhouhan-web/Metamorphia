@@ -373,6 +373,39 @@ struct DiskTotals: Equatable {
     static let zero = DiskTotals(readMB: 0, writtenMB: 0)
 }
 
+/// One tick's worth of sampled values, gathered off the main thread and then
+/// applied to the @Published properties on the main actor.
+private struct StatsSnapshot {
+    var cpuUsage: Double
+    var gpuUsage: Double
+    var memoryUsage: Double
+    var networkDownload: Double
+    var networkUpload: Double
+    var diskRead: Double
+    var diskWrite: Double
+    var cpuBreakdown: CPULoadBreakdown
+    var memoryBreakdown: MemoryBreakdown
+    var cpuLoadAverage: LoadAverage
+    var gpuBreakdown: GPUBreakdown
+    var gpuDevices: [GPUDeviceMetrics]
+    var cpuCoreUsage: [CPUCoreUsage]
+    var cpuUptime: TimeInterval
+    var cpuTemperature: CPUTemperatureMetrics
+    var cpuFrequency: CPUFrequencyMetrics?
+    var networkTotals: NetworkTotals
+    var diskTotals: DiskTotals
+    var networkInterfaces: [NetworkInterfaceMetrics]
+    var diskDevices: [DiskDeviceMetrics]
+    // History point values for this tick.
+    var cpuHistoryValue: Double
+    var memoryHistoryValue: Double
+    var gpuHistoryValue: Double
+    var networkDownloadHistoryValue: Double
+    var networkUploadHistoryValue: Double
+    var diskReadHistoryValue: Double
+    var diskWriteHistoryValue: Double
+}
+
 class StatsManager: ObservableObject {
     // MARK: - Properties
     static let shared = StatsManager()
@@ -439,11 +472,19 @@ class StatsManager: ObservableObject {
     private var lastNotchState: String = "closed"
     private var lastCurrentView: String = "other"
     
-    // Network monitoring state
+    /// Serial queue that owns every syscall/IOKit sampling pass and the
+    /// cross-tick delta/baseline state below. The registry walks (IOStorage,
+    /// IOAccelerator), getifaddrs passes and per-volume resource lookups are
+    /// expensive, so they run here instead of on the main thread; only the
+    /// resulting @Published values are hopped back to MainActor. Confining the
+    /// delta state to one serial queue keeps it race-free off the main actor.
+    private let samplingQueue = DispatchQueue(label: "com.metamorphia.stats.sampling")
+
+    // Network monitoring state (sampling-queue confined)
     private var previousNetworkStats: (bytesIn: UInt64, bytesOut: UInt64) = (0, 0)
     private var previousTimestamp: Date = Date()
-    
-    // Disk monitoring state  
+
+    // Disk monitoring state (sampling-queue confined)
     private var previousDiskStats: (bytesRead: UInt64, bytesWritten: UInt64) = (0, 0)
     private var previousCPULoadInfo: host_cpu_load_info?
     private var previousCpuInfo: processor_info_array_t?
@@ -451,6 +492,19 @@ class StatsManager: ObservableObject {
     private var processorCount: natural_t = 0
     private var previousInterfaceCounters: [String: (bytesIn: UInt64, bytesOut: UInt64)] = [:]
     private var interfaceTotals: [String: NetworkTotals] = [:]
+
+    // Running transfer totals + last-good fallbacks (sampling-queue confined).
+    // The fallbacks mirror the previously published values so a failed syscall
+    // returns the last known reading without touching @Published state off-main.
+    private var networkTotalsAccumulator: NetworkTotals = .zero
+    private var diskTotalsAccumulator: DiskTotals = .zero
+    private var lastCpuBreakdown: CPULoadBreakdown = .zero
+    private var lastCpuLoadAverage: LoadAverage = .zero
+    private var lastCpuCoreUsage: [CPUCoreUsage] = []
+    private var lastMemoryUsage: Double = 0.0
+    private var lastMemoryBreakdown: MemoryBreakdown = .zero
+    private var lastNetworkInterfaces: [NetworkInterfaceMetrics] = []
+    private var lastDiskDevices: [DiskDeviceMetrics] = []
     
     // Per-process monitoring cache (updated via ps sampling)
     private var cachedProcessStats: [ProcessStats] = []
@@ -477,14 +531,15 @@ class StatsManager: ObservableObject {
         diskReadHistory = Array(repeating: 0.0, count: maxHistoryPoints)
         diskWriteHistory = Array(repeating: 0.0, count: maxHistoryPoints)
         
-        // Initialize baseline network stats
+        // Initialize baseline network/disk stats on the sampling queue, which
+        // owns this delta state.
         let initialStats = getNetworkStats()
-        previousNetworkStats = initialStats
-        previousTimestamp = Date()
-        
-        // Initialize baseline disk stats
         let initialDiskStats = getDiskStats()
-        previousDiskStats = initialDiskStats
+        samplingQueue.sync {
+            previousNetworkStats = initialStats
+            previousTimestamp = Date()
+            previousDiskStats = initialDiskStats
+        }
 
         Defaults.publisher(.statsUpdateInterval, options: []).sink { [weak self] change in
             self?.handleUpdateIntervalChange(change.newValue)
@@ -552,27 +607,30 @@ class StatsManager: ObservableObject {
         guard !isMonitoring else { return }
         
         print("StatsManager: Starting monitoring...")
-        
-        // Reset baseline for accurate measurement
+
+        // Reset baseline for accurate measurement on the sampling queue, which
+        // owns this delta state.
         let initialStats = getNetworkStats()
-        previousNetworkStats = initialStats
-        
         let initialDiskStats = getDiskStats()
-        previousDiskStats = initialDiskStats
-        
-        previousTimestamp = Date()
-        
+        samplingQueue.sync {
+            previousNetworkStats = initialStats
+            previousDiskStats = initialDiskStats
+            previousTimestamp = Date()
+            networkTotalsAccumulator = .zero
+            diskTotalsAccumulator = .zero
+        }
+
         isMonitoring = true
         lastUpdated = Date()
         networkTotals = .zero
         diskTotals = .zero
-        
+
         scheduleMonitoringTimer()
 
         Task { @MainActor in
             self.updateSystemStats()
         }
-        
+
         print("StatsManager: Monitoring started")
     }
     
@@ -590,20 +648,36 @@ class StatsManager: ObservableObject {
         cachedProcessStats.removeAll()
         lastProcessStatsUpdate = .distantPast
         isProcessRefreshInFlight = false
-        previousCPULoadInfo = nil
-        if let previousCpuInfo {
-            let size = vm_size_t(previousCpuInfoCount) * vm_size_t(MemoryLayout<integer_t>.size)
-            vm_deallocate(mach_task_self_, vm_address_t(bitPattern: previousCpuInfo), size)
+
+        // Tear down sampling-queue confined delta state on that queue so it
+        // can't race with (or double-free `previousCpuInfo` against) an
+        // in-flight sampling pass.
+        samplingQueue.sync {
+            previousCPULoadInfo = nil
+            if let previousCpuInfo {
+                let size = vm_size_t(previousCpuInfoCount) * vm_size_t(MemoryLayout<integer_t>.size)
+                vm_deallocate(mach_task_self_, vm_address_t(bitPattern: previousCpuInfo), size)
+            }
+            previousCpuInfo = nil
+            previousCpuInfoCount = 0
+            processorCount = 0
+            previousInterfaceCounters.removeAll()
+            interfaceTotals.removeAll()
+            networkTotalsAccumulator = .zero
+            diskTotalsAccumulator = .zero
+            lastCpuBreakdown = .zero
+            lastCpuLoadAverage = .zero
+            lastCpuCoreUsage = []
+            lastMemoryUsage = 0.0
+            lastMemoryBreakdown = .zero
+            lastNetworkInterfaces = []
+            lastDiskDevices = []
         }
-        previousCpuInfo = nil
-        previousCpuInfoCount = 0
-        processorCount = 0
+
         topCPUProcesses = []
         cpuCoreUsage = []
         networkInterfaces = []
         diskDevices = []
-        previousInterfaceCounters.removeAll()
-        interfaceTotals.removeAll()
         cpuTemperature = CPUTemperatureMetrics(celsius: nil)
         cpuFrequency = nil
     }
@@ -664,6 +738,22 @@ class StatsManager: ObservableObject {
     // MARK: - Private Methods
     @MainActor
     private func updateSystemStats() {
+        // Gather the snapshot off the main thread on the sampling queue (which
+        // owns the IOKit/getifaddrs walks and the cross-tick delta state), then
+        // hop back to the main actor to apply the @Published values.
+        samplingQueue.async { [weak self] in
+            guard let self else { return }
+            let snapshot = self.gatherSnapshot()
+            Task { @MainActor [weak self] in
+                self?.applySnapshot(snapshot)
+            }
+        }
+    }
+
+    /// Runs every syscall/IOKit sampling call and the delta math for one tick.
+    /// MUST be called on `samplingQueue` so the `previous*`/`last*` state stays
+    /// race-free off the main actor.
+    private func gatherSnapshot() -> StatsSnapshot {
         let cpuMetrics = getCPULoadBreakdown()
         let newCpuUsage = cpuMetrics.activeUsage
         let memorySnapshot = getMemorySnapshot()
@@ -671,111 +761,155 @@ class StatsManager: ObservableObject {
         let gpuSnapshot = getGPUMetrics()
         let newGpuUsage = gpuSnapshot.usage
         let coreUsage = collectCPUCoreUsage()
-        
+        let loadAverage = getLoadAverage()
+
         // Calculate network speeds
         let currentNetworkStats = getNetworkStats()
         let currentTime = Date()
         let timeInterval = currentTime.timeIntervalSince(previousTimestamp)
-        
+
         var downloadSpeed: Double = 0.0
         var uploadSpeed: Double = 0.0
         var bytesDownloaded: UInt64 = 0
         var bytesUploaded: UInt64 = 0
-        
+
         // Only calculate speeds if we have a reasonable time interval and this isn't the first run
         if timeInterval > 0.1 && (previousNetworkStats.bytesIn > 0 || previousNetworkStats.bytesOut > 0) {
-            bytesDownloaded = currentNetworkStats.bytesIn > previousNetworkStats.bytesIn ? 
+            bytesDownloaded = currentNetworkStats.bytesIn > previousNetworkStats.bytesIn ?
                                 currentNetworkStats.bytesIn - previousNetworkStats.bytesIn : 0
-            bytesUploaded = currentNetworkStats.bytesOut > previousNetworkStats.bytesOut ? 
+            bytesUploaded = currentNetworkStats.bytesOut > previousNetworkStats.bytesOut ?
                                currentNetworkStats.bytesOut - previousNetworkStats.bytesOut : 0
-            
+
             downloadSpeed = Double(bytesDownloaded) / timeInterval / 1_048_576 // Convert to MB/s
             uploadSpeed = Double(bytesUploaded) / timeInterval / 1_048_576 // Convert to MB/s
         }
-        
+
         // Calculate disk speeds
         let currentDiskStats = getDiskStats()
         var readSpeed: Double = 0.0
         var writeSpeed: Double = 0.0
         var bytesRead: UInt64 = 0
         var bytesWritten: UInt64 = 0
-        
+
         // Only calculate speeds if we have a reasonable time interval and this isn't the first run
         if timeInterval > 0.1 && (previousDiskStats.bytesRead > 0 || previousDiskStats.bytesWritten > 0) {
-            bytesRead = currentDiskStats.bytesRead > previousDiskStats.bytesRead ? 
+            bytesRead = currentDiskStats.bytesRead > previousDiskStats.bytesRead ?
                            currentDiskStats.bytesRead - previousDiskStats.bytesRead : 0
-            bytesWritten = currentDiskStats.bytesWritten > previousDiskStats.bytesWritten ? 
+            bytesWritten = currentDiskStats.bytesWritten > previousDiskStats.bytesWritten ?
                               currentDiskStats.bytesWritten - previousDiskStats.bytesWritten : 0
-            
+
             readSpeed = Double(bytesRead) / timeInterval / 1_048_576 // Convert to MB/s
             writeSpeed = Double(bytesWritten) / timeInterval / 1_048_576 // Convert to MB/s
         }
-        
+
         // Update cumulative transfer totals
         if bytesDownloaded > 0 {
-            var updatedTotals = networkTotals
-            updatedTotals.downloadedMB += Double(bytesDownloaded) / 1_048_576
-            networkTotals = updatedTotals
+            networkTotalsAccumulator.downloadedMB += Double(bytesDownloaded) / 1_048_576
         }
         if bytesUploaded > 0 {
-            var updatedTotals = networkTotals
-            updatedTotals.uploadedMB += Double(bytesUploaded) / 1_048_576
-            networkTotals = updatedTotals
+            networkTotalsAccumulator.uploadedMB += Double(bytesUploaded) / 1_048_576
         }
         if bytesRead > 0 {
-            var updatedDiskTotals = diskTotals
-            updatedDiskTotals.readMB += Double(bytesRead) / 1_048_576
-            diskTotals = updatedDiskTotals
+            diskTotalsAccumulator.readMB += Double(bytesRead) / 1_048_576
         }
         if bytesWritten > 0 {
-            var updatedDiskTotals = diskTotals
-            updatedDiskTotals.writtenMB += Double(bytesWritten) / 1_048_576
-            diskTotals = updatedDiskTotals
+            diskTotalsAccumulator.writtenMB += Double(bytesWritten) / 1_048_576
         }
-        
-        // Update current values
-        cpuUsage = newCpuUsage
-        gpuUsage = newGpuUsage
-        memoryUsage = newMemoryUsage
-        networkDownload = max(0.0, downloadSpeed)
-        networkUpload = max(0.0, uploadSpeed)
-        diskRead = max(0.0, readSpeed)
-        diskWrite = max(0.0, writeSpeed)
-        lastUpdated = Date()
-        cpuBreakdown = cpuMetrics
-        memoryBreakdown = memorySnapshot.breakdown
-        cpuLoadAverage = getLoadAverage()
-        gpuBreakdown = gpuSnapshot.breakdown
-        if gpuDevices != gpuSnapshot.devices {
-            gpuDevices = gpuSnapshot.devices
-        }
-        if cpuCoreUsage != coreUsage {
-            cpuCoreUsage = coreUsage
-        }
-        cpuUptime = ProcessInfo.processInfo.systemUptime
-        cpuTemperature = cpuSensorCollector.readTemperature()
-        if let frequencyMetrics = cpuSensorCollector.readFrequency() {
-            cpuFrequency = frequencyMetrics
-        }
-        
-        // Update history arrays (sliding window)
-        updateHistory(value: newCpuUsage, history: &cpuHistory)
-        updateHistory(value: newMemoryUsage, history: &memoryHistory)
-        updateHistory(value: newGpuUsage, history: &gpuHistory)
-        updateHistory(value: downloadSpeed, history: &networkDownloadHistory)
-        updateHistory(value: uploadSpeed, history: &networkUploadHistory)
-        updateHistory(value: readSpeed, history: &diskReadHistory)
-        updateHistory(value: writeSpeed, history: &diskWriteHistory)
-        
-        // Update previous stats for next calculation
+
+        let interfaces = collectNetworkInterfaces(deltaTime: timeInterval)
+        let disks = collectDiskDevices()
+        let temperature = cpuSensorCollector.readTemperature()
+        let frequency = cpuSensorCollector.readFrequency()
+
+        // Update previous stats / last-good fallbacks for the next tick.
         previousNetworkStats = currentNetworkStats
         previousDiskStats = currentDiskStats
         previousTimestamp = currentTime
-        networkInterfaces = collectNetworkInterfaces(deltaTime: timeInterval)
-        diskDevices = collectDiskDevices()
+        lastCpuBreakdown = cpuMetrics
+        lastCpuLoadAverage = loadAverage
+        lastCpuCoreUsage = coreUsage
+        lastMemoryUsage = newMemoryUsage
+        lastMemoryBreakdown = memorySnapshot.breakdown
+        lastNetworkInterfaces = interfaces
+        lastDiskDevices = disks
+
+        return StatsSnapshot(
+            cpuUsage: newCpuUsage,
+            gpuUsage: newGpuUsage,
+            memoryUsage: newMemoryUsage,
+            networkDownload: max(0.0, downloadSpeed),
+            networkUpload: max(0.0, uploadSpeed),
+            diskRead: max(0.0, readSpeed),
+            diskWrite: max(0.0, writeSpeed),
+            cpuBreakdown: cpuMetrics,
+            memoryBreakdown: memorySnapshot.breakdown,
+            cpuLoadAverage: loadAverage,
+            gpuBreakdown: gpuSnapshot.breakdown,
+            gpuDevices: gpuSnapshot.devices,
+            cpuCoreUsage: coreUsage,
+            cpuUptime: ProcessInfo.processInfo.systemUptime,
+            cpuTemperature: temperature,
+            cpuFrequency: frequency,
+            networkTotals: networkTotalsAccumulator,
+            diskTotals: diskTotalsAccumulator,
+            networkInterfaces: interfaces,
+            diskDevices: disks,
+            cpuHistoryValue: newCpuUsage,
+            memoryHistoryValue: newMemoryUsage,
+            gpuHistoryValue: newGpuUsage,
+            networkDownloadHistoryValue: downloadSpeed,
+            networkUploadHistoryValue: uploadSpeed,
+            diskReadHistoryValue: readSpeed,
+            diskWriteHistoryValue: writeSpeed
+        )
+    }
+
+    /// Publishes a gathered snapshot. Must run on the main actor.
+    @MainActor
+    private func applySnapshot(_ snapshot: StatsSnapshot) {
+        // Ignore stragglers that arrive after monitoring was stopped.
+        guard isMonitoring else { return }
+
+        cpuUsage = snapshot.cpuUsage
+        gpuUsage = snapshot.gpuUsage
+        memoryUsage = snapshot.memoryUsage
+        networkDownload = snapshot.networkDownload
+        networkUpload = snapshot.networkUpload
+        diskRead = snapshot.diskRead
+        diskWrite = snapshot.diskWrite
+        lastUpdated = Date()
+        cpuBreakdown = snapshot.cpuBreakdown
+        memoryBreakdown = snapshot.memoryBreakdown
+        cpuLoadAverage = snapshot.cpuLoadAverage
+        gpuBreakdown = snapshot.gpuBreakdown
+        if gpuDevices != snapshot.gpuDevices {
+            gpuDevices = snapshot.gpuDevices
+        }
+        if cpuCoreUsage != snapshot.cpuCoreUsage {
+            cpuCoreUsage = snapshot.cpuCoreUsage
+        }
+        cpuUptime = snapshot.cpuUptime
+        cpuTemperature = snapshot.cpuTemperature
+        if let frequencyMetrics = snapshot.cpuFrequency {
+            cpuFrequency = frequencyMetrics
+        }
+        networkTotals = snapshot.networkTotals
+        diskTotals = snapshot.diskTotals
+
+        // Update history arrays (sliding window)
+        updateHistory(value: snapshot.cpuHistoryValue, history: &cpuHistory)
+        updateHistory(value: snapshot.memoryHistoryValue, history: &memoryHistory)
+        updateHistory(value: snapshot.gpuHistoryValue, history: &gpuHistory)
+        updateHistory(value: snapshot.networkDownloadHistoryValue, history: &networkDownloadHistory)
+        updateHistory(value: snapshot.networkUploadHistoryValue, history: &networkUploadHistory)
+        updateHistory(value: snapshot.diskReadHistoryValue, history: &diskReadHistory)
+        updateHistory(value: snapshot.diskWriteHistoryValue, history: &diskWriteHistory)
+
+        networkInterfaces = snapshot.networkInterfaces
+        diskDevices = snapshot.diskDevices
         refreshProcessStatsIfNeeded(force: true)
     }
-    
+
     private func updateHistory(value: Double, history: inout [Double]) {
         // Remove first element and append new value
         if history.count >= maxHistoryPoints {
@@ -797,7 +931,7 @@ class StatsManager: ObservableObject {
         }
 
         guard result == KERN_SUCCESS else {
-            return cpuBreakdown
+            return lastCpuBreakdown
         }
 
         let clamped: (Double) -> Double = { value in
@@ -823,7 +957,7 @@ class StatsManager: ObservableObject {
                     idle: clamped(idlePercent)
                 )
             } else {
-                breakdown = cpuBreakdown
+                breakdown = lastCpuBreakdown
             }
         } else {
             let totalTicks = Double(info.cpu_ticks.0 + info.cpu_ticks.1 + info.cpu_ticks.2 + info.cpu_ticks.3)
@@ -837,7 +971,7 @@ class StatsManager: ObservableObject {
                     idle: clamped(idlePercent)
                 )
             } else {
-                breakdown = cpuBreakdown
+                breakdown = lastCpuBreakdown
             }
         }
 
@@ -852,7 +986,7 @@ class StatsManager: ObservableObject {
             return getloadavg(baseAddress, 3)
         }
         guard result == 3 else {
-            return cpuLoadAverage
+            return lastCpuLoadAverage
         }
         return LoadAverage(oneMinute: loads[0], fiveMinutes: loads[1], fifteenMinutes: loads[2])
     }
@@ -869,7 +1003,7 @@ class StatsManager: ObservableObject {
         }
         
         guard vmResult == KERN_SUCCESS else {
-            return (memoryUsage, memoryBreakdown)
+            return (lastMemoryUsage, lastMemoryBreakdown)
         }
         
         let pageSize = UInt64(vm_kernel_page_size)
@@ -986,7 +1120,7 @@ class StatsManager: ObservableObject {
         var numCPUsU: natural_t = 0
         let result = host_processor_info(hostPort, PROCESSOR_CPU_LOAD_INFO, &numCPUsU, &cpuInfo, &numCpuInfo)
         guard result == KERN_SUCCESS, let cpuInfo else {
-            return cpuCoreUsage
+            return lastCpuCoreUsage
         }
         let cpuCount = Int(numCPUsU)
         var usages: [CPUCoreUsage] = []
@@ -1030,7 +1164,7 @@ class StatsManager: ObservableObject {
     private func collectNetworkInterfaces(deltaTime: TimeInterval) -> [NetworkInterfaceMetrics] {
         var interfacesPointer: UnsafeMutablePointer<ifaddrs>? = nil
         guard getifaddrs(&interfacesPointer) == 0, let startPointer = interfacesPointer else {
-            return networkInterfaces
+            return lastNetworkInterfaces
         }
         defer { freeifaddrs(startPointer) }
         struct InterfaceAccumulator {
@@ -1114,7 +1248,7 @@ class StatsManager: ObservableObject {
             .volumeIsRemovableKey
         ]
         guard let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) else {
-            return diskDevices
+            return lastDiskDevices
         }
         var devices: [DiskDeviceMetrics] = []
         for url in urls {

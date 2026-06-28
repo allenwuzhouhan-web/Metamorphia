@@ -126,6 +126,12 @@ class ScreenAssistantManager: NSObject, ObservableObject {
     private var chatMessagesPanel: ChatMessagesPanel?
     private var chatInputPanel: ChatInputPanel?
     
+    // Gemini's inline_data path base64-encodes the whole file into the request
+    // body (a 1.33x copy on top of the raw bytes). Reject attachments above this
+    // size up front so a large video/PDF can't spike memory or freeze the UI when
+    // the request body is built. ~20MB matches Gemini's inline payload guidance.
+    private static let maxInlineAttachmentBytes = 20 * 1024 * 1024
+
     // Directory for storing audio recordings
     static let audioDataDirectory: URL = {
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -216,7 +222,15 @@ class ScreenAssistantManager: NSObject, ObservableObject {
                         print("❌ ScreenAssistant: File is not readable at \(url.path)")
                         return nil
                     }
-                    
+
+                    // Reject oversized files up front so they're never read into
+                    // memory + base64-encoded when the request body is built.
+                    if let fileSize = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int,
+                       fileSize > ScreenAssistantManager.maxInlineAttachmentBytes {
+                        print("❌ ScreenAssistant: File \(url.lastPathComponent) is too large (\(fileSize) bytes); max is \(ScreenAssistantManager.maxInlineAttachmentBytes)")
+                        return nil
+                    }
+
                     // Create file entry with error handling
                     let file = ScreenAssistantFile(fileURL: url)
                     print("✅ ScreenAssistant: Created file entry for \(file.name)")
@@ -420,8 +434,20 @@ class ScreenAssistantManager: NSObject, ObservableObject {
             isLoading = false
             return
         }
-        
-        performAPIRequest(url: url, requestBody: buildGeminiRequestBody(message: message, files: files), provider: .gemini)
+
+        // Building the Gemini body reads whole attachment files into memory and
+        // base64-encodes them (a video or large PDF can be tens/hundreds of MB).
+        // Snapshot the conversation context on the main thread, then do the heavy
+        // file read + encode off-main and hop back to start the request.
+        let recentMessages = Array(chatMessages.suffix(10))
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let requestBody = self.buildGeminiRequestBody(message: message, files: files, recentMessages: recentMessages)
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.performAPIRequest(url: url, requestBody: requestBody, provider: .gemini)
+            }
+        }
     }
     
     private func sendToOpenAIAPI(message: String, files: [ScreenAssistantFile]) {
@@ -491,13 +517,13 @@ class ScreenAssistantManager: NSObject, ObservableObject {
     
     // MARK: - API Request Builders
     
-    private func buildGeminiRequestBody(message: String, files: [ScreenAssistantFile]) -> [String: Any] {
+    private func buildGeminiRequestBody(message: String, files: [ScreenAssistantFile], recentMessages: [ScreenAssistantChatMessage]) -> [String: Any] {
         var contents: [[String: Any]] = []
-        
-        // Add previous conversation messages (last 10 for context)
-        let recentMessages = Array(chatMessages.suffix(10))
+
+        // Add previous conversation messages (last 10 for context). recentMessages is
+        // snapshotted on the main thread by the caller so this runs safely off-main.
         for chatMessage in recentMessages {
-            if chatMessage.id != chatMessages.last?.id { // Don't include the message we just added
+            if chatMessage.id != recentMessages.last?.id { // Don't include the message we just added
                 let role = chatMessage.isFromUser ? "user" : "model"
                 contents.append([
                     "role": role,
@@ -952,6 +978,16 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         return contextualMessage
     }
     
+    // Backstop for the inline_data readers: refuse to load files larger than the
+    // inline cap into memory (covers paths that bypass addFiles, e.g. recordings).
+    private func readInlineAttachmentData(at url: URL) throws -> Data {
+        if let fileSize = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int,
+           fileSize > ScreenAssistantManager.maxInlineAttachmentBytes {
+            throw NSError(domain: "ScreenAssistant", code: 413, userInfo: [NSLocalizedDescriptionKey: "file exceeds inline attachment size limit"])
+        }
+        return try Data(contentsOf: url)
+    }
+
     private func createGeminiFilePart(for file: ScreenAssistantFile) -> [String: Any]? {
         print("📎 ScreenAssistant: Processing file for Gemini 2.5: \(file.name) (\(file.type.displayName))")
         
@@ -978,9 +1014,9 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         print("🖼️ ScreenAssistant: Processing image file: \(fileName)")
         
         do {
-            let imageData = try Data(contentsOf: url)
+            let imageData = try readInlineAttachmentData(at: url)
             let base64String = imageData.base64EncodedString()
-            
+
             // Determine MIME type
             let mimeType: String
             let pathExtension = url.pathExtension.lowercased()
@@ -1021,7 +1057,7 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         if pathExtension == "pdf" {
             // Handle PDF files using base64 encoding for Gemini 2.5
             do {
-                let pdfData = try Data(contentsOf: url)
+                let pdfData = try readInlineAttachmentData(at: url)
                 let base64String = pdfData.base64EncodedString()
                 
                 print("📎 ScreenAssistant: PDF encoded - \(base64String.count) bytes")
@@ -1053,7 +1089,7 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         print("🎵 ScreenAssistant: Processing audio file: \(fileName)")
         
         do {
-            let audioData = try Data(contentsOf: url)
+            let audioData = try readInlineAttachmentData(at: url)
             let base64String = audioData.base64EncodedString()
             
             // Determine MIME type
@@ -1092,7 +1128,7 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         print("� ScreenAssistant: Processing video file: \(fileName)")
         
         do {
-            let videoData = try Data(contentsOf: url)
+            let videoData = try readInlineAttachmentData(at: url)
             let base64String = videoData.base64EncodedString()
             
             // Determine MIME type
@@ -1260,27 +1296,36 @@ class ScreenAssistantManager: NSObject, ObservableObject {
 
 extension ScreenAssistantManager: AVAudioRecorderDelegate {
     func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
-        isRecording = false
-        recordingTimer?.invalidate()
-        recordingTimer = nil
-        
-        if flag {
-            let fileName = recorder.url.lastPathComponent
-            let displayName = "Recording \(DateFormatter.shortTime.string(from: Date()))"
-            let audioFile = ScreenAssistantFile(audioFileName: fileName, name: displayName)
-            attachedFiles.append(audioFile)
-            saveFilesToDefaults()
-            print("Recording saved: \(fileName)")
-        } else {
-            print("Recording failed")
+        // Delegate callbacks fire on a non-guaranteed thread; hop to main before
+        // touching @Published state (mirrors addFiles()).
+        let fileName = recorder.url.lastPathComponent
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.isRecording = false
+            self.recordingTimer?.invalidate()
+            self.recordingTimer = nil
+
+            if flag {
+                let displayName = "Recording \(DateFormatter.shortTime.string(from: Date()))"
+                let audioFile = ScreenAssistantFile(audioFileName: fileName, name: displayName)
+                self.attachedFiles.append(audioFile)
+                self.saveFilesToDefaults()
+                print("Recording saved: \(fileName)")
+            } else {
+                print("Recording failed")
+            }
         }
     }
-    
+
     func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
         print("Recording encode error: \(error?.localizedDescription ?? "Unknown error")")
-        isRecording = false
-        recordingTimer?.invalidate()
-        recordingTimer = nil
+        // @Published mutation must happen on main (delegate runs off-main).
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.isRecording = false
+            self.recordingTimer?.invalidate()
+            self.recordingTimer = nil
+        }
     }
 }
 

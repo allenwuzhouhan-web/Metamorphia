@@ -54,6 +54,7 @@ final class LockScreenWeatherPanelManager {
         latestFrame = nil
         lastSnapshot = nil
         lastContentSize = nil
+        lastInlineBaselineHeight = 0
     }
 
     private func render(snapshot: LockScreenWeatherSnapshot, makeVisible: Bool) {

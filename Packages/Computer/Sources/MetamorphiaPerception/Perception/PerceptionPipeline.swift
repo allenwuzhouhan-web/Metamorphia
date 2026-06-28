@@ -446,14 +446,13 @@ public final class PerceptionPipeline: @unchecked Sendable {
         // runs off the driver thread through `Self.runPhase`.
         let windowTitle = axResult?.windowTitle ?? windows.first(where: { $0.isFocused })?.title ?? ""
         let safetyT0 = CFAbsoluteTimeGetCurrent()
-        let safetyReport = SafetyScanner.scan(
+        let (safetyReport, sensitiveResults) = SafetyScanner.scanWithSensitiveResults(
             elements: finalElements,
             appBundleID: axResult?.appBundleID,
             windowTitle: windowTitle
         )
 
-        // Redact sensitive field values.
-        let sensitiveResults = SensitiveFieldDetector.scan(elements: finalElements)
+        // Redact sensitive field values, reusing the scan results from above.
         if !sensitiveResults.isEmpty {
             SafetyScanner.redactSensitiveValues(
                 elements: &finalElements,

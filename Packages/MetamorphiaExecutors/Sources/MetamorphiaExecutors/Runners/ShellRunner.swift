@@ -36,8 +36,24 @@ public enum ShellRunner {
         }
         DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutWork)
 
-        let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
-        let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
+        // Drain stdout and stderr concurrently so neither write side can block the
+        // other on a full pipe buffer (~64KB). Reading one to EOF before the other
+        // deadlocks when the child fills the undrained pipe.
+        let ioGroup = DispatchGroup()
+        let ioQueue = DispatchQueue.global(qos: .userInitiated)
+        var outputData = Data()
+        var errorData = Data()
+        ioGroup.enter()
+        ioQueue.async {
+            outputData = stdout.fileHandleForReading.readDataToEndOfFile()
+            ioGroup.leave()
+        }
+        ioGroup.enter()
+        ioQueue.async {
+            errorData = stderr.fileHandleForReading.readDataToEndOfFile()
+            ioGroup.leave()
+        }
+        ioGroup.wait()
         process.waitUntilExit()
         timeoutWork.cancel()
 
@@ -120,8 +136,24 @@ public enum AsyncShellRunner {
                 }
                 DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(timeout), execute: timeoutWork)
 
-                let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                // Drain stdout and stderr concurrently so neither write side can
+                // block the other on a full pipe buffer (~64KB). Reading one to EOF
+                // before the other deadlocks when the child fills the undrained pipe.
+                let ioGroup = DispatchGroup()
+                let ioQueue = DispatchQueue.global(qos: .userInitiated)
+                var stdoutData = Data()
+                var stderrData = Data()
+                ioGroup.enter()
+                ioQueue.async {
+                    stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                    ioGroup.leave()
+                }
+                ioGroup.enter()
+                ioQueue.async {
+                    stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                    ioGroup.leave()
+                }
+                ioGroup.wait()
                 process.waitUntilExit()
                 timeoutWork.cancel()
 

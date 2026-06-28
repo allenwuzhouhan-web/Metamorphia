@@ -28,6 +28,16 @@ public actor MCPClient: MCPTransport {
     private var rawJsonMode = false
     private var rawJsonModeLocked = false
 
+    /// Brace-scan state for raw-JSON framing, carried across stdout chunks so a
+    /// still-streaming large message is examined byte-by-byte exactly once
+    /// (O(n)) instead of re-scanning the whole buffer from the start each chunk
+    /// (O(n^2)). `rawScanOffset` counts bytes already examined from the current
+    /// buffer start; reset after a complete frame is consumed.
+    private var rawScanDepth = 0
+    private var rawScanInString = false
+    private var rawScanEscaped = false
+    private var rawScanOffset = 0
+
     // Reconnection state
     private var lastCommand: String?
     private var lastArgs: [String]?
@@ -173,6 +183,12 @@ public actor MCPClient: MCPTransport {
     /// task drains them in arrival order back inside the actor.
     private func startReading(on handle: FileHandle) {
         stopReading()
+        // Fresh stdout stream — clear any partial-frame scan state so a stale
+        // offset from a torn-down connection can't desync the new buffer.
+        rawScanDepth = 0
+        rawScanInString = false
+        rawScanEscaped = false
+        rawScanOffset = 0
         let (stream, continuation) = AsyncStream<Data>.makeStream()
         readContinuation = continuation
         handle.readabilityHandler = { fh in
@@ -361,43 +377,49 @@ public actor MCPClient: MCPTransport {
     }
 
     private func extractRawJsonMessage() -> [String: Any]? {
-        while let first = readBuffer.first, (first == 0x0A || first == 0x0D || first == 0x20) {
-            readBuffer.removeFirst()
+        // Only trim leading whitespace when no frame scan is in progress; once a
+        // frame has started the leading byte is "{", so trimming mid-scan would
+        // be a no-op anyway and would otherwise invalidate the persisted offset.
+        if rawScanOffset == 0 {
+            while let first = readBuffer.first, (first == 0x0A || first == 0x0D || first == 0x20) {
+                readBuffer.removeFirst()
+            }
         }
         guard !readBuffer.isEmpty else { return nil }
 
-        var depth = 0
-        var inString = false
-        var escaped = false
         var endIndex: Data.Index?
 
-        for i in readBuffer.indices {
+        // Resume the brace scan where the previous chunk left off so each byte is
+        // examined exactly once across the lifetime of a streaming message.
+        var i = readBuffer.index(readBuffer.startIndex, offsetBy: rawScanOffset)
+        while i < readBuffer.endIndex {
             let byte = readBuffer[i]
-            if escaped {
-                escaped = false
-                continue
-            }
-            if byte == UInt8(ascii: "\\") && inString {
-                escaped = true
-                continue
-            }
-            if byte == UInt8(ascii: "\"") {
-                inString = !inString
-                continue
-            }
-            if inString { continue }
-            if byte == UInt8(ascii: "{") {
-                depth += 1
-            } else if byte == UInt8(ascii: "}") {
-                depth -= 1
-                if depth == 0 {
-                    endIndex = readBuffer.index(after: i)
-                    break
+            if rawScanEscaped {
+                rawScanEscaped = false
+            } else if byte == UInt8(ascii: "\\") && rawScanInString {
+                rawScanEscaped = true
+            } else if byte == UInt8(ascii: "\"") {
+                rawScanInString = !rawScanInString
+            } else if !rawScanInString {
+                if byte == UInt8(ascii: "{") {
+                    rawScanDepth += 1
+                } else if byte == UInt8(ascii: "}") {
+                    rawScanDepth -= 1
+                    if rawScanDepth == 0 {
+                        endIndex = readBuffer.index(after: i)
+                        break
+                    }
                 }
             }
+            i = readBuffer.index(after: i)
         }
 
-        guard let end = endIndex else { return nil }
+        guard let end = endIndex else {
+            // Partial message: record how far we scanned so the next chunk resumes
+            // here instead of rescanning the whole accumulated buffer.
+            rawScanOffset = readBuffer.count
+            return nil
+        }
         let jsonData = readBuffer[readBuffer.startIndex..<end]
         var trimEnd = end
         while trimEnd < readBuffer.endIndex {
@@ -406,6 +428,11 @@ public actor MCPClient: MCPTransport {
             trimEnd = readBuffer.index(after: trimEnd)
         }
         readBuffer = Data(readBuffer[trimEnd...])
+        // Frame consumed — reset scan state for the next message.
+        rawScanDepth = 0
+        rawScanInString = false
+        rawScanEscaped = false
+        rawScanOffset = 0
 
         return (try? JSONSerialization.jsonObject(with: jsonData)) as? [String: Any]
     }

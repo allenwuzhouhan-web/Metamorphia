@@ -534,8 +534,6 @@ struct LockScreenWeatherWidget: View {
 		.onDisappear { minuteTicker.stop() }
 		.onChange(of: currentCalendarEventID) { _, _ in
 			calendarRowRenderToken &+= 1
-		}
-		.onChange(of: currentCalendarEventID) { _, _ in
 			if let event = nextCalendarEvent {
 				let newLine = eventLineText(for: event)
 				if !newLine.isEmpty {

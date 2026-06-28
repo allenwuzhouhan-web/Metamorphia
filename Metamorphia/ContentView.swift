@@ -157,7 +157,8 @@ struct ContentView: View {
     @State private var isHovering: Bool = false
     @State private var lastHapticTime: Date = Date()
     @State private var stickyTerminalClickMonitor: Any?
-    @State private var hiddenEdgeHoverPollingTask: Task<Void, Never>?
+    @State private var hiddenEdgeHoverGlobalMonitor: Any?
+    @State private var hiddenEdgeHoverLocalMonitor: Any?
     @State private var isHoveringClosedMusicWaveformControl: Bool = false
     @State private var musicHoverExpansionActive: Bool = false
     @State private var isHoveringPrevControl: Bool = false
@@ -1923,28 +1924,49 @@ struct ContentView: View {
         return activationRect.contains(location)
     }
 
-    private func startHiddenEdgeHoverPolling() {
-        guard hiddenEdgeHoverPollingTask == nil else { return }
-
-        hiddenEdgeHoverPollingTask = Task { @MainActor in
-            while !Task.isCancelled {
-                if self.shouldUseHiddenEdgeHoverPolling {
-                    let hovering = self.hiddenHoverActivationContainsMouse()
-                    if hovering != self.isHovering {
-                        self.handleHover(hovering)
-                    }
-                }
-
-                try? await Task.sleep(for: .milliseconds(50))
-            }
-
-            self.hiddenEdgeHoverPollingTask = nil
+    private func evaluateHiddenEdgeHover() {
+        guard shouldUseHiddenEdgeHoverPolling else { return }
+        let hovering = hiddenHoverActivationContainsMouse()
+        if hovering != isHovering {
+            handleHover(hovering)
         }
     }
 
+    private func startHiddenEdgeHoverPolling() {
+        // Event-driven top-edge detection: react only when the cursor actually
+        // moves instead of waking the main thread on a fixed timer. A global
+        // monitor catches movement over other apps (the steady state when the
+        // notch is hidden); a local monitor catches movement over our own
+        // window and must return the event so it is not swallowed.
+        if hiddenEdgeHoverGlobalMonitor == nil {
+            hiddenEdgeHoverGlobalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { _ in
+                Task { @MainActor in
+                    self.evaluateHiddenEdgeHover()
+                }
+            }
+        }
+        if hiddenEdgeHoverLocalMonitor == nil {
+            hiddenEdgeHoverLocalMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { event in
+                Task { @MainActor in
+                    self.evaluateHiddenEdgeHover()
+                }
+                return event
+            }
+        }
+        // Evaluate once on install so an already-hovering cursor is recognised
+        // without waiting for the next movement.
+        evaluateHiddenEdgeHover()
+    }
+
     private func stopHiddenEdgeHoverPolling() {
-        hiddenEdgeHoverPollingTask?.cancel()
-        hiddenEdgeHoverPollingTask = nil
+        if let hiddenEdgeHoverGlobalMonitor {
+            NSEvent.removeMonitor(hiddenEdgeHoverGlobalMonitor)
+            self.hiddenEdgeHoverGlobalMonitor = nil
+        }
+        if let hiddenEdgeHoverLocalMonitor {
+            NSEvent.removeMonitor(hiddenEdgeHoverLocalMonitor)
+            self.hiddenEdgeHoverLocalMonitor = nil
+        }
     }
 
     private func installStickyTerminalClickMonitor() {

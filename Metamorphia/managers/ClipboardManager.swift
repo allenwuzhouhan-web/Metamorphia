@@ -347,15 +347,18 @@ class ClipboardManager: ObservableObject {
     
     private func checkClipboard() {
         let currentChangeCount = NSPasteboard.general.changeCount
-        
+
         guard currentChangeCount != lastChangeCount else { return }
         lastChangeCount = currentChangeCount
-        
-        guard let clipboardItem = getCurrentClipboardItem() else { return }
-        
-        // Don't add duplicate items
-        if !clipboardHistory.contains(where: { isSameContent($0, clipboardItem) }) {
-            addToHistory(clipboardItem)
+
+        // Materializing image content (decode + PNG re-encode + disk write) and any
+        // file/disk reads can stall the main thread for large images. Move that work
+        // off-main; addToHistory hops back to main for the @Published mutation, where
+        // the de-dup is re-checked authoritatively.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            guard let clipboardItem = self.getCurrentClipboardItem() else { return }
+            self.addToHistory(clipboardItem)
         }
     }
     
@@ -448,7 +451,12 @@ class ClipboardManager: ObservableObject {
     private func addToHistory(_ item: ClipboardItem) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            
+
+            // Don't add duplicate items (preserves their existing position in history).
+            if self.clipboardHistory.contains(where: { self.isSameContent($0, item) }) {
+                return
+            }
+
             // Remove any existing items with the same data
             let itemsToRemove = self.clipboardHistory.filter { existingItem in
                 return self.isSameContent(existingItem, item)

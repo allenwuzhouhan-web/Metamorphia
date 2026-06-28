@@ -83,6 +83,10 @@ final class SystemTimerBridge {
     private var logPipe: Pipe?
     private var logBuffer = Data()
     private var logRestartWorkItem: DispatchWorkItem?
+    private var logStreamStartTimestamp: Date?
+    private var logStreamFailureCount = 0
+    private let logStreamMinHealthyDuration: TimeInterval = 30
+    private let logStreamMaxRestartDelay: TimeInterval = 60
     private var logPreferredName: String?
     private var logPreferredDuration: TimeInterval?
     private var logIdentifier: String?
@@ -255,6 +259,7 @@ final class SystemTimerBridge {
         do {
             try process.run()
             logProcess = process
+            logStreamStartTimestamp = Date()
             logInfo("Log stream started (pid: \(process.processIdentifier))")
             return true
         } catch {
@@ -284,16 +289,30 @@ final class SystemTimerBridge {
         }
 
         logProcess = nil
+        logStreamStartTimestamp = nil
+        logStreamFailureCount = 0
         logBuffer.removeAll(keepingCapacity: false)
     }
 
     private func handleLogStreamTermination() {
+        let lived = logStreamStartTimestamp.map { Date().timeIntervalSince($0) }
         logPipe?.fileHandleForReading.readabilityHandler = nil
         logPipe?.fileHandleForReading.closeFile()
         logPipe = nil
         logProcess = nil
+        logStreamStartTimestamp = nil
         logBuffer.removeAll(keepingCapacity: false)
-        logError("Log stream exited unexpectedly; scheduling restart")
+
+        // A stream that stayed alive long enough counts as a recovery (e.g. sleep/wake),
+        // so reset the backoff. A stream that died almost immediately is a persistent
+        // failure and should back off further on each successive attempt.
+        if let lived, lived >= logStreamMinHealthyDuration {
+            logStreamFailureCount = 0
+        } else {
+            logStreamFailureCount += 1
+        }
+
+        logError("Log stream exited unexpectedly (lived: \(lived ?? 0)s, failures: \(logStreamFailureCount)); scheduling restart")
 
         guard Defaults[.mirrorSystemTimer] else { return }
 
@@ -307,6 +326,14 @@ final class SystemTimerBridge {
     private func scheduleLogStreamRestart() {
         logRestartWorkItem?.cancel()
 
+        // Exponential backoff capped at logStreamMaxRestartDelay so a stream that fails
+        // immediately on every attempt (predicate/permission issue, system under load)
+        // does not respawn a `log` subprocess every ~2s forever. The AX ticker fallback
+        // already covers mirroring while the stream is held off.
+        let exponent = max(0, logStreamFailureCount - 1)
+        let backoff = 2.0 * pow(2.0, Double(exponent))
+        let delay = min(backoff, logStreamMaxRestartDelay)
+
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.logRestartWorkItem = nil
@@ -317,8 +344,8 @@ final class SystemTimerBridge {
         }
 
         logRestartWorkItem = workItem
-        queue.asyncAfter(deadline: .now() + 2.0, execute: workItem)
-        logDebug("Scheduled log stream restart in 2s")
+        queue.asyncAfter(deadline: .now() + delay, execute: workItem)
+        logDebug("Scheduled log stream restart in \(delay)s")
     }
 
     private func consumeLogData(_ data: Data) {

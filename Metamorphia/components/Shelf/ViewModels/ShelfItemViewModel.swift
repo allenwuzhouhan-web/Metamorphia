@@ -31,6 +31,13 @@ import ObjectiveC
 final class ShelfItemViewModel: ObservableObject {
     @Published private(set) var item: ShelfItem
     @Published var thumbnail: NSImage?
+    /// Cached display name so SwiftUI bodies read this instead of `item.displayName`,
+    /// which for `.file` items performs synchronous disk reads/decodes on every body
+    /// recompute. Populated off the main thread by `loadThumbnail()`.
+    @Published private(set) var displayName: String
+    /// Cached NSWorkspace placeholder icon for `.file` items, computed off the main
+    /// thread so bodies don't call `NSWorkspace.shared.icon(forFile:)` during render.
+    @Published var placeholderIcon: NSImage?
     @Published var isDropTargeted: Bool = false
     @Published var isRenaming: Bool = false
     @Published var draftTitle: String = ""
@@ -43,14 +50,44 @@ final class ShelfItemViewModel: ObservableObject {
 
     init(item: ShelfItem) {
         self.item = item
-        self.draftTitle = item.displayName
+        // For .text/.link the display name is cheap; for .file this is the single
+        // synchronous read, refined off-main by loadThumbnail() below.
+        let initialName = item.displayName
+        self.displayName = initialName
+        self.draftTitle = initialName
         Task { await loadThumbnail() }
     }
 
     var isSelected: Bool { selection.isSelected(item.id) }
 
+    /// Re-syncs cached state when the underlying item changes (e.g. a rename
+    /// swaps the file bookmark while keeping the same id, so SwiftUI reuses this
+    /// view model). Refreshes the cheap name immediately, then reloads the
+    /// file-derived name/icon/thumbnail off the main thread.
+    func refresh(for newItem: ShelfItem) {
+        item = newItem
+        let initialName = newItem.displayName
+        displayName = initialName
+        draftTitle = initialName
+        thumbnail = nil
+        placeholderIcon = nil
+        Task { await loadThumbnail() }
+    }
+
     func loadThumbnail() async {
         guard let url = item.fileURL else { return }
+        // Refresh the file-derived name and placeholder icon off the main thread so
+        // repeated body recomputes never touch disk. resolveFileURL already memoizes
+        // the security-scoped bookmark resolve.
+        let computed = await Task.detached(priority: .utility) { () -> (name: String, icon: NSImage) in
+            let name = ShelfItem.fileDisplayName(for: url)
+            let icon = NSWorkspace.shared.icon(forFile: url.path)
+            return (name, icon)
+        }.value
+        self.displayName = computed.name
+        if self.placeholderIcon == nil {
+            self.placeholderIcon = computed.icon
+        }
         if let image = await ThumbnailService.shared.thumbnail(for: url, size: CGSize(width: 56, height: 56)) {
             self.thumbnail = image
         }

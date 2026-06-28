@@ -32,7 +32,7 @@ public struct HTTPRequestTool: ToolDefinition {
         let urlString = try requiredString("url", from: args)
         let url: URL
         do {
-            url = try URLSafetyValidator.validate(urlString)
+            url = try await URLSafetyValidator.validate(urlString)
         } catch let error as URLSafetyValidator.ValidationError {
             return "Error: \(error.localizedDescription)"
         } catch {

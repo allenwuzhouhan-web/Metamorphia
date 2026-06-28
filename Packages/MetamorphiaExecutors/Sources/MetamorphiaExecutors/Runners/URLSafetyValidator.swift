@@ -73,7 +73,7 @@ public enum URLSafetyValidator {
     }
 
     /// Validate a URL for outbound LLM-driven HTTP. Throws on any rejection.
-    public static func validate(_ url: URL, options: Options = .default) throws {
+    public static func validate(_ url: URL, options: Options = .default) async throws {
         // 1. Scheme check.
         guard let scheme = url.scheme?.lowercased() else {
             throw ValidationError.unsupportedScheme("(none)")
@@ -95,7 +95,7 @@ public enum URLSafetyValidator {
 
         // 4. If the host is itself an IP literal, check it directly. If it's a
         // name, resolve every A/AAAA and reject if any lands in a private range.
-        let resolved = try Self.resolve(host: bareHost)
+        let resolved = try await Self.resolve(host: bareHost)
         for addr in resolved {
             if Self.isForbidden(address: addr) {
                 throw ValidationError.privateAddress(host, resolvedTo: addr)
@@ -105,11 +105,11 @@ public enum URLSafetyValidator {
 
     /// Convenience: validate a URL string. Returns the parsed URL on success.
     @discardableResult
-    public static func validate(_ urlString: String, options: Options = .default) throws -> URL {
+    public static func validate(_ urlString: String, options: Options = .default) async throws -> URL {
         guard let url = URL(string: urlString) else {
             throw ValidationError.invalidURL(urlString)
         }
-        try validate(url, options: options)
+        try await validate(url, options: options)
         return url
     }
 
@@ -118,12 +118,37 @@ public enum URLSafetyValidator {
     /// Resolve a host to its IP-literal addresses. If `host` is already an IP
     /// literal, returns `[host]` without hitting DNS. If the resolver fails,
     /// throws `.resolutionFailed`.
-    static func resolve(host: String) throws -> [String] {
+    ///
+    /// `getaddrinfo` is a blocking C call that can stall for seconds on a slow
+    /// or unreachable nameserver. Validation runs inside the async `execute()`
+    /// of the HTTP tools, so resolving on the calling Swift-concurrency
+    /// cooperative-pool thread would tie up one of its ~per-core workers and
+    /// starve other concurrent async work. Hop the blocking call onto a
+    /// transient global-queue thread instead.
+    static func resolve(host: String) async throws -> [String] {
         if Self.parseIPv4(host) != nil || Self.parseIPv6(host) != nil {
             return [host]
         }
 
         #if canImport(Darwin)
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global().async {
+                do {
+                    continuation.resume(returning: try Self.resolveSynchronously(host: host))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+        #else
+        throw ValidationError.resolutionFailed(host, message: "getaddrinfo unavailable on this platform")
+        #endif
+    }
+
+    #if canImport(Darwin)
+    /// Blocking `getaddrinfo` resolution. Must only be called off the
+    /// cooperative pool (see `resolve(host:)`).
+    private static func resolveSynchronously(host: String) throws -> [String] {
         var hints = addrinfo(
             ai_flags: 0,
             ai_family: AF_UNSPEC,
@@ -158,10 +183,8 @@ public enum URLSafetyValidator {
             cursor = info.pointee.ai_next
         }
         return addresses
-        #else
-        throw ValidationError.resolutionFailed(host, message: "getaddrinfo unavailable on this platform")
-        #endif
     }
+    #endif
 
     // MARK: - Address Classification
 

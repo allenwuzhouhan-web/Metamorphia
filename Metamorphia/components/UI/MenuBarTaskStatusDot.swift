@@ -42,7 +42,10 @@ struct MenuBarTaskStatusDot: View {
             if store.status == .inProgress {
                 // Only the in-progress state pulses, so the schedule runs solely
                 // while a task is active and stops the moment it finishes.
-                TimelineView(.animation) { context in
+                // Throttle to ~15fps so a long-running task doesn't churn a fresh
+                // NSImage/CGContext per display frame (up to 120Hz on ProMotion)
+                // just to redraw an 18x18 dot; the pulse stays smooth to the eye.
+                TimelineView(.animation(minimumInterval: 1.0 / 15.0)) { context in
                     dotImage(phase: context.date.timeIntervalSinceReferenceDate)
                 }
             } else {

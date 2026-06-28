@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import ApplicationServices
 import CryptoKit
+import CoreFoundation
 
 // MARK: - ScreenFrame
 
@@ -116,6 +117,27 @@ public enum ScreenHarvestDenylist {
     ]
 }
 
+// MARK: - AX callback context
+
+/// Small heap object passed as refcon to the C-style AX observer callback.
+/// Holds a weak back-reference to the harvest so we never extend its lifetime,
+/// plus the focused-app identity captured at bind time. Carrying these avoids
+/// a synchronous `NSWorkspace.shared.frontmostApplication` IPC round-trip on
+/// every notification.
+private final class ScreenHarvestCallbackContext {
+    weak var harvest: ScreenHarvest?
+    let pid: pid_t
+    let bundleID: String?
+    let appName: String
+
+    init(harvest: ScreenHarvest, pid: pid_t, bundleID: String?, appName: String) {
+        self.harvest = harvest
+        self.pid = pid
+        self.bundleID = bundleID
+        self.appName = appName
+    }
+}
+
 // MARK: - ScreenHarvest
 
 /// Continuous, event-driven accessibility-tree reader. Attaches one
@@ -147,6 +169,9 @@ public final class ScreenHarvest: @unchecked Sendable {
     private var workspaceSwitchObserver: NSObjectProtocol?
     private var workspaceTerminateObserver: NSObjectProtocol?
     private var perPIDObservers: [pid_t: AXObserver] = [:]
+    // Retained refcon pointers (passRetained / release pair) keyed by pid,
+    // released exactly once when the observer is detached.
+    private var perPIDContextPtr: [pid_t: UnsafeMutableRawPointer] = [:]
     private var perPIDFrameDigest: [pid_t: FrameDigest] = [:]
     private var perPIDDebounceTask: [pid_t: Task<Void, Never>] = [:]
     private var perPIDEventCounts: [pid_t: RateTracker] = [:]
@@ -177,6 +202,10 @@ public final class ScreenHarvest: @unchecked Sendable {
         if isRunning { lock.unlock(); return }
         isRunning = true
         lock.unlock()
+
+        // AX observer sources attach to a dedicated background run loop, never
+        // the saturated main run loop. Ensure it is running before any bind.
+        AXObserverThread.shared.start()
 
         let center = NSWorkspace.shared.notificationCenter
 
@@ -217,7 +246,9 @@ public final class ScreenHarvest: @unchecked Sendable {
         workspaceSwitchObserver = nil
         workspaceTerminateObserver = nil
         let observers = perPIDObservers
+        let contextPtrs = perPIDContextPtr
         perPIDObservers.removeAll()
+        perPIDContextPtr.removeAll()
         for (_, task) in perPIDDebounceTask { task.cancel() }
         perPIDDebounceTask.removeAll()
         heartbeatTask?.cancel()
@@ -226,8 +257,8 @@ public final class ScreenHarvest: @unchecked Sendable {
 
         if let switchObs { NSWorkspace.shared.notificationCenter.removeObserver(switchObs) }
         if let termObs { NSWorkspace.shared.notificationCenter.removeObserver(termObs) }
-        for (_, observer) in observers {
-            detachObserver(observer)
+        for (pid, observer) in observers {
+            detachObserver(observer, contextPtr: contextPtrs[pid])
         }
     }
 
@@ -250,11 +281,12 @@ public final class ScreenHarvest: @unchecked Sendable {
             }
         }
 
-        bindObserver(pid: pid)
+        let appName = app.localizedName ?? "Unknown"
+        bindObserver(pid: pid, bundleID: bundleID, appName: appName)
 
         // Immediately capture once on focus change — AX notifications
         // sometimes arrive late; this keeps latency bounded.
-        scheduleCapture(pid: pid, bundleID: bundleID, appName: app.localizedName ?? "Unknown", immediate: true)
+        scheduleCapture(pid: pid, bundleID: bundleID, appName: appName, immediate: true)
     }
 
     private func onAppTerminate(pid: pid_t) {
@@ -264,32 +296,43 @@ public final class ScreenHarvest: @unchecked Sendable {
     private func detach(pid: pid_t) {
         lock.lock()
         let observer = perPIDObservers.removeValue(forKey: pid)
+        let contextPtr = perPIDContextPtr.removeValue(forKey: pid)
         perPIDFrameDigest.removeValue(forKey: pid)
         perPIDDebounceTask.removeValue(forKey: pid)?.cancel()
         perPIDEventCounts.removeValue(forKey: pid)
         perPIDQuarantineUntil.removeValue(forKey: pid)
         lock.unlock()
-        if let observer { detachObserver(observer) }
+        if let observer { detachObserver(observer, contextPtr: contextPtr) }
     }
 
     // MARK: - AXObserver binding
 
-    private func bindObserver(pid: pid_t) {
+    private func bindObserver(pid: pid_t, bundleID: String?, appName: String) {
         lock.lock()
         if perPIDObservers[pid] != nil { lock.unlock(); return }
         lock.unlock()
 
         var observer: AXObserver?
-        let selfPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        // Per-observer refcon: weak harvest plus the focused-app identity, so
+        // the callback never re-queries NSWorkspace.shared.frontmostApplication.
+        let ctx = ScreenHarvestCallbackContext(harvest: self, pid: pid, bundleID: bundleID, appName: appName)
+        let ctxPtr = Unmanaged.passRetained(ctx).toOpaque()
         let callback: AXObserverCallback = { _, element, notification, refcon in
             guard let refcon else { return }
-            let harvest = Unmanaged<ScreenHarvest>.fromOpaque(refcon).takeUnretainedValue()
+            let ctx = Unmanaged<ScreenHarvestCallbackContext>.fromOpaque(refcon).takeUnretainedValue()
+            guard let harvest = ctx.harvest else { return }
             let note = notification as String
-            harvest.handleAXNotification(note, element: element)
+            harvest.handleAXNotification(note, element: element, pid: ctx.pid, bundleID: ctx.bundleID, appName: ctx.appName)
         }
 
         let rc = AXObserverCreate(pid, callback, &observer)
         guard rc == .success, let observer else {
+            Unmanaged<ScreenHarvestCallbackContext>.fromOpaque(ctxPtr).release()
+            return
+        }
+
+        guard let runLoop = AXObserverThread.shared.runLoopRef() else {
+            Unmanaged<ScreenHarvestCallbackContext>.fromOpaque(ctxPtr).release()
             return
         }
 
@@ -302,26 +345,33 @@ public final class ScreenHarvest: @unchecked Sendable {
             kAXValueChangedNotification as String,
         ]
         for n in notifications {
-            _ = AXObserverAddNotification(observer, app, n as CFString, selfPtr)
+            _ = AXObserverAddNotification(observer, app, n as CFString, ctxPtr)
         }
-        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        // Attach to the dedicated background run loop, never the main one.
+        CFRunLoopAddSource(runLoop, AXObserverGetRunLoopSource(observer), .defaultMode)
 
         lock.lock()
         perPIDObservers[pid] = observer
+        perPIDContextPtr[pid] = ctxPtr
         perPIDEventCounts[pid] = RateTracker()
         lock.unlock()
     }
 
-    private func detachObserver(_ observer: AXObserver) {
-        let source = AXObserverGetRunLoopSource(observer)
-        CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .defaultMode)
+    private func detachObserver(_ observer: AXObserver, contextPtr: UnsafeMutableRawPointer?) {
+        if let runLoop = AXObserverThread.shared.runLoopRef() {
+            let source = AXObserverGetRunLoopSource(observer)
+            CFRunLoopRemoveSource(runLoop, source, .defaultMode)
+        }
+        if let contextPtr {
+            Unmanaged<ScreenHarvestCallbackContext>.fromOpaque(contextPtr).release()
+        }
     }
 
     // MARK: - AX callback handling
 
-    private func handleAXNotification(_ notification: String, element: AXUIElement) {
-        guard let front = NSWorkspace.shared.frontmostApplication else { return }
-        let pid = front.processIdentifier
+    private func handleAXNotification(_ notification: String, element: AXUIElement, pid: pid_t, bundleID: String?, appName: String) {
+        // pid/bundleID/appName arrive via the observer refcon — no synchronous
+        // NSWorkspace.shared.frontmostApplication IPC on this hot path.
 
         // Runaway guard: throttle bundles that spam notifications.
         lock.lock()
@@ -340,7 +390,7 @@ public final class ScreenHarvest: @unchecked Sendable {
         }
         lock.unlock()
 
-        scheduleCapture(pid: pid, bundleID: front.bundleIdentifier, appName: front.localizedName ?? "Unknown", immediate: false)
+        scheduleCapture(pid: pid, bundleID: bundleID, appName: appName, immediate: false)
     }
 
     // MARK: - Capture scheduling (debounce)

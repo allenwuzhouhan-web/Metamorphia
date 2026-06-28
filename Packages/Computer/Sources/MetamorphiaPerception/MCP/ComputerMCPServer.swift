@@ -160,7 +160,15 @@ public enum ComputerMCPServer {
     // MARK: - Execution Implementations
 
     /// Track last captured map for diff operations.
-    private static var lastCapturedMap: ScreenMap?
+    /// Serialized via `cacheLock` so concurrent MCP tool calls don't race on
+    /// this shared mutable static (`ScreenMap` is a `Sendable` value type).
+    private static var _lastCapturedMap: ScreenMap?
+    private static let cacheLock = NSLock()
+
+    private static var lastCapturedMap: ScreenMap? {
+        get { cacheLock.withLock { _lastCapturedMap } }
+        set { cacheLock.withLock { _lastCapturedMap = newValue } }
+    }
 
     private static func executeCapture(arguments: [String: Any], perception: ComputerPerception) async -> String {
         let forceOCR = arguments["force_ocr"] as? Bool ?? false
