@@ -60,7 +60,12 @@ enum CommandBarStateHelpers {
             }
             return "Running \(name)…"
         case .streaming(let partial):
-            return partial.isEmpty ? "Responding…" : partial
+            // The pill is a single-line, tail-truncated label; laying out the
+            // whole growing buffer here every token is O(n^2) on the main thread.
+            // Show only the most recent slice — the full response renders in the
+            // streaming transcript bubble.
+            if partial.isEmpty { return "Responding…" }
+            return partial.count > 200 ? String(partial.suffix(200)) : partial
         case .voiceListening(let partial):
             return partial.isEmpty ? "Listening…" : partial
         case .result:                   return ""

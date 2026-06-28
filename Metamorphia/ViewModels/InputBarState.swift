@@ -36,4 +36,29 @@ public enum InputBarState: Equatable {
     case newsBriefing(headlines: [String])
     case coworkingSuggestion(title: String)
     case healthCard(message: String)
+
+    /// A coarse identity for driving `.animation(value:)` that ignores the
+    /// rapidly-changing payloads of `streaming`/`voiceListening`. Keying a spring
+    /// on the full state re-armed the animation across the whole command-bar
+    /// subtree on every streamed token, saturating the main thread. Animations
+    /// should fire on *transitions between* states, not on each token within one.
+    public var animationPhase: Int {
+        switch self {
+        case .ready: return 0
+        case .processing: return 1
+        case .planning: return 2
+        case .executing: return 3
+        case .streaming: return 4
+        case .result: return 5
+        case .error: return 6
+        case .voiceListening: return 7
+        case .researchChoice: return 8
+        case .browserChoice: return 9
+        case .purposeQuestion: return 10
+        case .thoughtRecall: return 11
+        case .newsBriefing: return 12
+        case .coworkingSuggestion: return 13
+        case .healthCard: return 14
+        }
+    }
 }
