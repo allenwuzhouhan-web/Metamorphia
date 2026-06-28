@@ -295,7 +295,9 @@ struct LockScreenMusicPanel: View {
     }
 
     private func albumArtButton(size: CGFloat, cornerRadius: CGFloat) -> some View {
-        Button(action: toggleExpanded) {
+        let artHeight = musicManager.albumArt.size.height
+        let isLandscape = artHeight > 0 && musicManager.albumArt.size.width / artHeight > 1.0
+        return Button(action: toggleExpanded) {
                 ZStack(alignment: .bottomTrailing) {
                     albumArtImage(size: size, cornerRadius: cornerRadius)
                     if showAppIcon, let icon = lockScreenAppIcon {
@@ -313,7 +315,7 @@ struct LockScreenMusicPanel: View {
                 .parallax3D(enableOverride: lockScreenParallaxEnabled, suspended: isParallaxSuspended)
                 .frame(width: size)
                 .background(albumArtBackground(cornerRadius: cornerRadius))
-                .clipShape(RoundedRectangle(cornerRadius: musicManager.albumArt.size.width/musicManager.albumArt.size.height > 1.0 ? appIconCornerRadius/3 : appIconCornerRadius, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: isLandscape ? appIconCornerRadius/3 : appIconCornerRadius, style: .continuous))
         }
         .buttonStyle(PlainButtonStyle())
         .opacity(musicManager.isPlaying ? 1 : 0.4)
@@ -1049,10 +1051,12 @@ struct LockScreenMusicPanel: View {
     }
 
     private func albumArtImage(size: CGFloat, cornerRadius: CGFloat) -> some View {
-        Image(nsImage: musicManager.albumArt)
+        let artHeight = musicManager.albumArt.size.height
+        let isLandscape = artHeight > 0 && musicManager.albumArt.size.width / artHeight > 1.0
+        return Image(nsImage: musicManager.albumArt)
             .resizable()
             .aspectRatio(contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: musicManager.albumArt.size.width/musicManager.albumArt.size.height > 1.0 ? cornerRadius/3 : cornerRadius))
+            .clipShape(RoundedRectangle(cornerRadius: isLandscape ? cornerRadius/3 : cornerRadius))
     }
 
     @ViewBuilder
