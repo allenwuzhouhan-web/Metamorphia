@@ -127,7 +127,7 @@ class SystemOSDManager {
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            return task.terminationStatus == 0 && !output!.isEmpty
+            return task.terminationStatus == 0 && !(output ?? "").isEmpty
         } catch {
             return false
         }

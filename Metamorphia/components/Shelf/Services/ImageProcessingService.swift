@@ -263,14 +263,14 @@ final class ImageProcessingService {
         
         let pdfDocument = PDFDocument()
         
-        for (index, url) in imageURLs.enumerated() {
+        for url in imageURLs {
             guard let image = NSImage(contentsOf: url) else {
                 continue
             }
-            
+
             let pdfPage = PDFPage(image: image)
             if let page = pdfPage {
-                pdfDocument.insert(page, at: index)
+                pdfDocument.insert(page, at: pdfDocument.pageCount)
             }
         }
         
