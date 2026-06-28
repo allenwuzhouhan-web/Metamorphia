@@ -195,10 +195,21 @@ final class ExtensionRPCServer {
     private func handleConnectionState(connID: UUID, state: NWConnection.State) {
         switch state {
         case .failed, .cancelled:
-            connections.removeValue(forKey: connID)
+            removeConnection(connID: connID)
             logDiagnostics("RPC client disconnected (id: \(connID.uuidString.prefix(8)))")
         default:
             break
+        }
+    }
+
+    /// Removes a connection and prunes its shelf subscription if no other live
+    /// connection shares the same bundle identifier.
+    private func removeConnection(connID: UUID) {
+        guard let removed = connections.removeValue(forKey: connID) else { return }
+        guard let bundleIdentifier = removed.bundleIdentifier else { return }
+        let stillConnected = connections.values.contains { $0.bundleIdentifier == bundleIdentifier }
+        if !stillConnected {
+            shelfSubscribers.remove(bundleIdentifier)
         }
     }
 
@@ -212,14 +223,14 @@ final class ExtensionRPCServer {
             if let error {
                 Task { @MainActor in
                     self.logDiagnostics("RPC receive error for \(connID.uuidString.prefix(8)): \(error.localizedDescription)")
-                    self.connections.removeValue(forKey: connID)
+                    self.removeConnection(connID: connID)
                 }
                 return
             }
 
             if let data = content, !data.isEmpty {
                 Task { @MainActor in
-                    self.processMessage(data: data, connID: connID)
+                    await self.processMessage(data: data, connID: connID)
                 }
             }
 
@@ -230,7 +241,7 @@ final class ExtensionRPCServer {
         }
     }
 
-    private func processMessage(data: Data, connID: UUID) {
+    private func processMessage(data: Data, connID: UUID) async {
         guard var clientConn = connections[connID] else { return }
 
         // Parse JSON-RPC request
@@ -256,7 +267,7 @@ final class ExtensionRPCServer {
             server: self
         )
 
-        let responseData = service.handleRequest(request)
+        let responseData = await service.handleRequest(request)
         sendRawData(responseData, to: connID)
     }
 

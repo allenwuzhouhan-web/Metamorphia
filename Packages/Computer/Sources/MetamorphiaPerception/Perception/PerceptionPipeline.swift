@@ -758,38 +758,55 @@ public final class PerceptionPipeline: @unchecked Sendable {
         let callback = self.onOCREnrichment
         let state = self.ocrState
 
+        // Coalesce on the actor: if an OCR is already in flight, skip this tick
+        // entirely rather than cancel + restart. The heavy Vision work isn't
+        // cancellation-aware, so cancel+restart only adds a second overlapping
+        // full-resolution screenshot + recognition pass. Skipping bounds the
+        // number of retained full-res images to one at a time. The previous
+        // outer Task.detached + cancelActive() + setActive() sequence was three
+        // non-atomic actor hops, so two ticks could interleave and leave two
+        // inner tasks running; building the inner task inside the actor method
+        // makes scheduling atomic.
         Task.detached(priority: .utility) { [state, stabilizer, displays] in
-            await state.cancelActive()
-            let task = Task.detached(priority: .utility) { [displays] in
-                guard let cgImage = ScreenCapture.captureMainDisplay() else { return }
-                guard !Task.isCancelled else { return }
+            _ = await state.scheduleIfIdle {
+                // `taskHolder` lets the inner task reference its own handle so
+                // it can free the `active` slot via `finishActive` on
+                // completion. Assigned synchronously right after creation,
+                // before the task body's first suspension point can run.
+                let taskHolder = TaskBox()
+                let task = Task.detached(priority: .utility) { [displays] in
+                    defer { Task { await state.finishActive(taskHolder.task!) } }
+                    guard let cgImage = ScreenCapture.captureMainDisplay() else { return }
+                    guard !Task.isCancelled else { return }
 
-                guard let ocrResults = try? await OCRReader.recognize(image: cgImage) else { return }
-                guard !Task.isCancelled else { return }
+                    guard let ocrResults = try? await OCRReader.recognize(image: cgImage) else { return }
+                    guard !Task.isCancelled else { return }
 
-                await state.storePending(
-                    results: ocrResults,
-                    imageWidth: cgImage.width,
-                    imageHeight: cgImage.height
-                )
-
-                if let callback = callback {
-                    let enriched = Fusion.merge(
-                        ax: axElements,
-                        ocr: ocrResults,
+                    await state.storePending(
+                        results: ocrResults,
                         imageWidth: cgImage.width,
-                        imageHeight: cgImage.height,
-                        refStabilizer: stabilizer,
-                        appBundleID: appBundleID,
-                        windowIndex: 0,
-                        displayScaleFactor: scaleFactor,
-                        displays: displays,
-                        sourceDisplayIndex: mainDisplayIndex
+                        imageHeight: cgImage.height
                     )
-                    callback(enriched)
+
+                    if let callback = callback {
+                        let enriched = Fusion.merge(
+                            ax: axElements,
+                            ocr: ocrResults,
+                            imageWidth: cgImage.width,
+                            imageHeight: cgImage.height,
+                            refStabilizer: stabilizer,
+                            appBundleID: appBundleID,
+                            windowIndex: 0,
+                            displayScaleFactor: scaleFactor,
+                            displays: displays,
+                            sourceDisplayIndex: mainDisplayIndex
+                        )
+                        callback(enriched)
+                    }
                 }
+                taskHolder.task = task
+                return task
             }
-            await state.setActive(task)
         }
     }
 
@@ -1072,6 +1089,30 @@ private actor AsyncOCRState {
         active = task
     }
 
+    /// Coalescing scheduler. If an OCR task is already in flight, skips
+    /// scheduling entirely (returns false) — the in-flight Vision work can't be
+    /// cancelled mid-recognition anyway, so cancel+restart would only add a
+    /// second overlapping full-resolution screenshot. When idle, builds the
+    /// inner task via `make`, stores it as `active`, and returns true. The inner
+    /// task is responsible for calling `finishActive(_:)` on completion so the
+    /// slot frees up for the next tick. Atomic by virtue of actor isolation.
+    func scheduleIfIdle(_ make: @Sendable () -> Task<Void, Never>) -> Bool {
+        guard active == nil else { return false }
+        active = make()
+        return true
+    }
+
+    /// Clears the active slot if `task` is still the registered one. Called from
+    /// the inner OCR task's `defer` so a completed task doesn't permanently
+    /// block `scheduleIfIdle`. The identity check avoids a stale completion
+    /// clobbering a newer task (none can exist while coalescing, but it keeps
+    /// the contract safe if scheduling policy changes).
+    func finishActive(_ task: Task<Void, Never>) {
+        if active == task {
+            active = nil
+        }
+    }
+
     func cancelAndClear() {
         active?.cancel()
         active = nil
@@ -1079,6 +1120,16 @@ private actor AsyncOCRState {
         pendingWidth = 0
         pendingHeight = 0
     }
+}
+
+/// Single-write holder that lets a detached OCR task reference its own `Task`
+/// handle so it can free the actor's `active` slot on completion. The handle is
+/// assigned synchronously inside the actor's `scheduleIfIdle` make-closure,
+/// before the task body's first suspension point runs, so the force-unwrap in
+/// the task's `defer` is always satisfied. No concurrent mutation occurs;
+/// `@unchecked Sendable` is safe.
+private final class TaskBox: @unchecked Sendable {
+    var task: Task<Void, Never>?
 }
 
 // MARK: - dHash phase result (Rank 7)

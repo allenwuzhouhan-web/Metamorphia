@@ -30,8 +30,12 @@ final class CircularHUDWindowManager {
     
     private var windows: [NSScreen: OSDWindow] = [:]
     private var hideWorkItem: DispatchWorkItem?
+    private var teardownWorkItem: DispatchWorkItem?
     private let displayDuration: TimeInterval = 2.0
     private let animationDuration: TimeInterval = 0.2
+    // After the HUD has stayed hidden for this long, release the windows so the
+    // NSWindow + SwiftUI hosting tree can be freed; recreated lazily on next show().
+    private let teardownGracePeriod: TimeInterval = 5.0
     
     private var cancellables = Set<AnyCancellable>()
     
@@ -92,7 +96,11 @@ final class CircularHUDWindowManager {
         
         let screens = targetScreen.map { [$0] } ?? NSScreen.screens
         guard !screens.isEmpty else { return }
-        
+
+        // A new show cancels any pending release of the hidden windows.
+        teardownWorkItem?.cancel()
+        teardownWorkItem = nil
+
         // Show on target screen(s)
         for screen in screens {
             let windowContext = ensureWindow(for: type, screen: screen)
@@ -175,11 +183,37 @@ final class CircularHUDWindowManager {
                 context.duration = animationDuration
                 window.nsWindow.animator().alphaValue = 0
             } completionHandler: {
-                 // Keep window around but hidden for faster subsequent shows
+                 // Keep window around but hidden for faster subsequent shows.
             }
         }
+        scheduleTeardown()
     }
-    
+
+    private func scheduleTeardown() {
+        teardownWorkItem?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                self.teardownWindows()
+            }
+        }
+
+        teardownWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + teardownGracePeriod, execute: workItem)
+    }
+
+    private func teardownWindows() {
+        teardownWorkItem = nil
+        guard !windows.isEmpty else { return }
+
+        for window in windows.values {
+            window.nsWindow.orderOut(nil)
+            window.nsWindow.contentView = nil
+        }
+        windows.removeAll()
+    }
+
     // Helper struct
     private struct OSDWindow {
         let nsWindow: NSWindow

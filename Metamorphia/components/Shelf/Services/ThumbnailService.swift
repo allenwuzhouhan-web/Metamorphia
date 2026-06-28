@@ -28,13 +28,15 @@ import UniformTypeIdentifiers
 actor ThumbnailService {
     static let shared = ThumbnailService()
 
+    private let cacheCountLimit = 200
     private let cache = NSCache<NSString, NSImage>()
     private var cacheKeys: Set<String> = []
+    private var cacheKeyOrder: [String] = []
     private var pendingRequests: [String: Task<NSImage?, Never>] = [:]
     private let thumbnailGenerator = QLThumbnailGenerator.shared
 
     private init() {
-        cache.countLimit = 200
+        cache.countLimit = cacheCountLimit
     }
 
     func thumbnail(for url: URL, size: CGSize) async -> NSImage? {
@@ -52,7 +54,7 @@ actor ThumbnailService {
             let thumbnail = await generateQuickLookThumbnail(for: url, size: size)
             if let thumbnail = thumbnail {
                 cache.setObject(thumbnail, forKey: cacheKey as NSString)
-                cacheKeys.insert(cacheKey)
+                rememberCacheKey(cacheKey)
             }
             pendingRequests[cacheKey] = nil
             return thumbnail
@@ -65,17 +67,40 @@ actor ThumbnailService {
     func clearCache() {
         cache.removeAllObjects()
         cacheKeys.removeAll()
+        cacheKeyOrder.removeAll()
     }
 
     func clearCache(for url: URL) {
-        for key in cacheKeys where key.starts(with: url.path) {
+        let staleKeys = cacheKeys.filter { $0.starts(with: url.path) }
+        for key in staleKeys {
             cache.removeObject(forKey: key as NSString)
             cacheKeys.remove(key)
         }
+        if !staleKeys.isEmpty {
+            cacheKeyOrder.removeAll { staleKeys.contains($0) }
+        }
     }
-    
+
     // MARK: - Private Methods
-    
+
+    /// Records a freshly cached key, evicting the oldest tracked key once the
+    /// set would exceed the cache's count limit. NSCache evicts entries on its
+    /// own without notifying us, so bounding the parallel set here keeps it from
+    /// growing without limit over a long session.
+    private func rememberCacheKey(_ cacheKey: String) {
+        if cacheKeys.contains(cacheKey) {
+            cacheKeyOrder.removeAll { $0 == cacheKey }
+        } else {
+            cacheKeys.insert(cacheKey)
+        }
+        cacheKeyOrder.append(cacheKey)
+
+        while cacheKeyOrder.count > cacheCountLimit {
+            let evicted = cacheKeyOrder.removeFirst()
+            cacheKeys.remove(evicted)
+        }
+    }
+
     private func generateQuickLookThumbnail(for url: URL, size: CGSize) async -> NSImage? {
         let scale = await MainActor.run { NSScreen.main?.backingScaleFactor ?? 2.0 }
         

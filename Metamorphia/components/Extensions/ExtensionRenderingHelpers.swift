@@ -22,6 +22,60 @@ import AtollExtensionKit
 import Lottie
 import LottieUI
 import CryptoKit
+import ImageIO
+
+// MARK: - Icon Image Decoding
+
+/// Decodes `.image(data, ...)` icon payloads into small, downsampled `NSImage`s once and keeps
+/// them in a bounded in-memory cache. The extension icon views look up here instead of calling
+/// `NSImage(data:)` inside their SwiftUI `body`, which would re-decode a full-resolution bitmap on
+/// every recompute (these icons live in Live Activity views that redraw on timer/state ticks).
+enum ExtensionIconImageCache {
+    private static let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 64
+        return cache
+    }()
+
+    /// Returns a downsampled image for `data` sized to roughly `pointSize` points, caching the
+    /// decoded result keyed by the payload contents and pixel size. The decode runs at most once
+    /// per distinct (payload, size); subsequent calls hit the cache.
+    static func image(for data: Data, pointSize: CGFloat) -> NSImage? {
+        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        let maxPixelSize = max(1, Int((pointSize * scale).rounded()))
+        let cacheKey = key(for: data, maxPixelSize: maxPixelSize)
+
+        if let cached = cache.object(forKey: cacheKey) {
+            return cached
+        }
+
+        guard let decoded = decodeThumbnail(data: data, maxPixelSize: maxPixelSize) else {
+            return nil
+        }
+        cache.setObject(decoded, forKey: cacheKey)
+        return decoded
+    }
+
+    private static func key(for data: Data, maxPixelSize: Int) -> NSString {
+        let digest = SHA256.hash(data: data)
+        let hash = digest.map { String(format: "%02x", $0) }.joined()
+        return "\(hash)_\(maxPixelSize)" as NSString
+    }
+
+    private static func decodeThumbnail(data: Data, maxPixelSize: Int) -> NSImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    }
+}
 
 // MARK: - Color Conversion
 
@@ -136,7 +190,7 @@ struct ExtensionIconView: View {
                 .foregroundStyle(tint)
                 .frame(width: size.width, height: size.height)
         case let .image(data, targetSize, radius):
-            if let image = NSImage(data: data) {
+            if let image = ExtensionIconImageCache.image(for: data, pointSize: max(targetSize.width, targetSize.height)) {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -237,7 +291,7 @@ struct ExtensionBadgeIconView: View {
                     .font(.system(size: symbolSize, weight: weight.swiftUI))
                     .foregroundStyle(accent)
             case let .image(data, _, _):
-                if let image = NSImage(data: data) {
+                if let image = ExtensionIconImageCache.image(for: data, pointSize: imageSize) {
                     Image(nsImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
@@ -500,7 +554,7 @@ struct ExtensionEdgeContentView: View {
                 .fill((colorDescriptor.isAccent ? accent : colorDescriptor.swiftUIColor).gradient)
                 .frame(width: 48, height: 14)
                 .mask {
-                    AudioVisualizerView(isPlaying: .constant(true))
+                    AudioVisualizerView(isPlaying: .constant(MusicManager.shared.isPlaying))
                         .frame(width: 16, height: 12)
                 }
         case let .animation(data, size):

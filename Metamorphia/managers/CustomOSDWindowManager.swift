@@ -112,7 +112,9 @@ final class CustomOSDWindowManager {
         
         // Show on target screen(s)
         for screen in screens {
-            let window = ensureWindow(for: type, screen: screen)
+            // Skip screens without a stable display id: caching them would leak,
+            // and presenting an uncached window would orphan it (never ordered out/released).
+            guard let window = ensureWindow(for: type, screen: screen) else { continue }
             updateContent(window: window, type: type, value: value, icon: icon)
             
             let targetFrame = calculateFrame(for: screen)
@@ -130,10 +132,11 @@ final class CustomOSDWindowManager {
         scheduleHide(for: type)
     }
     
-    private func ensureWindow(for type: SneakContentType, screen: NSScreen) -> OSDWindow {
+    private func ensureWindow(for type: SneakContentType, screen: NSScreen) -> OSDWindow? {
         guard let displayID = screenNumber(for: screen) else {
-            // Without a stable display id we cannot cache without leaking; return an uncached window.
-            return createWindow(for: type, screen: screen)
+            // Without a stable display id we cannot cache the window without leaking, and an
+            // uncached window would never be ordered out or released. Skip presentation instead.
+            return nil
         }
         switch type {
         case .volume:
@@ -158,8 +161,8 @@ final class CustomOSDWindowManager {
             backlightWindows[displayID] = window
             return window
         default:
-            Logger.log("[CustomOSDWindowManager] Unsupported OSD type: \(type). Returning uncached window.", category: .warning)
-            return createWindow(for: type, screen: screen)
+            Logger.log("[CustomOSDWindowManager] Unsupported OSD type: \(type). Skipping presentation.", category: .warning)
+            return nil
         }
     }
 

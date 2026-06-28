@@ -169,6 +169,9 @@ public final class ScreenHarvest: @unchecked Sendable {
     private var workspaceSwitchObserver: NSObjectProtocol?
     private var workspaceTerminateObserver: NSObjectProtocol?
     private var perPIDObservers: [pid_t: AXObserver] = [:]
+    // The single foreground PID we currently hold an observer for. Detached
+    // when focus moves to a new app so observers don't accumulate per app.
+    private var boundPid: pid_t?
     // Retained refcon pointers (passRetained / release pair) keyed by pid,
     // released exactly once when the observer is detached.
     private var perPIDContextPtr: [pid_t: UnsafeMutableRawPointer] = [:]
@@ -249,6 +252,7 @@ public final class ScreenHarvest: @unchecked Sendable {
         let contextPtrs = perPIDContextPtr
         perPIDObservers.removeAll()
         perPIDContextPtr.removeAll()
+        boundPid = nil
         for (_, task) in perPIDDebounceTask { task.cancel() }
         perPIDDebounceTask.removeAll()
         heartbeatTask?.cancel()
@@ -281,8 +285,21 @@ public final class ScreenHarvest: @unchecked Sendable {
             }
         }
 
+        // Detach the previously-bound foreground app before binding the new
+        // one, so observers don't accumulate one per touched app. Backgrounded
+        // apps are re-bound on their next activation; the heartbeat still
+        // captures whatever is frontmost.
+        lock.lock()
+        let previous = boundPid
+        lock.unlock()
+        if let previous, previous != pid { detach(pid: previous) }
+
         let appName = app.localizedName ?? "Unknown"
         bindObserver(pid: pid, bundleID: bundleID, appName: appName)
+
+        lock.lock()
+        boundPid = pid
+        lock.unlock()
 
         // Immediately capture once on focus change — AX notifications
         // sometimes arrive late; this keeps latency bounded.
@@ -301,6 +318,7 @@ public final class ScreenHarvest: @unchecked Sendable {
         perPIDDebounceTask.removeValue(forKey: pid)?.cancel()
         perPIDEventCounts.removeValue(forKey: pid)
         perPIDQuarantineUntil.removeValue(forKey: pid)
+        if boundPid == pid { boundPid = nil }
         lock.unlock()
         if let observer { detachObserver(observer, contextPtr: contextPtr) }
     }

@@ -34,6 +34,7 @@ struct WhatsNewView: View {
     @Binding var isPresented: Bool
 
     @State private var selection: Int = 0
+    @State private var autoAdvanceTask: Task<Void, Never>?
 
     private let highlights: [WhatsNewHighlight] = [
         WhatsNewHighlight(
@@ -94,11 +95,12 @@ struct WhatsNewView: View {
         }
         .frame(width: 420, height: 380)
         .onAppear { startAutoAdvance() }
+        .onDisappear { autoAdvanceTask?.cancel() }
     }
 
     private func startAutoAdvance() {
         guard highlights.count > 1 else { return }
-        Task { @MainActor in
+        autoAdvanceTask = Task { @MainActor in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 4_500_000_000)
                 guard !Task.isCancelled else { return }
