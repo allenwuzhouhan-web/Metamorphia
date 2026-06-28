@@ -462,23 +462,60 @@ enum DocumentCopilot {
     }
 
     private static func frontmostDocumentDescriptor(bundleID: String) async -> (title: String, path: String?)? {
-        // runAppleScript centralizes the main-thread hop the Carbon OSA engine
-        // requires (driving NSAppleScript off-main corrupts it — EXC_BAD_ACCESS).
-        let payload: String?
+        // Run the probe as an out-of-process `osascript` with a hard timeout.
+        // In-process NSAppleScript on the main thread blocks the whole UI until
+        // Word/PowerPoint replies (and can hang while launching them); a
+        // subprocess can never freeze the app and bounds the wait.
+        let script: String
         switch bundleID {
-        case powerPointBundleID:
-            payload = LocalCommandHelpers.runAppleScript(powerPointScript)
-        case wordBundleID:
-            payload = LocalCommandHelpers.runAppleScript(wordScript)
-        default:
-            payload = nil
+        case powerPointBundleID: script = powerPointScript
+        case wordBundleID: script = wordScript
+        default: return nil
         }
-        guard let payload else { return nil }
+        guard let payload = await runDetectionScript(script) else { return nil }
         let lines = payload.components(separatedBy: "\n")
         let title = lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let path = lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return nil }
         return (title, path.isEmpty ? nil : path)
+    }
+
+    /// Runs a short detection AppleScript via the `osascript` subprocess with a
+    /// hard timeout, off the main thread. Returns nil on any failure or timeout
+    /// (callers treat "no document" as the safe default).
+    private static func runDetectionScript(_ script: String, timeoutSeconds: TimeInterval = 2.0) async -> String? {
+        await withCheckedContinuation { continuation in
+            let process = Process()
+            let stdout = Pipe()
+            let lock = NSLock()
+            var didResume = false
+            func resumeOnce(_ value: String?) {
+                lock.lock(); defer { lock.unlock() }
+                guard !didResume else { return }
+                didResume = true
+                continuation.resume(returning: value)
+            }
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", script]
+            process.standardOutput = stdout
+            process.standardError = FileHandle.nullDevice
+            process.terminationHandler = { proc in
+                let data = stdout.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                resumeOnce(proc.terminationStatus == 0 ? output : nil)
+            }
+            do {
+                try process.run()
+            } catch {
+                resumeOnce(nil)
+                return
+            }
+            Task.detached(priority: .userInitiated) {
+                try? await Task.sleep(nanoseconds: UInt64(max(timeoutSeconds, 0.1) * 1_000_000_000))
+                if process.isRunning { process.terminate() }
+                resumeOnce(nil)
+            }
+        }
     }
 
     private static func resolveDocumentAppCandidate(

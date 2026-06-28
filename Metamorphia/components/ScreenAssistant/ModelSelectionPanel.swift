@@ -175,7 +175,14 @@ struct ModelSelectionView: View {
                                 ProviderCard(
                                     provider: provider,
                                     isSelected: selectedProvider == provider,
-                                    onSelect: { selectedProvider = provider }
+                                    onSelect: {
+                                        selectedProvider = provider
+                                        // The model selection is global, so switching providers must
+                                        // pick a model this provider serves — otherwise the old id 404s.
+                                        if selectedModel == nil || !provider.supportedModels.contains(where: { $0.id == selectedModel?.id }) {
+                                            selectedModel = provider.supportedModels.first
+                                        }
+                                    }
                                 )
                             }
                         }

@@ -417,6 +417,19 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         }
     }
     
+    /// Resolves the model id to send to `provider`. `selectedAIModel` is a single
+    /// value shared across all providers, so only use it when it actually belongs
+    /// to `provider`; otherwise fall back to the provider's default. This prevents
+    /// a stale cross-provider selection (e.g. a Gemini model left selected after
+    /// switching to Cerebras) from being POSTed and 404'ing on an unknown model.
+    private func resolvedModelId(for provider: AIModelProvider, default fallbackId: String) -> String {
+        if let selected = Defaults[.selectedAIModel],
+           provider.supportedModels.contains(where: { $0.id == selected.id }) {
+            return selected.id
+        }
+        return fallbackId
+    }
+
     private func sendToGeminiAPI(message: String, files: [ScreenAssistantFile]) {
         let apiKey = Defaults[.geminiApiKey]
         guard !apiKey.isEmpty else {
@@ -425,10 +438,8 @@ class ScreenAssistantManager: NSObject, ObservableObject {
             isLoading = false
             return
         }
-        
-        // Get selected model or default to gemini-2.5-flash
-        let selectedModel = Defaults[.selectedAIModel] ?? AIModel(id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", supportsThinking: true)
-        let modelId = selectedModel.id
+
+        let modelId = resolvedModelId(for: .gemini, default: "gemini-2.5-flash")
 
         // Send the API key via the x-goog-api-key header instead of a `?key=` query
         // parameter so it doesn't leak into URL logs/proxies.
@@ -464,10 +475,8 @@ class ScreenAssistantManager: NSObject, ObservableObject {
             return
         }
         
-        // Get selected model or default to gpt-4o
-        let selectedModel = Defaults[.selectedAIModel] ?? AIModel(id: "gpt-4o", name: "GPT-4o", supportsThinking: false)
-        let modelId = selectedModel.id
-        
+        let modelId = resolvedModelId(for: .openai, default: "gpt-4o")
+
         guard let url = URL(string: "https://api.openai.com/v1/chat/completions") else {
             print("❌ ScreenAssistant: Invalid OpenAI API URL")
             addAssistantMessage("Error: Invalid API URL")
@@ -487,10 +496,8 @@ class ScreenAssistantManager: NSObject, ObservableObject {
             return
         }
         
-        // Get selected model or default to claude-3-5-sonnet
-        let selectedModel = Defaults[.selectedAIModel] ?? AIModel(id: "claude-3-5-sonnet-20241022", name: "Claude 3.5 Sonnet", supportsThinking: false)
-        let modelId = selectedModel.id
-        
+        let modelId = resolvedModelId(for: .claude, default: "claude-3-5-sonnet-20241022")
+
         guard let url = URL(string: "https://api.anthropic.com/v1/messages") else {
             print("❌ ScreenAssistant: Invalid Claude API URL")
             addAssistantMessage("Error: Invalid API URL")
@@ -510,9 +517,7 @@ class ScreenAssistantManager: NSObject, ObservableObject {
             return
         }
 
-        // Get selected model or default to gpt-oss-120b
-        let selectedModel = Defaults[.selectedAIModel] ?? AIModel(id: "gpt-oss-120b", name: "GPT-OSS 120B", supportsThinking: true)
-        let modelId = selectedModel.id
+        let modelId = resolvedModelId(for: .cerebras, default: "gpt-oss-120b")
 
         // Cerebras exposes an OpenAI-compatible chat completions endpoint
         guard let url = URL(string: "https://api.cerebras.ai/v1/chat/completions") else {

@@ -661,8 +661,9 @@ enum AIModelProvider: String, CaseIterable, Identifiable, Defaults.Serializable 
             ]
         case .claude:
             return [
-                AIModel(id: "claude-3-5-sonnet", name: "Claude 3.5 Sonnet", supportsThinking: false),
-                AIModel(id: "claude-3-haiku", name: "Claude 3 Haiku", supportsThinking: false)
+                // Anthropic's Messages API rejects undated aliases — use dated ids.
+                AIModel(id: "claude-3-5-sonnet-20241022", name: "Claude 3.5 Sonnet", supportsThinking: false),
+                AIModel(id: "claude-3-haiku-20240307", name: "Claude 3 Haiku", supportsThinking: false)
             ]
         case .cerebras:
             return [
