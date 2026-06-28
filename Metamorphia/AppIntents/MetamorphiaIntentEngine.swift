@@ -49,12 +49,9 @@ enum MetamorphiaIntentEngine {
         }
 
         if let loop = MetamorphiaBootstrap.loop {
-            // M9: bind this run's thread to the phone's sessionID so the agent
-            // loop persists it under ConversationStore(sessionId:). Best-effort:
-            // the singleton loop's default sessionId is nil, so we set the
-            // per-run override before submit and clear it after.
+            // M9 fix (1): pass sessionID directly into submit so concurrent runs
+            // each carry their own id; no shared mutable runSessionIdOverride needed.
             // FileConversationStore is injected at MetamorphiaBootstrap:~578.
-            await loop.setRunSessionId(sessionID)
             // Load the session's persisted history so phone turns continue the
             // same thread rather than starting from scratch each time.
             let previousMessages: [ChatMessage]
@@ -66,9 +63,9 @@ enum MetamorphiaIntentEngine {
             let outcome = await loop.submit(
                 command: prompt,
                 systemPrompt: systemPrompt,
-                previousMessages: previousMessages
+                previousMessages: previousMessages,
+                runSessionId: sessionID
             )
-            await loop.setRunSessionId(nil)
             return outcome.text
         }
 #endif

@@ -544,6 +544,7 @@ public final class AICommandViewModel: ObservableObject {
         lastExecutingStep = 0
         lastExecutingTotal = 0
         lastResultSummary = nil
+        MenuBarTaskStatusStore.shared.updateResultSummary(nil)
         // New turn — if the user had compacted the bar reading the previous
         // reply, bring it back to full size so they see the fresh stream.
         if isResponseCompacted {
@@ -598,7 +599,16 @@ public final class AICommandViewModel: ObservableObject {
         if functionSpec != nil {
             primedPrompt += "\n\nThe user entered a mathematical function. A graph is being rendered. Briefly describe the function's shape and key properties. 2-3 sentences."
         }
-        let priorMessages = persistence?.previousChatMessages() ?? []
+        // M9 fix (3): when the turn originates from the phone, load the
+        // persisted thread so the agent continues the same conversation
+        // rather than starting from scratch. For local turns, fall through
+        // to the notch history provided by ConversationPersistenceService.
+        let priorMessages: [ChatMessage]
+        if let sid = sessionID {
+            priorMessages = await loop.loadMessages(sessionId: sid)
+        } else {
+            priorMessages = persistence?.previousChatMessages() ?? []
+        }
 
         let commandWithAttachments: String
         var sections: [String] = [agentPrompt]
@@ -620,12 +630,11 @@ public final class AICommandViewModel: ObservableObject {
 
         let runTrace = AgentTrace(goal: commandWithAttachments)
 
-        // M9: when this turn originates from the phone, bind the loop's run
-        // session so ConversationStore persists under the phone's thread id,
-        // and arm throttled TurnResult writebacks driven by the progress sink.
-        // FileConversationStore is injected at MetamorphiaBootstrap:~578.
+        // M9 fix (1+3): arm throttled TurnResult writebacks for phone turns.
+        // The sessionID is now passed directly into loop.submit as runSessionId
+        // so the ConversationStore persists under the phone's thread id without
+        // any shared mutable state on the loop. setRunSessionId is removed.
         if let sessionID {
-            await loop.setRunSessionId(sessionID)
             remoteStreamSessionID = sessionID
             remoteStreamLastWrite = .distantPast
         }
@@ -634,11 +643,11 @@ public final class AICommandViewModel: ObservableObject {
             command: commandWithAttachments,
             systemPrompt: primedPrompt,
             previousMessages: priorMessages,
-            trace: runTrace
+            trace: runTrace,
+            runSessionId: sessionID
         )
 
         if sessionID != nil {
-            await loop.setRunSessionId(nil)
             remoteStreamSessionID = nil
         }
 
@@ -686,13 +695,16 @@ public final class AICommandViewModel: ObservableObject {
             let edits = outcome.toolsUsed.filter {
                 $0 == "edit_file" || $0 == "write_file"
             }.count
-            lastResultSummary = edits > 0 ? "Done · \(edits) edit\(edits == 1 ? "" : "s")" : "Done"
+            let summary = edits > 0 ? "Done · \(edits) edit\(edits == 1 ? "" : "s")" : "Done"
+            lastResultSummary = summary
+            MenuBarTaskStatusStore.shared.updateResultSummary(summary)
             let turnToken = UUID()
             lingerToken = turnToken
             Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .seconds(2))
                 guard let self, self.lingerToken == turnToken else { return }
                 self.lastResultSummary = nil
+                MenuBarTaskStatusStore.shared.updateResultSummary(nil)
             }
         }
 
@@ -951,20 +963,38 @@ public final class AICommandViewModel: ObservableObject {
     /// M4: Fetches the temporal-recall block via the bootstrap-wired closure and
     /// stashes it (plus the sensitivity suppress flag) into the loop's middleware
     /// persistentStorage so RetraceRecallMiddleware can read it synchronously.
+    ///
+    /// Fix (4) + (5): ALWAYS write BOTH keys every turn so stale values from a
+    /// prior turn can never bleed through. A sensitive turn writes suppress=true
+    /// + block=""; a non-sensitive turn writes suppress=false + block=<fetched
+    /// value or "">. The empty-string guard in RetraceRecallMiddleware already
+    /// skips injection when block is blank, so "" is safe for the no-fetch path.
     private func prefetchRetraceRecall(for query: String) async {
         // Privacy gate — never recall while a sensitive field is focused.
         let sensitive = await MetamorphiaBootstrap.focusedFieldIsSensitive()
         if sensitive {
-            await loop.setMiddlewareStorage(
-                [RetraceRecallMiddleware.suppressKey: true]
-            )
+            // Suppress and clear any leftover block from a prior turn.
+            await loop.setMiddlewareStorage([
+                RetraceRecallMiddleware.suppressKey: true,
+                RetraceRecallMiddleware.recallBlockKey: "",
+            ])
             return
         }
-        guard let fetch = MetamorphiaBootstrap.retraceRecallFetch else { return }
-        guard let block = await fetch(query) else { return }
-        await loop.setMiddlewareStorage(
-            [RetraceRecallMiddleware.recallBlockKey: block]
-        )
+
+        // Non-sensitive path: fetch the recall block (may be nil/absent).
+        let block: String
+        if let fetch = MetamorphiaBootstrap.retraceRecallFetch,
+           let fetched = await fetch(query) {
+            block = fetched
+        } else {
+            block = ""
+        }
+        // Write both keys so a previously-set suppress=true is cleared and a
+        // previously-set block from a different turn is replaced.
+        await loop.setMiddlewareStorage([
+            RetraceRecallMiddleware.suppressKey: false,
+            RetraceRecallMiddleware.recallBlockKey: block,
+        ])
     }
 
     // MARK: - Slash suggestions

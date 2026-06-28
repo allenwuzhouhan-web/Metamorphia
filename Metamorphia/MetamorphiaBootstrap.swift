@@ -572,9 +572,9 @@ public enum MetamorphiaBootstrap {
             progressSink: nil,
             treeSink: nil,
             costTracker: tracker,     // powers the per-task cost ceiling breaker
-            // M9: inject a FileConversationStore so setRunSessionId()/
-            // effectiveSessionId actually persist phone-originated threads.
-            // Without this, the per-run override is plumbing with no storage.
+            // M9: inject a FileConversationStore so the runSessionId passed
+            // into AgentLoop.submit persists phone-originated threads on disk.
+            // Without this, the per-call session id is plumbing with no storage.
             conversationStore: FileConversationStore()
         )
         Self.loop = loop

@@ -205,16 +205,34 @@ final class RemoteCommandListener {
     func handleRemotePush() async { await pollOnce() }
 
     private func writeTurnResult(_ result: TurnResult) async {
-        let record = CKRecord(recordType: CloudKeys.RecordType.turnResult)
+        // Use a deterministic record name so every write for the same session
+        // targets the same CKRecord, preventing unbounded record growth from
+        // ~1/sec interim streaming writes.
+        let recordName = "turnresult-\(result.sessionID)"
+        let recordID   = CKRecord.ID(recordName: recordName)
+        let record     = CKRecord(recordType: CloudKeys.RecordType.turnResult, recordID: recordID)
         record[CloudKeys.Field.sessionID] = result.sessionID as CKRecordValue
         record[CloudKeys.Field.text]      = result.text      as CKRecordValue
         record[CloudKeys.Field.status]    = result.status    as CKRecordValue
         record[CloudKeys.Field.updatedAt] = result.updatedAt as CKRecordValue
-        do {
-            try await database.save(record)
-            Logger.log("[RemoteCommands] Wrote TurnResult for session \(result.sessionID)", category: .network)
-        } catch {
-            Logger.log("[RemoteCommands] TurnResult write failed: \(error.localizedDescription)", category: .error)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let op = CKModifyRecordsOperation(recordsToSave: [record], recordIDsToDelete: nil)
+            // .changedKeys treats the supplied record as a full overwrite of only
+            // the named fields, creating the record if absent. This avoids the
+            // server-side conflict path that would surface when we try to save a
+            // brand-new local CKRecord whose recordName already exists in iCloud.
+            op.savePolicy = .changedKeys
+            op.modifyRecordsResultBlock = { [weak self] result in
+                guard let self else { continuation.resume(); return }
+                switch result {
+                case .success:
+                    Logger.log("[RemoteCommands] Wrote TurnResult for session \(record[CloudKeys.Field.sessionID] as? String ?? "?")", category: .network)
+                case .failure(let error):
+                    Logger.log("[RemoteCommands] TurnResult write failed: \(error.localizedDescription)", category: .error)
+                }
+                continuation.resume()
+            }
+            database.add(op)
         }
     }
 

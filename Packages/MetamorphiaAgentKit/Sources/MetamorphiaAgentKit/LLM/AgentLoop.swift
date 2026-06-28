@@ -85,23 +85,6 @@ public actor AgentLoop {
     private let conversationStore: ConversationStore?
     private let sessionId: String?
 
-    /// M9: per-run override of `sessionId`. When set (by `setRunSessionId`),
-    /// the loop persists the finished thread under THIS id instead of the
-    /// constructor default — letting one shared loop serve both the local
-    /// notch thread (nil → constructor id) and a remote phone thread.
-    /// Takes effect when the loop was constructed with a `conversationStore`
-    /// — MetamorphiaBootstrap injects `FileConversationStore()` at line ~578,
-    /// so phone-originated runs persist and can be resumed across turns.
-    private var runSessionIdOverride: String?
-
-    /// Set a per-run session id override. Called by MetamorphiaIntentEngine /
-    /// AICommandViewModel before and after each phone-originated run.
-    public func setRunSessionId(_ id: String?) { self.runSessionIdOverride = id }
-
-    /// Effective session id for persistence: per-run override wins over the
-    /// constructor default.
-    private var effectiveSessionId: String? { runSessionIdOverride ?? sessionId }
-
     /// Strong retain so auto-submissions don't lose the in-flight Task.
     private var currentTask: Task<Outcome, Never>?
 
@@ -148,24 +131,36 @@ public actor AgentLoop {
 
     /// Merge keys into the middleware chain's persistent storage. Used by the
     /// host to pre-seed values (e.g. the M4 recall block) that a synchronous
-    /// middleware will read on iteration 0.
+    /// middleware will read on iteration 0. The merge is done under a single
+    /// lock acquisition via `MiddlewareChain.mergeStorage`.
     public func setMiddlewareStorage(_ values: [String: Any]) {
-        for (k, v) in values { middlewareChain.persistentStorage[k] = v }
+        middlewareChain.mergeStorage(values)
     }
 
     // MARK: - Public API
 
     /// Submit a new command. Cancels any in-flight run, then starts fresh.
     /// Returns the final outcome once the run completes.
+    ///
+    /// - Parameter runSessionId: When non-nil, the completed thread is
+    ///   persisted under this id (not the constructor default). Pass the
+    ///   phone's CloudKit session id for phone-originated turns so the
+    ///   conversation store can be resumed across launches.
     public func submit(
         command: String,
         systemPrompt: String,
         previousMessages: [ChatMessage] = [],
         agent: AgentProfile = .general,
         complexity: TaskComplexity? = nil,
-        trace: AgentTrace? = nil
+        trace: AgentTrace? = nil,
+        runSessionId: String? = nil
     ) async -> Outcome {
         cancelInFlight()
+
+        // Capture the effective session id at call time so concurrent
+        // submissions each carry their own id into the detached Task — no
+        // shared mutable override is needed.
+        let effectiveSessionId: String? = runSessionId ?? sessionId
 
         let effective = complexity ?? Self.classifyComplexity(command)
         middlewareChain.reset()

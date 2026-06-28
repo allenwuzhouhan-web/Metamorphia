@@ -469,9 +469,22 @@ public struct PowerPointDesignResult: Codable, Sendable, Hashable {
         slidePreviews = try container.decodeIfPresent([PowerPointDeckSlidePreview].self, forKey: .slidePreviews)
         summary = try container.decode(String.self, forKey: .summary)
         recipe = try container.decodeIfPresent(String.self, forKey: .recipe) ?? "Editorial feature"
-        palette = try container.decode(PowerPointDesignPalette.self, forKey: .palette)
-        typography = try container.decode(PowerPointDesignTypography.self, forKey: .typography)
-        motif = try container.decode(String.self, forKey: .motif)
+        palette = try container.decodeIfPresent(PowerPointDesignPalette.self, forKey: .palette) ?? PowerPointDesignPalette(
+            name: "Custom",
+            primary: "2F3C7E",
+            secondary: "F2F2F2",
+            accent: "F96167",
+            background: "FFFFFF",
+            text: "111827",
+            mutedText: "4B5563"
+        )
+        typography = try container.decodeIfPresent(PowerPointDesignTypography.self, forKey: .typography) ?? PowerPointDesignTypography(
+            titleFont: "Aptos Display",
+            bodyFont: "Aptos",
+            titleSize: 38,
+            bodySize: 16
+        )
+        motif = try container.decodeIfPresent(String.self, forKey: .motif) ?? "Accent bar"
         operations = try container.decodeIfPresent([PowerPointDesignOperation].self, forKey: .operations) ?? []
         textBlocks = try container.decodeIfPresent([PowerPointDesignTextBlock].self, forKey: .textBlocks) ?? []
         restoreData = try container.decodeIfPresent(PowerPointRestoreData.self, forKey: .restoreData)

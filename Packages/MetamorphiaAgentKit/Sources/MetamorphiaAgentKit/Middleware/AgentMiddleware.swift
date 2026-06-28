@@ -94,14 +94,43 @@ public final class MiddlewareContext: @unchecked Sendable {
 public final class MiddlewareChain: @unchecked Sendable {
     public private(set) var middlewares: [AgentMiddleware] = []
 
+    /// Lock that serializes all reads and writes of `_persistentStorage`.
+    /// Mirrors the pattern used by `AgentTrace` to make `@unchecked Sendable`
+    /// safe: the chain is captured into a detached `Task` by `AgentLoop.submit`
+    /// while `setMiddlewareStorage` / `reset` may be called from the actor
+    /// before/after submission.
+    private let storageLock = NSLock()
+    private var _persistentStorage: [String: Any] = [:]
+
     /// Storage that persists across iterations for the lifetime of one task execution.
     /// Passed into each ``MiddlewareContext`` so middlewares can maintain state.
-    public var persistentStorage: [String: Any] = [:]
+    /// All accesses are serialized through `storageLock`.
+    public var persistentStorage: [String: Any] {
+        get {
+            storageLock.lock()
+            defer { storageLock.unlock() }
+            return _persistentStorage
+        }
+        set {
+            storageLock.lock()
+            defer { storageLock.unlock() }
+            _persistentStorage = newValue
+        }
+    }
 
     public init() {}
 
     public func add(_ middleware: AgentMiddleware) {
         middlewares.append(middleware)
+    }
+
+    /// Merge key/value pairs into persistent storage under a single lock
+    /// acquisition. Preferred over subscript assignment from outside the chain
+    /// to avoid a get-then-set double-lock.
+    public func mergeStorage(_ values: [String: Any]) {
+        storageLock.lock()
+        defer { storageLock.unlock() }
+        for (k, v) in values { _persistentStorage[k] = v }
     }
 
     /// Run all middlewares' beforeModelCall hooks in order.

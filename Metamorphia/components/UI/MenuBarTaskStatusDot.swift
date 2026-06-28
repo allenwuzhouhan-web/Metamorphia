@@ -26,11 +26,18 @@ final class MenuBarTaskStatusStore: ObservableObject {
     static let shared = MenuBarTaskStatusStore()
 
     @Published private(set) var status: MenuBarTaskStatus = .succeeded
+    /// Mirrors AICommandViewModel.lastResultSummary so ContentView can subscribe
+    /// without holding a direct reference to the view model.
+    @Published private(set) var lastResultSummary: String?
 
     private init() {}
 
     func update(from inputBarState: InputBarState) {
         status = MenuBarTaskStatus(inputBarState: inputBarState)
+    }
+
+    func updateResultSummary(_ summary: String?) {
+        lastResultSummary = summary
     }
 }
 

@@ -177,14 +177,21 @@ enum WebNavigationLocalMatcher {
 
     // MARK: - Side-effect
 
-    private static func openURL(_ url: URL, displayTarget: String) async -> LocalCommandHit {
+    private static func openURL(_ url: URL, displayTarget: String) async -> LocalCommandHit? {
         let start = Date()
         let urlString = url.absoluteString
         if let registry = LocalCommandPipeline.registry {
             // Route through the shared ToolRegistry so OpenURLTool's MainActor dispatch
             // and scheme validation run (same path as when the LLM calls open_url).
-            let argsJSON = "{\"url\":\"\(urlString)\"}"
-            _ = try? await registry.executeDirectly(toolName: "open_url", arguments: argsJSON)
+            // Use JSONSerialization so any unusual characters in urlString are safely escaped.
+            let argsDict: [String: Any] = ["url": urlString]
+            guard let argsData = try? JSONSerialization.data(withJSONObject: argsDict),
+                  let argsJSON = String(data: argsData, encoding: .utf8) else { return nil }
+            do {
+                _ = try await registry.executeDirectly(toolName: "open_url", arguments: argsJSON)
+            } catch {
+                return nil
+            }
         } else {
             // Fallback: call AppKit on MainActor directly (registry not yet wired).
             await MainActor.run { _ = NSWorkspace.shared.open(url) }

@@ -130,15 +130,17 @@ public struct DesignDeckTool: ToolDefinition {
             throw ToolExecutionError(error.message)
         }
 
-        // 3. Decode the model's design plan from the tool arguments.
+        // 3. Decode the model's design plan from the tool arguments using the
+        //    same lenient path as RichResultParser so partial palette/typography
+        //    output (fields absent from the schema's required list) gets defaults
+        //    instead of throwing.
         let rawDesign: PowerPointDesignResult
-        do {
-            rawDesign = try JSONDecoder().decode(
-                PowerPointDesignResult.self,
-                from: arguments.data(using: .utf8) ?? Data()
-            )
-        } catch {
-            throw ToolExecutionError("Could not decode design_deck arguments: \(error.localizedDescription)")
+        let wrappedArguments = "[PPT_DESIGN]\n\(arguments)\n[/PPT_DESIGN]"
+        if let parsed = RichResultParser.parsePowerPointDesign(in: wrappedArguments),
+           case .powerPointDesign(let design) = parsed.content {
+            rawDesign = design
+        } else {
+            throw ToolExecutionError("Could not decode design_deck arguments: the model's tool-call JSON is missing required fields (presentationTitle, slideIndex, or summary).")
         }
 
         // 4. Resolve — fills in restoreData, shapeSnapshots, palette normalization.

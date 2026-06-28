@@ -74,12 +74,15 @@ enum NoteLocalMatcher {
         let title = String(body.prefix(40))
 
         if let registry = LocalCommandPipeline.registry {
-            // Escape body for JSON: replace backslashes then quotes.
-            let escaped = body
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "\\\"")
-            let argsJSON = "{\"title\":\"\(title)\",\"body\":\"\(escaped)\"}"
-            _ = try? await registry.executeDirectly(toolName: "append_note", arguments: argsJSON)
+            // Use JSONSerialization so both title and body are safely escaped.
+            let argsDict: [String: Any] = ["title": title, "body": body]
+            guard let argsData = try? JSONSerialization.data(withJSONObject: argsDict),
+                  let argsJSON = String(data: argsData, encoding: .utf8) else { return nil }
+            do {
+                _ = try await registry.executeDirectly(toolName: "append_note", arguments: argsJSON)
+            } catch {
+                return nil
+            }
         } else {
             let note = NoteItem(
                 id: UUID(),
