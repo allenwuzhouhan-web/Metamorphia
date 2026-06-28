@@ -29,6 +29,12 @@ struct GooeyTetherView: View {
             context.addFilter(.alphaThreshold(min: 0.42, color: inkColor))
             context.addFilter(.blur(radius: 9))
             context.drawLayer { layer in
+                // Endpoints and strength are raw CGFloat inputs; a non-finite value
+                // would make the tapering radius and its CGRect non-finite, which
+                // CoreGraphics rejects when filling. Bail before drawing anything.
+                guard strength.isFinite,
+                      anchor.x.isFinite, anchor.y.isFinite,
+                      tip.x.isFinite, tip.y.isFinite else { return }
                 let steps = 7
                 for i in 0...steps {
                     let f = CGFloat(i) / CGFloat(steps)

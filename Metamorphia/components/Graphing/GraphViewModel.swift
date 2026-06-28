@@ -255,9 +255,15 @@ struct Viewport: Equatable {
 
     static let standard = Viewport(minX: -10, minY: -7, width: 20, height: 14)
 
+    /// Largest absolute origin offset we allow. Past this the Double ULP of `minX`/`minY`
+    /// can exceed a gridline step, which collapses the grid and (without the counted draw
+    /// loops) would spin. Clamping here keeps ulp(minX) ≤ ~1e-4 on every code path —
+    /// pan, zoom, fit-to-content, and CSV import.
+    static let maxOffset: Double = 1e12
+
     init(minX: Double, minY: Double, width: Double, height: Double) {
-        self.minX = minX
-        self.minY = minY
+        self.minX = minX.isFinite ? max(min(minX, Self.maxOffset), -Self.maxOffset) : 0
+        self.minY = minY.isFinite ? max(min(minY, Self.maxOffset), -Self.maxOffset) : 0
         self.width = max(width, 1e-6)
         self.height = max(height, 1e-6)
     }

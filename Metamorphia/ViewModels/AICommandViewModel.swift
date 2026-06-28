@@ -820,7 +820,12 @@ public final class AICommandViewModel: ObservableObject {
                 if case .excelAnalysis(let plan) = parsed.content,
                    let excelAnalysisRoute {
                     // Deterministic Swift math fills the placeholder plan.
-                    let full = ExcelCopilot.computeResult(plan: plan, route: excelAnalysisRoute)
+                    // The OLS/correlation accumulation is O(n*p^2) over up to
+                    // maxCaptureRows; hop it off the main actor so it never
+                    // blocks UI updates while it runs.
+                    let full = await Task.detached(priority: .userInitiated) {
+                        ExcelCopilot.computeResult(plan: plan, route: excelAnalysisRoute)
+                    }.value
                     resolvedContent = .excelAnalysis(full)
                     resolveFailure = nil
                 } else if case .powerPointFinish(let finish) = parsed.content,

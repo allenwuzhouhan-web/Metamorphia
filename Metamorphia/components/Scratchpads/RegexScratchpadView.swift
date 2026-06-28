@@ -10,7 +10,7 @@ import UniformTypeIdentifiers
 /// of them lights up, each in its own colour. Regexes are compiled once and cached, and
 /// matches recompute only when the text or the selection changes — so it stays fast.
 @MainActor public struct RegexScratchpadView: View {
-    private enum Mode: String { case find, patterns }
+    private enum Mode: String, Sendable { case find, patterns }
 
     @AppStorage("regexScratchMode") private var modeRaw = Mode.patterns.rawValue
     @AppStorage("regexScratchText") private var text = RegexScratchpadView.sampleText
@@ -23,6 +23,22 @@ import UniformTypeIdentifiers
     @State private var expanded: Set<String> = ["Parts of Speech"]
     @State private var highlights: [Highlight] = []
 
+    /// Per-row match counts for the current search results, keyed by pattern slug.
+    /// Filled by the background pass (never in `body`) so typing doesn't run a
+    /// full-text regex per visible row on every render.
+    @State private var counts: [String: Int] = [:]
+
+    /// The highlighted editor text, rebuilt off the render path whenever the text
+    /// or highlights change rather than reallocated in `body` every keystroke.
+    @State private var highlightedText = AttributedString("")
+
+    /// Debounces and runs matching off the main actor; results hop back to publish.
+    @StateObject private var scheduler = RegexScratchpadDebounce()
+
+    /// Monotonically increasing id stamped on each scheduled pass. A pass older
+    /// than the latest id is dropped so a slow run can't overwrite newer input.
+    @State private var generation = 0
+
     /// An uploaded document: its name, and — only when it's too big to preview inline —
     /// its full text (kept out of the editor). Small docs load straight into `text`.
     @State private var docName: String?
@@ -32,9 +48,14 @@ import UniformTypeIdentifiers
     /// Above this length an uploaded doc is searched out-of-line into an exported copy.
     private let inlineLimit = 12_000
 
+    /// Hard ceiling on how many characters a single matching pass scans. A
+    /// multi-MB upload can't blow up even one background pass; the large-doc card
+    /// already tells the user big docs aren't fully previewed.
+    private let scanCap = 400_000
+
     public init() {}
 
-    private struct Highlight { let range: NSRange; let colorIndex: Int }
+    private struct Highlight: Sendable { let range: NSRange; let colorIndex: Int }
 
     private static let palette: [Color] = [.cyan, .purple, .orange, .green, .pink, .yellow, .mint, .teal]
 
@@ -75,10 +96,19 @@ import UniformTypeIdentifiers
             if isLargeDoc { largeDocCard } else { editor }
         }
         .padding(12)
-        .onAppear(perform: recompute)
-        .onChange(of: text) { _, _ in recompute() }
+        .onAppear {
+            highlightedText = Self.buildHighlightedText(text, highlights: highlights)
+            recompute()
+        }
+        .onChange(of: text) { _, newValue in
+            // Reflect the typed text instantly (the visible layer is this overlay,
+            // not the clear TextEditor), then debounce the expensive highlighting.
+            if !isLargeDoc { highlightedText = AttributedString(newValue) }
+            recompute()
+        }
         .onChange(of: modeRaw) { _, _ in recompute() }
         .onChange(of: stackRaw) { _, _ in recompute() }
+        .onChange(of: search) { _, _ in recompute() }
         .onChange(of: findQuery) { _, _ in recompute() }
         .onChange(of: wholeWord) { _, _ in recompute() }
         .onChange(of: findCaseInsensitive) { _, _ in recompute() }
@@ -303,7 +333,7 @@ import UniformTypeIdentifiers
                 }
                 Spacer(minLength: 4)
                 if showCount {
-                    let n = RegexPatternLibrary.count(of: pattern, in: text)
+                    let n = counts[pattern.slug] ?? 0
                     Text("\(n)")
                         .font(.system(size: 10, weight: .semibold, design: .rounded))
                         .foregroundStyle(n > 0 ? Color.accentColor : .white.opacity(0.35))
@@ -349,14 +379,17 @@ import UniformTypeIdentifiers
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
     }
 
-    private var highlightedText: AttributedString {
-        var attributed = AttributedString(text)
+    /// Build the highlighted editor text from a source string and its matches.
+    /// Called off the render path (after a matching pass), not in `body`, so a
+    /// 12k-char inline doc isn't reallocated and re-styled on every keystroke.
+    private static func buildHighlightedText(_ source: String, highlights: [Highlight]) -> AttributedString {
+        var attributed = AttributedString(source)
         for highlight in highlights {
-            guard let range = Range(highlight.range, in: text),
+            guard let range = Range(highlight.range, in: source),
                   let lower = AttributedString.Index(range.lowerBound, within: attributed),
                   let upper = AttributedString.Index(range.upperBound, within: attributed)
             else { continue }
-            attributed[lower..<upper].backgroundColor = Self.palette[highlight.colorIndex % Self.palette.count].opacity(0.4)
+            attributed[lower..<upper].backgroundColor = palette[highlight.colorIndex % palette.count].opacity(0.4)
         }
         return attributed
     }
@@ -408,28 +441,65 @@ import UniformTypeIdentifiers
 
     // MARK: Compute
 
+    /// Schedule a debounced, off-actor matching pass. Every keystroke or toggle
+    /// lands here; the actual regex work — over a span capped at `scanCap` — runs
+    /// on a background queue, then hops back to the main actor to publish results,
+    /// dropping any pass superseded by a newer one.
     private func recompute() {
-        var result: [Highlight] = []
         let source = sourceText
-        let full = NSRange(location: 0, length: (source as NSString).length)
+        let currentMode = mode
+        let query = findQuery
+        let whole = wholeWord
+        let caseInsensitive = findCaseInsensitive
+        let slugs = stack
+        let searchQuery = search
+        let large = isLargeDoc
+        let cap = scanCap
 
-        if mode == .find {
-            if !findQuery.isEmpty,
-               let regex = RegexPatternLibrary.literalRegex(findQuery, wholeWord: wholeWord, caseInsensitive: findCaseInsensitive) {
-                regex.enumerateMatches(in: source, range: full) { match, _, _ in
-                    if let match, match.range.length > 0 { result.append(Highlight(range: match.range, colorIndex: 0)) }
+        generation += 1
+        let token = generation
+
+        scheduler.schedule {
+            let ns = source as NSString
+            let full = NSRange(location: 0, length: min(ns.length, cap))
+            var result: [Highlight] = []
+
+            if currentMode == .find {
+                if !query.isEmpty,
+                   let regex = RegexPatternLibrary.literalRegex(query, wholeWord: whole, caseInsensitive: caseInsensitive) {
+                    regex.enumerateMatches(in: source, range: full) { match, _, _ in
+                        if let match, match.range.length > 0 { result.append(Highlight(range: match.range, colorIndex: 0)) }
+                    }
+                }
+            } else {
+                for (index, slug) in slugs.enumerated() {
+                    guard let pattern = RegexPatternLibrary.pattern(slug: slug),
+                          let regex = RegexPatternLibrary.regex(for: pattern) else { continue }
+                    regex.enumerateMatches(in: source, range: full) { match, _, _ in
+                        if let match, match.range.length > 0 { result.append(Highlight(range: match.range, colorIndex: index)) }
+                    }
                 }
             }
-        } else {
-            for (index, slug) in stack.enumerated() {
-                guard let pattern = RegexPatternLibrary.pattern(slug: slug),
-                      let regex = RegexPatternLibrary.regex(for: pattern) else { continue }
-                regex.enumerateMatches(in: source, range: full) { match, _, _ in
-                    if let match, match.range.length > 0 { result.append(Highlight(range: match.range, colorIndex: index)) }
+
+            // Per-row counts only for the patterns the current search shows, and
+            // only for inline docs (the count badge is hidden for large docs).
+            var newCounts: [String: Int] = [:]
+            if !large && !searchQuery.isEmpty {
+                let scannedText = ns.length > cap ? ns.substring(to: cap) : source
+                for pattern in RegexPatternLibrary.search(searchQuery) {
+                    newCounts[pattern.slug] = RegexPatternLibrary.count(of: pattern, in: scannedText)
                 }
+            }
+
+            Task { @MainActor in
+                guard token == generation else { return }
+                highlights = result
+                counts = newCounts
+                // Rebuilt here (in a Task, off the render path) rather than in
+                // `body`, so an inline doc isn't re-styled on every keystroke.
+                if !large { highlightedText = Self.buildHighlightedText(source, highlights: result) }
             }
         }
-        highlights = result
     }
 
     // MARK: Mutations
@@ -524,5 +594,28 @@ import UniformTypeIdentifiers
         } catch {
             docNotice = "Couldn't save the file."
         }
+    }
+}
+
+/// Debounces matching and runs it off the main actor, cancelling any pending
+/// pass. The body hops back to the main actor itself to publish results.
+private final class RegexScratchpadDebounce: ObservableObject {
+    private var work: DispatchWorkItem?
+    private let delay: TimeInterval
+    private let queue = DispatchQueue(label: "metamorphia.regex-scratchpad", qos: .userInitiated)
+
+    init(delay: TimeInterval = 0.18) {
+        self.delay = delay
+    }
+
+    func schedule(_ body: @escaping () -> Void) {
+        work?.cancel()
+        let item = DispatchWorkItem(block: body)
+        work = item
+        queue.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    deinit {
+        work?.cancel()
     }
 }

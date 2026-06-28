@@ -17,10 +17,20 @@ public enum MathImageExporter {
     /// viewed larger than inline math).
     private static let exportFontSize: CGFloat = 28
 
+    /// Upper bound on the source length we'll rasterize. `ImageRenderer`
+    /// rasterizes the recursive `MathView` layout synchronously on the main
+    /// actor, so a pathologically large expression would freeze the UI for the
+    /// duration of the copy. We fail fast past this cap instead — callers
+    /// surface the existing "Failed" feedback. Generous enough that any normal
+    /// expression a person actually types passes through untouched.
+    private static let maxExportSourceLength = 4000
+
     /// Render LaTeX to a raster `NSImage`. `scale` multiplies the backing
-    /// resolution (use 2–3 for crisp output). Returns nil if rendering fails.
+    /// resolution (use 2–3 for crisp output). Returns nil if rendering fails or
+    /// the source is too large to rasterize safely.
     @MainActor
     public static func image(latex: String, display: Bool, scale: CGFloat, color: NSColor) -> NSImage? {
+        guard latex.count <= maxExportSourceLength else { return nil }
         let view = exportView(latex: latex, display: display, color: Color(nsColor: color))
         let renderer = ImageRenderer(content: view)
         renderer.scale = max(1, scale)
@@ -28,9 +38,11 @@ public enum MathImageExporter {
         return renderer.nsImage
     }
 
-    /// Render LaTeX to a single-page PDF document. Returns nil if rendering fails.
+    /// Render LaTeX to a single-page PDF document. Returns nil if rendering
+    /// fails or the source is too large to rasterize safely.
     @MainActor
     public static func pdf(latex: String, display: Bool, color: NSColor) -> Data? {
+        guard latex.count <= maxExportSourceLength else { return nil }
         let view = exportView(latex: latex, display: display, color: Color(nsColor: color))
         let renderer = ImageRenderer(content: view)
 

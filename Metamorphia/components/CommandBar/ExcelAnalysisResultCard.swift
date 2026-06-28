@@ -95,7 +95,7 @@ struct ExcelAnalysisResultCard: View {
 
     private func coefficientTable(_ coefficients: [RegressionCoefficient]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(coefficients, id: \.name) { coef in
+            ForEach(Array(coefficients.enumerated()), id: \.offset) { _, coef in
                 HStack(spacing: 6) {
                     Circle()
                         .fill(coef.isSignificant ? Color.green.opacity(0.8) : Color.white.opacity(0.2))
@@ -137,7 +137,7 @@ struct ExcelAnalysisResultCard: View {
 
     private func summaryTable(_ summaries: [ColumnSummary]) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            ForEach(summaries, id: \.name) { s in
+            ForEach(Array(summaries.enumerated()), id: \.offset) { _, s in
                 HStack(spacing: 6) {
                     Text(s.name)
                         .font(.system(size: 10, weight: .medium))

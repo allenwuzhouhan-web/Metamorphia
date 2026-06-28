@@ -78,12 +78,20 @@ enum RegexPatternLibrary {
     // MARK: Compiled regex (compile each pattern at most once)
 
     private static var cache: [String: NSRegularExpression] = [:]
+    /// Guards `cache` so matching can be driven off the main thread (see
+    /// RegexScratchpadView's debounced background pass) without racing the
+    /// main-actor reads that still build the row counts.
+    private static let cacheLock = NSLock()
 
     static func regex(for pattern: RegexPattern) -> NSRegularExpression? {
-        if let cached = cache[pattern.slug] { return cached }
+        cacheLock.lock()
+        if let cached = cache[pattern.slug] { cacheLock.unlock(); return cached }
+        cacheLock.unlock()
         let options: NSRegularExpression.Options = pattern.caseInsensitive ? [.caseInsensitive] : []
         guard let compiled = try? NSRegularExpression(pattern: pattern.pattern, options: options) else { return nil }
+        cacheLock.lock()
         cache[pattern.slug] = compiled
+        cacheLock.unlock()
         return compiled
     }
 

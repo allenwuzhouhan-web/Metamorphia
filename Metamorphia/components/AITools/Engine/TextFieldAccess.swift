@@ -12,6 +12,20 @@ import ApplicationServices
 @MainActor
 public enum TextFieldAccess {
 
+    /// Per-call AX timeout. Every `AXUIElementCopyAttributeValue` below runs
+    /// synchronously on the main thread and blocks until the *target* app
+    /// replies or this timeout fires. The system default is ~6s, so a single
+    /// hung target could freeze the notch UI for seconds per call across a
+    /// thousands-of-nodes walk. 0.5s keeps the worst case bounded while still
+    /// giving healthy apps ample time to answer.
+    private static let axMessagingTimeout: Float = 0.5
+
+    /// Tighten the messaging timeout on a freshly created root element so the
+    /// whole walk rooted at it inherits a bounded per-call latency.
+    private static func boundMessaging(_ element: AXUIElement) {
+        AXUIElementSetMessagingTimeout(element, axMessagingTimeout)
+    }
+
     // MARK: - Trust
 
     /// True if the app is a trusted accessibility client. UI can prompt when false.
@@ -58,7 +72,11 @@ public enum TextFieldAccess {
         }
 
         var collected = ""
-        collectText(from: root, into: &collected, maxChars: maxChars, depthBudget: 4_000)
+        // Keep the synchronous, on-main walk cheap: text fields/areas surface
+        // their content via a single AXValue, so a few hundred nodes is plenty.
+        // A 4,000-node crawl meant thousands of cross-process AX round-trips on
+        // the hotkey path — far too many to risk on the main thread.
+        collectText(from: root, into: &collected, maxChars: maxChars, depthBudget: 500)
 
         let trimmed = collected.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
@@ -102,13 +120,19 @@ public enum TextFieldAccess {
         }
         // Fallback: ask the system-wide element directly.
         let systemWide = AXUIElementCreateSystemWide()
+        boundMessaging(systemWide)
         return copyElementAttribute(systemWide, kAXFocusedUIElementAttribute)
     }
 
     /// The frontmost application's AX element.
     private static func focusedApplication() -> AXUIElement? {
         let systemWide = AXUIElementCreateSystemWide()
-        return copyElementAttribute(systemWide, kAXFocusedApplicationAttribute)
+        boundMessaging(systemWide)
+        guard let app = copyElementAttribute(systemWide, kAXFocusedApplicationAttribute) else { return nil }
+        // Bound every subsequent query into the target app (selection read,
+        // window harvest, the full tree walk) so a hung app can't stall main.
+        boundMessaging(app)
+        return app
     }
 
     // MARK: - Writing helpers
@@ -241,14 +265,18 @@ public enum TextFieldAccess {
         maxChars: Int,
         depthBudget: Int
     ) {
-        guard accumulator.count < maxChars else { return }
+        // Track the accumulated length explicitly so we never re-scan the whole
+        // grapheme sequence (`String.count` is O(current length)) on every
+        // visited node — that would make the harvest quadratic in accumulated text.
+        var length = accumulator.count
+        guard length < maxChars else { return }
 
         var remainingNodes = depthBudget
         // Iterative stack walk to avoid deep recursion on large windows.
         var stack: [AXUIElement] = [element]
 
         while let node = stack.popLast() {
-            if accumulator.count >= maxChars { return }
+            if length >= maxChars { return }
             remainingNodes -= 1
             if remainingNodes < 0 { return }
 
@@ -260,8 +288,8 @@ public enum TextFieldAccess {
             }
 
             if let text = readableText(of: node, role: role) {
-                appendText(text, to: &accumulator, maxChars: maxChars)
-                if accumulator.count >= maxChars { return }
+                length += appendText(text, to: &accumulator, currentLength: length, maxChars: maxChars)
+                if length >= maxChars { return }
             }
 
             // Push children in reverse so they're visited in natural order.
@@ -291,16 +319,25 @@ public enum TextFieldAccess {
     }
 
     /// Append `text` (plus a separator) without overflowing `maxChars`.
-    private static func appendText(_ text: String, to accumulator: inout String, maxChars: Int) {
+    /// `currentLength` is the caller's running grapheme count of `accumulator`,
+    /// passed in so we avoid an O(n) `String.count` rescan. Returns how many
+    /// characters were actually appended (separator included) so the caller can
+    /// keep its running length in sync.
+    private static func appendText(_ text: String, to accumulator: inout String, currentLength: Int, maxChars: Int) -> Int {
+        var appended = 0
         if !accumulator.isEmpty {
             accumulator.append("\n")
+            appended += 1
         }
-        let room = maxChars - accumulator.count
-        guard room > 0 else { return }
+        let room = maxChars - (currentLength + appended)
+        guard room > 0 else { return appended }
         if text.count <= room {
             accumulator.append(text)
+            appended += text.count
         } else {
             accumulator.append(String(text.prefix(room)))
+            appended += room
         }
+        return appended
     }
 }

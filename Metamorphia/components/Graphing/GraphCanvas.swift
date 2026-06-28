@@ -88,19 +88,19 @@ struct GraphCanvas: View {
         let yStep = niceStep(span: vp.height)
 
         var path = Path()
-        var x = (vp.minX / xStep).rounded(.up) * xStep
-        while x <= vp.maxX {
+        let startX = (vp.minX / xStep).rounded(.up) * xStep
+        for i in 0..<tickCount(start: startX, max: vp.maxX, step: xStep) {
+            let x = startX + Double(i) * xStep
             let sx = screen(CGPoint(x: x, y: 0), size, vp).x
             path.move(to: CGPoint(x: sx, y: 0))
             path.addLine(to: CGPoint(x: sx, y: size.height))
-            x += xStep
         }
-        var y = (vp.minY / yStep).rounded(.up) * yStep
-        while y <= vp.maxY {
+        let startY = (vp.minY / yStep).rounded(.up) * yStep
+        for i in 0..<tickCount(start: startY, max: vp.maxY, step: yStep) {
+            let y = startY + Double(i) * yStep
             let sy = screen(CGPoint(x: 0, y: y), size, vp).y
             path.move(to: CGPoint(x: 0, y: sy))
             path.addLine(to: CGPoint(x: size.width, y: sy))
-            y += yStep
         }
         context.stroke(path, with: .color(gridColor), lineWidth: 0.5)
     }
@@ -128,22 +128,31 @@ struct GraphCanvas: View {
         let labelY = min(max(origin.y + 11, 10), size.height - 6)
         let labelX = min(max(origin.x + 14, 16), size.width - 16)
 
-        var x = (vp.minX / xStep).rounded(.up) * xStep
-        while x <= vp.maxX {
+        let startX = (vp.minX / xStep).rounded(.up) * xStep
+        for i in 0..<tickCount(start: startX, max: vp.maxX, step: xStep) {
+            let x = startX + Double(i) * xStep
             if abs(x) > xStep * 0.01 {
                 let sx = screen(CGPoint(x: x, y: 0), size, vp).x
                 drawLabel(&context, format(x), at: CGPoint(x: sx, y: labelY))
             }
-            x += xStep
         }
-        var y = (vp.minY / yStep).rounded(.up) * yStep
-        while y <= vp.maxY {
+        let startY = (vp.minY / yStep).rounded(.up) * yStep
+        for i in 0..<tickCount(start: startY, max: vp.maxY, step: yStep) {
+            let y = startY + Double(i) * yStep
             if abs(y) > yStep * 0.01 {
                 let sy = screen(CGPoint(x: 0, y: y), size, vp).y
                 drawLabel(&context, format(y), at: CGPoint(x: labelX, y: sy))
             }
-            y += yStep
         }
+    }
+
+    /// Number of evenly spaced ticks from `start` to `max` (inclusive) at `step`, clamped
+    /// to a hard cap. Computed as an integer count so the draw loops always terminate even
+    /// if the viewport offset is so large that `start + step == start` in Double precision.
+    private func tickCount(start: Double, max: Double, step: Double) -> Int {
+        guard step > 0, start.isFinite, max.isFinite, max >= start else { return 0 }
+        let raw = Int((max - start) / step) + 1
+        return Swift.min(Swift.max(raw, 0), 2000)
     }
 
     private func drawLabel(_ context: inout GraphicsContext, _ text: String, at point: CGPoint) {
