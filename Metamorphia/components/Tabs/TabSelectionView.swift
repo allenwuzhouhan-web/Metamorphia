@@ -82,6 +82,16 @@ struct TabSelectionView: View {
             tabsArray.append(TabModel(label: "Stats", icon: "chart.xyaxis.line", view: .stats))
         }
 
+        if Defaults[.enableEquationFeature] {
+            tabsArray.append(TabModel(label: "Equation", icon: "x.squareroot", view: .equation))
+        }
+        if Defaults[.enableGraphingFeature] {
+            tabsArray.append(TabModel(label: "Graph", icon: "function", view: .graphing))
+        }
+        if Defaults[.enableScratchpads] {
+            tabsArray.append(TabModel(label: "Tools", icon: "wrench.and.screwdriver", view: .tools))
+        }
+
         if Defaults[.enableNotes] || (Defaults[.enableClipboardManager] && Defaults[.clipboardDisplayMode] == .separateTab) {
             let label = Defaults[.enableNotes] ? "Notes" : "Clipboard"
             let icon = Defaults[.enableNotes] ? "note.text" : "doc.on.clipboard"

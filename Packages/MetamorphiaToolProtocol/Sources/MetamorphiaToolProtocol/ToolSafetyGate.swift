@@ -29,10 +29,13 @@ public enum ToolPermissionDecision: Sendable {
 ///    at runtime). The gate persists the mapping into its policy store.
 /// 2. **Pre-call gating.** `checkPermission(toolName:arguments:)` is called by
 ///    ``ToolRegistry.execute`` before every tool dispatch. The concrete gate
-///    decides whether to allow, deny, or prompt the user. For backward compat
-///    with existing callers, a default implementation returns `.allow` for every
-///    call — so a gate that only wants to record tiers doesn't need to opt into
-///    gating.
+///    decides whether to allow, deny, or prompt the user.
+///
+/// AUDIT: the protocol-extension default now FAILS CLOSED (deny-with-reason). A
+/// conforming gate that forgot to implement `checkPermission` previously
+/// silently allowed every tool — a fail-open footgun. Any gate that genuinely
+/// wants to allow everything (e.g. ``NullToolSafetyGate``) must say so
+/// explicitly by overriding `checkPermission` to return `.allow`.
 ///
 /// If `nil` is passed to ``ToolRegistry``, safety gating is skipped entirely.
 public protocol ToolSafetyGate: AnyObject, Sendable {
@@ -46,11 +49,12 @@ public protocol ToolSafetyGate: AnyObject, Sendable {
 }
 
 public extension ToolSafetyGate {
-    /// Default: permit every call. Gates that only record tier metadata (e.g.,
-    /// the built-in ``NullToolSafetyGate``) get this for free — existing tests
-    /// and callers that don't supply `checkPermission` continue to work.
+    /// AUDIT: Default is now DENY-WITH-REASON (fail closed). A gate that conforms
+    /// without implementing `checkPermission` would otherwise wave through every
+    /// tool call. Gates that intentionally allow everything (e.g. the built-in
+    /// ``NullToolSafetyGate``) override this explicitly.
     func checkPermission(toolName: String, arguments: String) async -> ToolPermissionDecision {
-        .allow
+        .deny(reason: "No safety policy is configured for tool '\(toolName)'; denying by default.")
     }
 }
 
@@ -60,4 +64,10 @@ public extension ToolSafetyGate {
 public final class NullToolSafetyGate: ToolSafetyGate, @unchecked Sendable {
     public init() {}
     public func register(toolName: String, tier: ToolRiskTier) {}
+
+    /// Intentional opt-out: the null gate allows every call. This explicit
+    /// override is required now that the protocol default fails closed.
+    public func checkPermission(toolName: String, arguments: String) async -> ToolPermissionDecision {
+        .allow
+    }
 }

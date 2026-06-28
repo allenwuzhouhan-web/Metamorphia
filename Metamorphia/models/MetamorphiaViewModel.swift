@@ -290,6 +290,7 @@ class MetamorphiaViewModel: NSObject, ObservableObject {
                 detector.$fullscreenStatus
                     .map { $0[screenName] ?? false }
                     .removeDuplicates()
+                    .eraseToAnyPublisher()
             }
             .switchToLatest()
 
@@ -309,7 +310,7 @@ class MetamorphiaViewModel: NSObject, ObservableObject {
     // Computed property for effective notch height
     var effectiveClosedNotchHeight: CGFloat {
         let currentScreen = NSScreen.screens.first { $0.localizedName == screen }
-        let noNotchAndFullscreen = hideOnClosed && (currentScreen?.safeAreaInsets.top ?? 0 <= 0 || currentScreen == nil)
+        let noNotchAndFullscreen = hideOnClosed && ((currentScreen?.safeAreaInsets.top ?? 0) <= 0 || currentScreen == nil)
         return noNotchAndFullscreen ? 0 : closedNotchSize.height
     }
 
@@ -579,8 +580,8 @@ class MetamorphiaViewModel: NSObject, ObservableObject {
         case .notDetermined:
             isRequestingAuthorization = true
             webcamManager.checkAndRequestVideoAuthorization()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                self.isRequestingAuthorization = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                self?.isRequestingAuthorization = false
             }
 
         default:

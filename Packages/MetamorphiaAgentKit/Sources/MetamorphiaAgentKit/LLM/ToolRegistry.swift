@@ -655,10 +655,27 @@ public final class ToolRegistry: @unchecked Sendable {
             case .deny(let reason):
                 return "Error: Tool '\(toolName)' was blocked. \(reason)"
             }
+        } else if Self.builtInDenylist.contains(toolName) {
+            // No gate injected — fall back to a conservative built-in denylist so a
+            // mis-wired path can't dispatch known-destructive tools unsupervised.
+            // The app's real path injects a gate and never reaches this branch.
+            return "Error: Tool '\(toolName)' was blocked. No safety gate is configured; "
+                + "this tool can take destructive autonomous action and is denied by default."
         }
 
         return try await tool.execute(arguments: arguments)
     }
+
+    /// Conservative deny set used only when no ``ToolSafetyGate`` is injected.
+    /// Mirrors the destructive autonomous-input / file / process tools the app's
+    /// real gate classifies as critical. Read-only perception/web tools are NOT
+    /// listed so the nil-gate fallback doesn't wreck ordinary read paths.
+    private static let builtInDenylist: Set<String> = [
+        "computer_batch", "key_combo", "type", "press", "invoke_menu",
+        "drag", "swipe", "click_at",
+        "run_shell_command", "run_applescript", "run_python", "run_node", "run_ruby",
+        "kill_process", "file_operation", "write_file", "edit_file",
+    ]
 
     /// Synchronous lock-protected lookup. If the tool is deferred, it's promoted
     /// to active and caches are rebuilt before returning.

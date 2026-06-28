@@ -29,7 +29,7 @@ final class ShelfStateViewModel: ObservableObject {
     static let shared = ShelfStateViewModel()
 
     @Published private(set) var items: [ShelfItem] = [] {
-        didSet { ShelfPersistenceService.shared.save(items) }
+        didSet { scheduleSave() }
     }
 
     @Published var isLoading: Bool = false
@@ -45,9 +45,37 @@ final class ShelfStateViewModel: ObservableObject {
     // synchronous security-scoped bookmark resolve on every body recomputation.
     private let resolvedURLCache = NSCache<NSData, NSURL>()
 
+    // Debounced persistence: coalesce rapid mutations and run the JSON encode +
+    // atomic write off the main actor so the UI thread isn't blocked per change.
+    private var saveTask: Task<Void, Never>?
+
     private init() {
         resolvedURLCache.countLimit = 256
         items = ShelfPersistenceService.shared.load()
+        // The didSet above scheduled a redundant save of the just-loaded data;
+        // cancel it since the data is already persisted.
+        saveTask?.cancel()
+        saveTask = nil
+    }
+
+    private func scheduleSave() {
+        saveTask?.cancel()
+        let snapshot = items
+        saveTask = Task { [weak self] in
+            // Coalesce bursts of mutations into a single write.
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            await ShelfPersistenceWriter.shared.write(snapshot)
+            self?.saveTask = nil
+        }
+    }
+
+    /// Force any pending debounced save to flush immediately (e.g. on app
+    /// termination or other important transitions) so no data is lost.
+    func flushPendingSave() async {
+        saveTask?.cancel()
+        saveTask = nil
+        await ShelfPersistenceWriter.shared.write(items)
     }
 
 
@@ -94,6 +122,9 @@ final class ShelfStateViewModel: ObservableObject {
         withAnimation(.smooth(duration: 0.28)) {
             items.removeAll { $0.id == item.id }
         }
+        // Removal is destructive (stored data cleaned up); flush immediately so a
+        // crash before the debounce window can't resurrect the deleted item.
+        Task { await flushPendingSave() }
         ExtensionRPCServer.shared.notifyShelfItemsChanged(itemIDs: [item.id.uuidString], action: "removed")
     }
 
@@ -218,5 +249,15 @@ final class ShelfStateViewModel: ObservableObject {
             if let u = resolveFileURL(for: it) { urls.append(u) }
         }
         return urls
+    }
+}
+
+/// Serializes shelf persistence writes off the main actor so the JSON encode +
+/// atomic file write never block the UI thread, and never race each other.
+private actor ShelfPersistenceWriter {
+    static let shared = ShelfPersistenceWriter()
+
+    func write(_ items: [ShelfItem]) {
+        ShelfPersistenceService.shared.save(items)
     }
 }

@@ -49,6 +49,7 @@ public struct DocumentReviewFinding: Codable, Sendable, Hashable, Identifiable {
     public let suggestedRevision: String?
 
     enum CodingKeys: String, CodingKey {
+        case id
         case title
         case location
         case severity
@@ -77,7 +78,9 @@ public struct DocumentReviewFinding: Codable, Sendable, Hashable, Identifiable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = UUID()
+        // Preserve the persisted id when present; only mint a new one for legacy
+        // records that predate id persistence.
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         title = try container.decode(String.self, forKey: .title)
         location = try container.decode(String.self, forKey: .location)
         severity = try container.decode(DocumentReviewSeverity.self, forKey: .severity)
@@ -88,6 +91,7 @@ public struct DocumentReviewFinding: Codable, Sendable, Hashable, Identifiable {
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
         try container.encode(title, forKey: .title)
         try container.encode(location, forKey: .location)
         try container.encode(severity, forKey: .severity)
@@ -115,6 +119,9 @@ public struct DocumentReviewResult: Codable, Sendable, Hashable {
     public let summary: String
     public let nextStep: String?
     public let findings: [DocumentReviewFinding]
+    /// The document's purpose as stated by the user (or inferred from their request).
+    /// Set deterministically from the review route, not decoded from the model.
+    public let purpose: String?
 
     public init(
         documentTitle: String,
@@ -123,7 +130,8 @@ public struct DocumentReviewResult: Codable, Sendable, Hashable {
         sourceFilePath: String? = nil,
         summary: String,
         nextStep: String? = nil,
-        findings: [DocumentReviewFinding]
+        findings: [DocumentReviewFinding],
+        purpose: String? = nil
     ) {
         self.documentTitle = documentTitle
         self.documentKind = documentKind
@@ -132,6 +140,7 @@ public struct DocumentReviewResult: Codable, Sendable, Hashable {
         self.summary = summary
         self.nextStep = nextStep
         self.findings = findings
+        self.purpose = purpose
     }
 
     public func withSourceFilePath(_ path: String?) -> DocumentReviewResult {
@@ -142,7 +151,21 @@ public struct DocumentReviewResult: Codable, Sendable, Hashable {
             sourceFilePath: path,
             summary: summary,
             nextStep: nextStep,
-            findings: findings
+            findings: findings,
+            purpose: purpose
+        )
+    }
+
+    public func withPurpose(_ purpose: String?) -> DocumentReviewResult {
+        DocumentReviewResult(
+            documentTitle: documentTitle,
+            documentKind: documentKind,
+            sourceDescription: sourceDescription,
+            sourceFilePath: sourceFilePath,
+            summary: summary,
+            nextStep: nextStep,
+            findings: findings,
+            purpose: purpose
         )
     }
 }
@@ -157,5 +180,76 @@ public enum DocumentReviewAction: Sendable, Hashable {
         case .jump(let findingID), .insertComment(let findingID), .applySuggestedRevision(let findingID):
             return findingID
         }
+    }
+}
+
+/// Result of the verification pass run after the user has addressed and cleared
+/// all proofread comments. Either confirms the document is clean, or surfaces a
+/// short list of anything that genuinely remains.
+public struct DocumentRecheckResult: Codable, Sendable, Hashable {
+    public let documentTitle: String
+    public let purpose: String?
+    public let isClean: Bool
+    public let summary: String
+    public let remainingFindings: [DocumentReviewFinding]
+
+    public init(
+        documentTitle: String,
+        purpose: String? = nil,
+        isClean: Bool,
+        summary: String,
+        remainingFindings: [DocumentReviewFinding] = []
+    ) {
+        self.documentTitle = documentTitle
+        self.purpose = purpose
+        self.isClean = isClean
+        self.summary = summary
+        self.remainingFindings = remainingFindings
+    }
+}
+
+extension DocumentReviewFinding {
+    /// Hard ceiling on the comment body so proofread comments stay scannable.
+    public static let maxRationaleWords = 15
+
+    /// Caps the rationale to `maxRationaleWords` words. The prompt asks the model to
+    /// stay under the limit; this guarantees it regardless of what the model returns.
+    public func enforcingLimits() -> DocumentReviewFinding {
+        DocumentReviewFinding(
+            id: id,
+            title: title,
+            location: location,
+            severity: severity,
+            rationale: DocumentReviewFinding.capWords(rationale, limit: Self.maxRationaleWords),
+            anchorText: anchorText,
+            suggestedRevision: suggestedRevision
+        )
+    }
+
+    static func capWords(_ string: String, limit: Int) -> String {
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = trimmed.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" })
+        guard words.count > limit else { return trimmed }
+        return words.prefix(limit).joined(separator: " ")
+    }
+}
+
+extension DocumentReviewResult {
+    /// Caps every finding's rationale and drops findings that lack an exact replacement,
+    /// so every surviving finding can be rendered as a "Change to:" comment.
+    public func enforcingFindingLimits() -> DocumentReviewResult {
+        let kept = findings
+            .filter { $0.trimmedSuggestedRevision != nil }
+            .map { $0.enforcingLimits() }
+        return DocumentReviewResult(
+            documentTitle: documentTitle,
+            documentKind: documentKind,
+            sourceDescription: sourceDescription,
+            sourceFilePath: sourceFilePath,
+            summary: summary,
+            nextStep: nextStep,
+            findings: kept,
+            purpose: purpose
+        )
     }
 }

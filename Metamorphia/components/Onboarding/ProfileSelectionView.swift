@@ -202,87 +202,81 @@ struct ProfileCard: View {
 func applyProfileSettings(_ profiles: Set<String>) {
     // Clipboard is ALWAYS enabled (per user request)
     Defaults[.enableClipboardManager] = true
-    
-    // Developer Profile Settings
+
+    // Multi-profile application is DETERMINISTIC and order-independent (fix #1).
+    // Previously each profile's block ran in declaration order and the last
+    // block clobbered earlier ones, so selecting {Developer, Light Use} gave a
+    // different result than {Light Use, Developer}. Instead we OR-combine the
+    // feature enables (most-capable value wins) across every selected profile,
+    // so the result depends only on WHICH profiles are chosen, not the order.
+    //
+    // Single-profile behavior is identical: with exactly one profile each
+    // `contains(_:)` reduces to that profile's original block.
     let isDeveloper = profiles.contains("developer")
-    if isDeveloper {
-        Defaults[.enableColorPickerFeature] = true
-        Defaults[.enableStatsFeature] = true
-        Defaults[.enableTerminalFeature] = true
-        Defaults[.enableTimerFeature] = true
-        Defaults[.enableScreenAssistant] = true
-        Defaults[.showMirror] = false
-        Defaults[.enableMinimalisticUI] = false
-    }
-    
-    // Designer Profile Settings
     let isDesigner = profiles.contains("designer")
-    if isDesigner {
-        Defaults[.enableColorPickerFeature] = true
-        Defaults[.showMirror] = true
-        Defaults[.lightingEffect] = true
-        Defaults[.inlineHUD] = true
-        Defaults[.enableStatsFeature] = false
-        Defaults[.enableTimerFeature] = false
-        Defaults[.enableMinimalisticUI] = false
-        Defaults[.enableScreenAssistant] = false
-    }
-    
-    // Light Use Profile Settings
     let isLightUse = profiles.contains("lightuse")
-    if isLightUse {
-        Defaults[.enableMinimalisticUI] = true
-        Defaults[.enableColorPickerFeature] = false
-        Defaults[.showMirror] = false
-        Defaults[.enableStatsFeature] = false
-        Defaults[.enableTimerFeature] = true
-        Defaults[.inlineHUD] = true
-        Defaults[.enableScreenAssistant] = false
-        Defaults[.enableLyrics] = false
-    }
-    
-    // Student Profile Settings
     let isStudent = profiles.contains("student")
+
+    // Color picker: enabled by Developer or Designer.
+    Defaults[.enableColorPickerFeature] = isDeveloper || isDesigner
+
+    // Stats / Terminal / Screen Assistant: Developer-only capabilities.
+    Defaults[.enableStatsFeature] = isDeveloper
+    Defaults[.enableTerminalFeature] = isDeveloper
+    Defaults[.enableScreenAssistant] = isDeveloper
+
+    // Timer: enabled by Developer, Light Use, or Student.
+    Defaults[.enableTimerFeature] = isDeveloper || isLightUse || isStudent
+
+    // Mirror: Designer-only.
+    Defaults[.showMirror] = isDesigner
+
+    // Designer-specific visual effects (only meaningful when Designer selected).
+    if isDesigner {
+        Defaults[.lightingEffect] = true
+    }
+
+    // Inline HUD: Designer or Light Use.
+    if isDesigner || isLightUse {
+        Defaults[.inlineHUD] = true
+    }
+
+    // Calendar: Student.
     if isStudent {
-        Defaults[.enableTimerFeature] = true
         Defaults[.showCalendar] = true
-        Defaults[.enableColorPickerFeature] = false
-        Defaults[.showMirror] = false
-        Defaults[.enableStatsFeature] = false
-        Defaults[.enableMinimalisticUI] = false
-        Defaults[.enableScreenAssistant] = false
     }
-    
-    // If Light Use is NOT selected but others are, ensure minimalistic is OFF
-    if !isLightUse && !profiles.isEmpty {
-        Defaults[.enableMinimalisticUI] = false
-    }
-    
+
+    // Minimalistic UI: ONLY when Light Use is the sole selected profile.
+    // Any other (more capable) profile in the set keeps the full UI.
+    Defaults[.enableMinimalisticUI] = isLightUse && !isDeveloper && !isDesigner && !isStudent
+
     // Common settings for all profiles
     Defaults[.menubarIcon] = true
     Defaults[.enableHaptics] = true
-    
+
     // Lyrics disabled by default for all profiles
     Defaults[.enableLyrics] = false
-    
+
     // Weather widget defaults to inline style
     Defaults[.lockScreenWeatherWidgetStyle] = .inline
-    
+
     // Auto-detect notch: Island for non-notch Macs, standard notch otherwise
     if mainScreenHasNotch() {
         Defaults[.externalDisplayStyle] = .notch
     } else {
         Defaults[.externalDisplayStyle] = .island
     }
-    
+
     // Lock screen glass: custom liquid glass v11 on macOS 26+
     if #available(macOS 26.0, *) {
         Defaults[.lockScreenGlassStyle] = .liquid
         Defaults[.lockScreenGlassCustomizationMode] = .customLiquid
         Defaults[.lockScreenMusicLiquidGlassVariant] = .v11
     }
-    
+
+    #if DEBUG
     print("✅ Applied profile settings for: \(profiles.joined(separator: ", "))")
+    #endif
 }
 
 /// Returns `true` when the main screen has a physical notch (safe area insets > 0).

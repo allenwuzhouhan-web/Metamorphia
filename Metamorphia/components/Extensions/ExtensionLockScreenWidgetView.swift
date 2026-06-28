@@ -298,6 +298,10 @@ struct ExtensionWebContentView: NSViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.suppressesIncrementalRendering = false
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+        // Extensions render static HTML/CSS widgets; JavaScript is not needed and is the attack
+        // payload at lock-screen window level. Disable script execution. The app's minimum
+        // deployment target is macOS 14, so the modern (non-deprecated) preference fully covers it.
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
         let webView = ConfigurableWKWebView(frame: .zero, configuration: configuration)
         webView.allowInteraction = allowInteraction
         webView.navigationDelegate = context.coordinator

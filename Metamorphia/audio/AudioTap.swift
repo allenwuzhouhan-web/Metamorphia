@@ -29,9 +29,26 @@ import os.log
 private let audioTapLog = OSLog(subsystem: "com.johannendersmith.metamorphia", category: "AudioTap")
 
 #if DEBUG
-// Debug-only: track callback invocations. Mutated atomically from the real-time
-// IOProc and reset from audioQueue, so it must be an atomic to avoid a data race.
-private var callbackCount: Int64 = 0
+// Debug-only callback counter. Mutated from the real-time IOProc and reset from
+// audioQueue, so it's guarded by an unfair lock to avoid a data race. Compiled
+// out of release builds entirely.
+private var callbackCountLock = os_unfair_lock_s()
+private var callbackCount: Int = 0
+
+@inline(__always)
+private func incrementCallbackCount() -> Int {
+    os_unfair_lock_lock(&callbackCountLock)
+    callbackCount += 1
+    let value = callbackCount
+    os_unfair_lock_unlock(&callbackCountLock)
+    return value
+}
+
+private func resetCallbackCount() {
+    os_unfair_lock_lock(&callbackCountLock)
+    callbackCount = 0
+    os_unfair_lock_unlock(&callbackCountLock)
+}
 #endif
 
 // CoreAudio fires this on a high-priority background real-time thread.
@@ -47,8 +64,11 @@ let audioIOProc: AudioDeviceIOProc = {
     let bufferList = UnsafeMutableAudioBufferListPointer(mutableInputData)
 
     if let firstBuffer = bufferList.first, let data = firstBuffer.mData {
-        // CoreAudio gives us byte size, divide by 4 (Float size) to get array length
-        let floatCount = Int32(firstBuffer.mDataByteSize) / Int32(MemoryLayout<Float>.size)
+        // CoreAudio gives us byte size, divide by 4 (Float size) to get array length.
+        // Clamp against a non-negative bound so a bogus mDataByteSize can't drive an
+        // out-of-range loop or pass a negative count downstream.
+        let rawFloatCount = Int(firstBuffer.mDataByteSize) / MemoryLayout<Float>.size
+        let floatCount = Int32(max(0, min(rawFloatCount, Int(Int32.max))))
 
         let floatData = data.assumingMemoryBound(to: Float.self)
 
@@ -59,7 +79,7 @@ let audioIOProc: AudioDeviceIOProc = {
         // Debug-only diagnostics. The O(floatCount) scan and os_log calls must
         // never run inside the IOProc on the real-time thread in release builds —
         // they can take locks / allocate and cause audio glitches or watchdog kills.
-        let count = OSAtomicIncrement64(&callbackCount)
+        let count = incrementCallbackCount()
         if count % 1000 == 0 {
             // Calculate max absolute value in buffer to check if audio is present
             var maxVal: Float = 0.0
@@ -67,7 +87,7 @@ let audioIOProc: AudioDeviceIOProc = {
                 let absVal = abs(floatData[i])
                 if absVal > maxVal { maxVal = absVal }
             }
-            os_log(.debug, log: audioTapLog, "🔊 Audio callback fired %lld times, buffer size: %d, max amplitude: %f", count, floatCount, maxVal)
+            os_log(.debug, log: audioTapLog, "🔊 Audio callback fired %ld times, buffer size: %d, max amplitude: %f", count, floatCount, maxVal)
 
             // Also log the current band values from the bridge
             let mags = scanner.bridge.getSmoothedMagnitudes()
@@ -266,13 +286,10 @@ class AudioTap: NSObject {
 
         captureIsRunning = true
         #if DEBUG
-        // Atomically reset the debug counter so it doesn't race with the IOProc.
-        var current = callbackCount
-        while !OSAtomicCompareAndSwap64(current, 0, &callbackCount) {
-            current = callbackCount
-        }
-        #endif
+        // Reset the debug counter under the lock so it doesn't race with the IOProc.
+        resetCallbackCount()
         print("🟢 [AudioTap] CoreAudio CATap flowing through Aggregate Device!")
+        #endif
     }
     
     private func cleanupPartialSetup() {

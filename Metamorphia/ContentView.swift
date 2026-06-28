@@ -156,6 +156,11 @@ struct ContentView: View {
     @State private var hoverTask: Task<Void, Never>?
     @State private var isHovering: Bool = false
     @State private var lastHapticTime: Date = Date()
+    /// Stable token so a scratchpad tear-out drag keeps the notch open until release.
+    @State private var scratchpadDragToken = UUID()
+    /// True while a downward pan that began on the CLOSED notch is in progress — a long
+    /// such pull tears off the scratchpad tools picker (drag-from-notch).
+    @State private var downDragStartedClosed = false
     @State private var stickyTerminalClickMonitor: Any?
     @State private var hiddenEdgeHoverGlobalMonitor: Any?
     @State private var hiddenEdgeHoverLocalMonitor: Any?
@@ -446,6 +451,9 @@ struct ContentView: View {
                                 }
                             }
                         )
+                        // Draw a scratchpad tool out of the notch: a mouse drag off the
+                        // lip starts a gooey pull; a plain click still opens the notch.
+                        .notchToolPull(enabled: Defaults[.enableScratchpads])
                         .conditionalModifier(Defaults[.enableGestures]) { view in
                             view
                                 .panGesture(direction: .down) { translation, phase in
@@ -999,6 +1007,19 @@ struct ContentView: View {
                                 }
                             case .retrace:
                                 NotchRetraceView()
+                            case .equation:
+                                LaTeXScratchpadView()
+                            case .graphing:
+                                GraphingCalculatorView()
+                            case .tools:
+                                ScratchpadTrayView(
+                                    onActivate: { tool, point in
+                                        ScratchpadWindow.shared.present(tool: tool, at: point)
+                                    },
+                                    onDragStateChange: { active in
+                                        vm.setAutoCloseSuppression(active, token: scratchpadDragToken)
+                                    }
+                                )
                           }
                       }
                       .id(coordinator.currentView)
@@ -1010,6 +1031,26 @@ struct ContentView: View {
               .blur(radius: abs(gestureProgress) > 0.3 ? min(abs(gestureProgress), 8) : 0)
               .opacity(abs(gestureProgress) > 0.3 ? min(abs(gestureProgress * 2), 0.8) : 1)
               .animation(.smooth(duration: 0.3), value: coordinator.currentView)
+          }
+          // Closed-notch agent indicator (integration #5): when an agent run is
+          // streaming with the notch closed, surface a small pulsing dot in the
+          // right region. This composes ON TOP of whatever closed-notch live
+          // activity is already showing (music/timer/recording/etc.) instead of
+          // stealing a mutually-exclusive branch in the chain above. Hit testing
+          // is disabled so it never intercepts the closed-notch tap gesture —
+          // tapping the notch still opens it, where the command bar lives.
+          //
+          // The show/hide gate on `isProcessing` lives inside
+          // `AgentRunningLiveActivity` (which @ObservedObject's the view model),
+          // so the dot reacts to streaming state without ContentView having to
+          // observe the AICommandViewModel itself.
+          .overlay(alignment: .trailing) {
+              if vm.notchState == .closed && !vm.hideOnClosed && !lockScreenManager.isLocked,
+                 let agentViewModel = CommandBarCoordinator.shared.viewModel {
+                  AgentRunningLiveActivity(agentViewModel: agentViewModel)
+                      .frame(width: 40, height: vm.effectiveClosedNotchHeight + (isHovering ? 8 : 0))
+                      .allowsHitTesting(false)
+              }
           }
       }
 
@@ -1794,6 +1835,9 @@ struct ContentView: View {
 
     // MARK: - Private Methods
     private func openNotch() {
+        // A tool pull holds the mouse on the notch for a while; don't let that hold
+        // open the notch — it would drop the home/music panel down mid-pull.
+        guard !PullSession.shared.isEngaged else { return }
         withAnimation(.bouncy.speed(1.2)) {
             vm.open()
         }
@@ -1832,6 +1876,8 @@ struct ContentView: View {
     /// the long-term dual-activation feature, but it no longer affects
     /// the canonical click behavior.
     private func handleNotchTap() {
+        // Ignore the tap that ends a tool-pull drag.
+        guard !PullSession.shared.isEngaged else { return }
         hoverTask?.cancel()
 
         // A tap that lands on the waveform play/pause overlay or on a
@@ -1868,7 +1914,8 @@ struct ContentView: View {
     /// rationale as `handleNotchTap`.)
     private func handleNotchLongPress() {
         NSLog("🔔 [Metamorphia] handleNotchLongPress fired → open notch tabs")
-        guard vm.notchState == .closed,
+        guard !PullSession.shared.isEngaged,
+              vm.notchState == .closed,
               !isSneakPeekVisibleOnCurrentScreen else { return }
         if Defaults[.enableHaptics] {
             triggerHapticIfAllowed()
@@ -2208,6 +2255,27 @@ struct ContentView: View {
         // — the user is reading or scrolling the response transcript, not
         // asking to dismiss it. Dismissal is explicit (Esc / clear).
         if coordinator.currentView == .commandBar { return }
+
+        // Remember whether this downward pull began on the closed notch.
+        if phase == .began {
+            downDragStartedClosed = (vm.notchState == .closed)
+        }
+
+        // Drag-from-notch (option B): a pull that started on the closed notch and goes
+        // well past the open threshold tears off the scratchpad tools picker as a dark
+        // floating window at the cursor, instead of just opening the notch.
+        if phase == .ended,
+           downDragStartedClosed,
+           Defaults[.enableScratchpads],
+           translation > Defaults[.gestureSensitivity] * 1.8 {
+            if Defaults[.enableHaptics] { triggerHapticIfAllowed() }
+            ScratchpadWindow.shared.presentTray(at: NSEvent.mouseLocation)
+            withAnimation(.smooth) { gestureProgress = .zero }
+            if vm.notchState == .open { vm.close() }
+            downDragStartedClosed = false
+            return
+        }
+
         handleScrollGesture(isDownward: true, translation: translation, phase: phase)
     }
 

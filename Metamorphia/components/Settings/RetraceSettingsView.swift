@@ -75,7 +75,11 @@ struct RetraceSettingsView: View {
             }
 
             Section("Retention") {
-                Stepper(value: $retentionDays, in: 7...365, step: 7) {
+                // Step grid aligned so the persisted default (60 days, defined
+                // in RetraceDefaults) lands ON the grid (fix #10). The previous
+                // `step: 7` grid (7, 14, … 63) skipped 60, so the very first
+                // step from the default produced an off-grid value.
+                Stepper(value: $retentionDays, in: 5...365, step: 5) {
                     HStack {
                         Text("Keep indexed items for")
                         Spacer()

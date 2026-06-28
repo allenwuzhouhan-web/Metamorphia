@@ -47,7 +47,11 @@ struct LockScreenWeatherWidget: View {
 	@State private var calendarRowVisible: Bool = false
 	@State private var lastCalendarLine: String = ""
 	@State private var calendarRowRenderToken: Int = 0
-	@State private var lastBadgeLogKey: String = ""
+	@State private var widgetWidthRemeasureToken: Int = 0
+	/// Deferred remeasure pass after a calendar-event change. Held so it can be
+	/// cancelled on disappear / superseded by the next change (fix #5) — the
+	/// previous uncancelled `asyncAfter` mutated state after the row was gone.
+	@State private var deferredRemeasureWorkItem: DispatchWorkItem?
 	private var currentCalendarEventID: String {
 		nextCalendarEvent?.id ?? "no_event"
 	}
@@ -578,9 +582,21 @@ struct LockScreenWeatherWidget: View {
 		.onChange(of: lockScreenSelectedCalendarIDs) { _, _ in
 			Task { await calendarManager.updateLockScreenEvents(force: true) }
 		}
-		.onDisappear { minuteTicker.stop() }
+		.onDisappear {
+			minuteTicker.stop()
+			deferredRemeasureWorkItem?.cancel()
+			deferredRemeasureWorkItem = nil
+		}
+		// Single handler for calendar-event changes (fix #5): the previous
+		// duplicate `onChange(of: currentCalendarEventID)` pair is collapsed
+		// here, and the deferred remeasure is cancellable so it can't fire
+		// after the view disappears.
 		.onChange(of: currentCalendarEventID) { _, _ in
 			calendarRowRenderToken &+= 1
+			if nextCalendarEvent != nil {
+				widgetWidthRemeasureToken &+= 1
+			}
+
 			if let event = nextCalendarEvent {
 				let newLine = eventLineText(for: event)
 				if !newLine.isEmpty {
@@ -588,6 +604,16 @@ struct LockScreenWeatherWidget: View {
 				}
 				logBadgeColor(event: event, reason: "event-change")
 			}
+
+			deferredRemeasureWorkItem?.cancel()
+			let workItem = DispatchWorkItem {
+				calendarRowRenderToken &+= 1
+				if nextCalendarEvent != nil {
+					widgetWidthRemeasureToken &+= 1
+				}
+			}
+			deferredRemeasureWorkItem = workItem
+			DispatchQueue.main.asyncAfter(deadline: .now() + 0.20, execute: workItem)
 		}
 		.onChange(of: lockScreenReminderChipStyle) { _, _ in
 			if let event = nextCalendarEvent {
@@ -780,6 +806,9 @@ struct LockScreenWeatherWidget: View {
 		}
 
 		let badgeColor = reminderChipColor(for: event)
+		// NOTE (fix #5): no logging side-effect here — `calendarRowIconConfig`
+		// is invoked from view-builder properties during `body`. Badge-color
+		// logging is driven by the `.onAppear`/`.onChange` handlers instead.
 
 		if event.type.isReminder || event.calendar.isReminder {
 			if isReminderCritical(event) {
@@ -801,9 +830,6 @@ struct LockScreenWeatherWidget: View {
 	}
 
 	private func logBadgeColor(event: EventModel, reason: String) {
-		let key = "\(event.id)|\(lockScreenReminderChipStyle.rawValue)|\(isReminderCritical(event))|\(reason)"
-		lastBadgeLogKey = key
-
 		let color = reminderChipColor(for: event)
 		let nsColor = NSColor(color).usingColorSpace(.deviceRGB)
 		if let nsColor {

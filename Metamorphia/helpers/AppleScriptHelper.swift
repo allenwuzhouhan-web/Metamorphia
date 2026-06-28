@@ -78,18 +78,21 @@ class AppleScriptHelper {
 
     @discardableResult
     private class func executeWithoutTimeout(_ scriptText: String) async throws -> NSAppleEventDescriptor? {
-        try await withCheckedThrowingContinuation { continuation in
-            Task.detached(priority: .userInitiated) {
-                let script = NSAppleScript(source: scriptText)
-                var error: NSDictionary?
-                if let descriptor = script?.executeAndReturnError(&error) {
-                    continuation.resume(returning: descriptor)
-                } else if let error = error {
-                    continuation.resume(throwing: NSError(domain: "AppleScriptError", code: 1, userInfo: error as? [String: Any]))
-                } else {
-                    continuation.resume(throwing: NSError(domain: "AppleScriptError", code: 1, userInfo: [NSLocalizedDescriptionKey: "Unknown error"]))
-                }
+        // NSAppleScript is NOT thread-safe — the Carbon OSA engine must run on the
+        // main thread (it needs the main run loop / Apple Event Manager). Running it
+        // on a background/cooperative-pool thread intermittently returns nil or
+        // corrupts the engine (EXC_BAD_ACCESS in TUASFrame::UnlinkTo). Serialize on main.
+        try await MainActor.run {
+            guard let script = NSAppleScript(source: scriptText) else {
+                throw NSError(domain: "AppleScriptError", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "Failed to compile AppleScript"])
             }
+            var error: NSDictionary?
+            let descriptor = script.executeAndReturnError(&error)
+            if let error {
+                throw NSError(domain: "AppleScriptError", code: 1, userInfo: error as? [String: Any])
+            }
+            return descriptor
         }
     }
     

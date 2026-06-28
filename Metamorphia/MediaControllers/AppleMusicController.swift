@@ -54,8 +54,18 @@ class AppleMusicController: MediaControllerProtocol {
     private static let minimumArtworkSize = 16
 
     private var notificationTask: Task<Void, Never>?
-    private var lastCatalogArtworkKey: String?
-    private var cachedCatalogArtwork: Data?
+
+    /// Small bounded cache of catalog artwork keyed by `title|artist|album`.
+    /// A single-entry cache thrashed when the user toggled between two tracks;
+    /// keeping a few recent entries (with FIFO eviction) avoids redundant
+    /// iTunes Search requests without growing without bound.
+    private var catalogArtworkCache: [String: Data] = [:]
+    private var catalogArtworkOrder: [String] = []
+    private static let catalogArtworkCacheLimit = 8
+
+    /// Tracks the in-flight catalog artwork fetch so a new track can cancel a
+    /// stale one (mirrors Spotify's `artworkFetchTask` cancellation).
+    private var artworkFetchTask: Task<Data?, Never>?
 
     // MARK: - Initialization
     init() {
@@ -81,6 +91,7 @@ class AppleMusicController: MediaControllerProtocol {
     
     deinit {
         notificationTask?.cancel()
+        artworkFetchTask?.cancel()
     }
     
     // MARK: - Protocol Implementation
@@ -162,7 +173,13 @@ class AppleMusicController: MediaControllerProtocol {
         }
 
         updatedState.lastUpdated = Date()
-        self.playbackState = updatedState
+
+        // `updatePlaybackInfo` runs off the main thread (DistributedNotification
+        // observer / init Task). Publish the new state on the main actor.
+        let finalState = updatedState
+        await MainActor.run {
+            self.playbackState = finalState
+        }
     }
 
     // MARK: - Private Methods
@@ -170,10 +187,46 @@ class AppleMusicController: MediaControllerProtocol {
     private func fetchArtworkFromCatalog(title: String, artist: String, album: String) async -> Data? {
         let key = "\(title)|\(artist)|\(album)"
 
-        if key == lastCatalogArtworkKey, let cached = cachedCatalogArtwork {
+        if let cached = catalogArtworkCache[key] {
             return cached
         }
 
+        // A track change supersedes any in-flight catalog fetch so we don't keep
+        // an obsolete request alive (parity with Spotify's artworkFetchTask).
+        artworkFetchTask?.cancel()
+
+        let task = Task<Data?, Never> {
+            await Self.fetchArtworkData(title: title, artist: artist, album: album)
+        }
+        artworkFetchTask = task
+
+        let imageData = await task.value
+        // Only commit results from the latest fetch; a newer track will have
+        // replaced `artworkFetchTask` and cancelled this one.
+        guard artworkFetchTask == task else { return nil }
+        artworkFetchTask = nil
+        guard let imageData else { return nil }
+
+        storeCatalogArtwork(imageData, forKey: key)
+        return imageData
+    }
+
+    /// Inserts artwork into the bounded cache, evicting the oldest entry when
+    /// the cache is full (FIFO) so it never grows without bound.
+    private func storeCatalogArtwork(_ data: Data, forKey key: String) {
+        if catalogArtworkCache[key] == nil {
+            catalogArtworkOrder.append(key)
+            if catalogArtworkOrder.count > Self.catalogArtworkCacheLimit {
+                let evicted = catalogArtworkOrder.removeFirst()
+                catalogArtworkCache[evicted] = nil
+            }
+        }
+        catalogArtworkCache[key] = data
+    }
+
+    /// Performs the actual iTunes Search lookup. Pure/stateless so it can run
+    /// inside a cancellable Task without touching controller state.
+    private static func fetchArtworkData(title: String, artist: String, album: String) async -> Data? {
         // Search with title + artist only; including album in the query can
         // confuse the free-text search when names overlap. We validate the
         // album from the structured response fields instead.
@@ -206,8 +259,6 @@ class AppleMusicController: MediaControllerProtocol {
             guard let imageURL = URL(string: highResURL) else { return nil }
 
             let (imageData, _) = try await URLSession.shared.data(from: imageURL)
-            lastCatalogArtworkKey = key
-            cachedCatalogArtwork = imageData
             return imageData
         } catch {
             return nil

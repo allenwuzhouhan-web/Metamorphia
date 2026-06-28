@@ -31,7 +31,11 @@ final class ExtensionLiveActivityManager: ObservableObject {
     private let maxCapacityKey = Defaults.Keys.extensionLiveActivityCapacity
     private let eventBridge = ExtensionEventBridge.shared
     private var liveActivityObserver: NSObjectProtocol?
-    private var suppressBroadcast = false
+    // Depth counter rather than a bare bool so nested/re-entrant snapshot
+    // application restores the suppression state correctly (a bool would be
+    // cleared early if a published mutation synchronously re-entered).
+    private var snapshotApplyDepth = 0
+    private var suppressBroadcast: Bool { snapshotApplyDepth > 0 }
     private let currentProcessID = ProcessInfo.processInfo.processIdentifier
 
     private init() {
@@ -49,6 +53,12 @@ final class ExtensionLiveActivityManager: ObservableObject {
     }
 
     func present(descriptor: AtollLiveActivityDescriptor, bundleIdentifier: String) throws {
+        // Ownership: the descriptor's own bundle id must match the authorized caller's
+        // so a connection can't present content attributed to another bundle.
+        guard descriptor.bundleIdentifier == bundleIdentifier else {
+            logDiagnostics("Rejected live activity \(descriptor.id) from \(bundleIdentifier): bundle mismatch (descriptor: \(descriptor.bundleIdentifier))")
+            throw ExtensionValidationError.invalidDescriptor("Bundle identifier mismatch")
+        }
         guard authorizationManager.canProcessLiveActivityRequest(from: bundleIdentifier) else {
             logDiagnostics("Rejected live activity \(descriptor.id) from \(bundleIdentifier): scope disabled or bundle unauthorized")
             throw ExtensionValidationError.unauthorized
@@ -101,6 +111,10 @@ final class ExtensionLiveActivityManager: ObservableObject {
     }
 
     func update(descriptor: AtollLiveActivityDescriptor, bundleIdentifier: String) throws {
+        guard descriptor.bundleIdentifier == bundleIdentifier else {
+            logDiagnostics("Rejected live activity update \(descriptor.id) from \(bundleIdentifier): bundle mismatch (descriptor: \(descriptor.bundleIdentifier))")
+            throw ExtensionValidationError.invalidDescriptor("Bundle identifier mismatch")
+        }
         guard descriptor.isValid else {
             logDiagnostics("Rejected live activity update \(descriptor.id) from \(bundleIdentifier): descriptor validation failed")
             throw ExtensionValidationError.invalidDescriptor("Structure validation failed")
@@ -180,9 +194,9 @@ final class ExtensionLiveActivityManager: ObservableObject {
 
     private func applySnapshot(_ payloads: [ExtensionLiveActivityPayload], sourcePID: Int32) {
         guard sourcePID != currentProcessID else { return }
-        suppressBroadcast = true
+        snapshotApplyDepth += 1
+        defer { snapshotApplyDepth -= 1 }
         activeActivities = payloads.sorted(by: descriptorComparator)
-        suppressBroadcast = false
         logDiagnostics("Applied external live activity snapshot from PID \(sourcePID) (count: \(payloads.count))")
     }
 

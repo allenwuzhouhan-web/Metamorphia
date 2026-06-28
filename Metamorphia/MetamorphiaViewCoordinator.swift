@@ -103,7 +103,7 @@ class MetamorphiaViewCoordinator: ObservableObject {
     static let shared = MetamorphiaViewCoordinator()
     private var cancellables = Set<AnyCancellable>()
     
-    private static let tabOrder: [NotchViews] = [.home, .shelf, .markets, .news, .timer, .stats, .colorPicker, .notes, .clipboard, .terminal, .extensionExperience, .commandBar]
+    private static let tabOrder: [NotchViews] = [.home, .shelf, .markets, .news, .timer, .stats, .colorPicker, .equation, .graphing, .tools, .notes, .clipboard, .terminal, .extensionExperience, .commandBar]
     
     /// Direction of the most recent tab switch (true = forward/right, false = backward/left)
     @Published var tabSwitchForward: Bool = true
@@ -191,6 +191,27 @@ class MetamorphiaViewCoordinator: ObservableObject {
             }
             .store(in: &cancellables)
 
+        Defaults.publisher(.enableEquationFeature)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] change in
+                self?.handleEquationFeatureToggle(change.newValue)
+            }
+            .store(in: &cancellables)
+
+        Defaults.publisher(.enableGraphingFeature)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] change in
+                self?.handleGraphingFeatureToggle(change.newValue)
+            }
+            .store(in: &cancellables)
+
+        Defaults.publisher(.enableScratchpads)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] change in
+                self?.handleScratchpadsFeatureToggle(change.newValue)
+            }
+            .store(in: &cancellables)
+
         Defaults.publisher(.enableMinimalisticUI)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] change in
@@ -269,6 +290,27 @@ class MetamorphiaViewCoordinator: ObservableObject {
 
     private func handleTimerFeatureToggle(_ isEnabled: Bool) {
         guard !isEnabled, currentView == .timer else { return }
+        withAnimation(.smooth) {
+            currentView = .home
+        }
+    }
+
+    private func handleEquationFeatureToggle(_ isEnabled: Bool) {
+        guard !isEnabled, currentView == .equation else { return }
+        withAnimation(.smooth) {
+            currentView = .home
+        }
+    }
+
+    private func handleGraphingFeatureToggle(_ isEnabled: Bool) {
+        guard !isEnabled, currentView == .graphing else { return }
+        withAnimation(.smooth) {
+            currentView = .home
+        }
+    }
+
+    private func handleScratchpadsFeatureToggle(_ isEnabled: Bool) {
+        guard !isEnabled, currentView == .tools else { return }
         withAnimation(.smooth) {
             currentView = .home
         }
@@ -435,13 +477,18 @@ class MetamorphiaViewCoordinator: ObservableObject {
         didSet {
             if expandingView.show {
                 expandingViewTask?.cancel()
-                // Only auto-hide for battery, not for downloads (DownloadManager handles that)
+                // Auto-hide every expanding type except downloads, which
+                // DownloadManager dismisses itself when the transfer finishes.
                 if expandingView.type != .download {
                     let duration: TimeInterval = 3
+                    let showingType = expandingView.type
                     expandingViewTask = Task { [weak self] in
                         try? await Task.sleep(for: .seconds(duration))
                         guard let self = self, !Task.isCancelled else { return }
-                        self.toggleExpandingView(status: false, type: .battery)
+                        // Dismiss the type that's actually showing — mirrors the
+                        // sneakPeek auto-hide path — instead of always resetting
+                        // to .battery, which would dismiss the wrong content.
+                        self.toggleExpandingView(status: false, type: showingType)
                     }
                 }
             } else {

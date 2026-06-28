@@ -16,7 +16,7 @@ import Foundation
 /// All three providers are injected via the initializer; the package itself
 /// never imports AppKit. Use `NullSystemContextProvider`, `NullClipboardProvider`,
 /// and `NullSessionProvider` in tests or when a capability is disabled.
-public final class ImplicitContextMiddleware: AgentMiddleware {
+public final class ImplicitContextMiddleware: AgentMiddleware, @unchecked Sendable {
     public let name = "ImplicitContext"
 
     // MARK: - Dependencies
@@ -115,9 +115,15 @@ public final class ImplicitContextMiddleware: AgentMiddleware {
 
         let section = formatImplicitContext(contextParts, relevance: relevance)
 
+        // The frontmost-app name, window titles, clipboard descriptor, and file
+        // names are all attacker-influenceable (a malicious window title can carry
+        // an injection payload). Frame the section as untrusted data so the model
+        // treats it as ambient context, not instructions.
+        let framed = ExternalContentFraming.wrap(section, source: "implicit desktop context")
+
         if let sysIdx = ctx.messages.firstIndex(where: { $0.role == "system" }),
            let existing = ctx.messages[sysIdx].content {
-            ctx.messages[sysIdx] = ChatMessage(role: "system", content: existing + "\n\n" + section)
+            ctx.messages[sysIdx] = ChatMessage(role: "system", content: existing + "\n\n" + framed)
         }
 
         return .continue

@@ -43,7 +43,9 @@ private func screenCaptureEventCallback(eventType: Int32, _: Int32, _: Int32, co
     let manager = Unmanaged<ScreenRecordingManager>.fromOpaque(context).takeUnretainedValue()
     
     DispatchQueue.main.async {
+#if DEBUG
         print("ScreenRecordingManager: 📢 Screen capture event received (type: \(eventType))")
+#endif
         manager.checkRecordingStatus()
     }
 }
@@ -67,6 +69,8 @@ class ScreenRecordingManager: ObservableObject {
     private var recordingStartTime: Date?
     private var durationTimer: Timer?
     private var debounceIdleTask: Task<Void, Never>?
+    /// The private CGS notify-proc has no unregister API, so register it at most once
+    /// for the app lifetime and re-use it across start/stop cycles.
     private var hasRegisteredCallbacks = false
     
     // MARK: - Configuration
@@ -163,22 +167,28 @@ class ScreenRecordingManager: ObservableObject {
 
         if registered1 && registered2 {
             hasRegisteredCallbacks = true
+#if DEBUG
             print("ScreenRecordingManager: ✅ Private API notifications registered")
+#endif
         } else {
-            print("ScreenRecordingManager: ⚠️ Failed to register private API notifications")
+            NSLog("ScreenRecordingManager: ⚠️ Failed to register private API notifications")
         }
     }
     
     /// Check current recording status using private API
     func checkRecordingStatus() {
         let currentRecordingState = CGSIsScreenWatcherPresent()
-        
-        // Debug: Always log current check
+
+#if DEBUG
+        // Debug: log current check
         print("ScreenRecordingManager: 🔍 Checking... current=\(isRecording), detected=\(currentRecordingState)")
-        
+#endif
+
         // Debounce changes to avoid flickering
         if currentRecordingState != isRecording {
+#if DEBUG
             print("ScreenRecordingManager: 🔄 State change detected (\(isRecording) -> \(currentRecordingState))")
+#endif
             
             if currentRecordingState && !isRecording {
                 // Started recording

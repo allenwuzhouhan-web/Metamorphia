@@ -72,11 +72,19 @@ struct MarketTickerView: View {
 
     // MARK: - Formatting
 
-    private func formattedPrice(_ value: Double) -> String {
+    private static let priceFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
-        formatter.maximumFractionDigits = value >= 1000 ? 0 : 2
-        formatter.minimumFractionDigits = value >= 1000 ? 0 : 2
+        return formatter
+    }()
+
+    private func formattedPrice(_ value: Double) -> String {
+        // Reuse a shared formatter (configured per call) instead of allocating one
+        // on every row render. Safe: views render on the main thread.
+        let formatter = Self.priceFormatter
+        let digits = value >= 1000 ? 0 : 2
+        formatter.maximumFractionDigits = digits
+        formatter.minimumFractionDigits = digits
         return formatter.string(from: NSNumber(value: value)) ?? "—"
     }
 

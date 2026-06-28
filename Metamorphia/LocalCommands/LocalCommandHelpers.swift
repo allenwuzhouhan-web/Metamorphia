@@ -120,41 +120,33 @@ enum LocalCommandHelpers {
 
     // MARK: - AppleScript
 
-    /// Run an AppleScript string synchronously on a background thread.
-    /// Never call from MainActor — uses NSAppleScript which can block.
-    /// Returns the result string, or nil on error.
+    /// Runs an AppleScript string and returns the result, or nil on error.
+    /// NSAppleScript itself always executes on the main thread (see
+    /// `runAppleScriptDetailed`), so this is safe to call from any thread; the
+    /// Carbon OSA engine corrupts (EXC_BAD_ACCESS) if driven off-main.
     @discardableResult
     static func runAppleScript(_ source: String) -> String? {
         runAppleScriptDetailed(source).output
     }
 
-    /// Dedicated serial queue for NSAppleScript. Apple Events block the calling
-    /// thread until the target app replies (up to the Apple Event timeout), so
-    /// they must never run on the main thread (UI hang); the single serial queue
-    /// also keeps NSAppleScript work off arbitrary concurrent pool threads.
-    private static let appleScriptQueue = DispatchQueue(label: "com.metamorphia.applescript")
-
-    /// Async wrapper that runs `runAppleScript` on the dedicated background queue,
-    /// safe to `await` from the main actor without blocking it.
-    static func runAppleScriptOffMain(_ source: String) async -> String? {
-        await withCheckedContinuation { continuation in
-            appleScriptQueue.async {
-                continuation.resume(returning: runAppleScript(source))
-            }
-        }
-    }
-
     /// Same as `runAppleScript`, but preserves the AppleScript error text for UI diagnostics.
     static func runAppleScriptDetailed(_ source: String) -> AppleScriptRunResult {
-        var error: NSDictionary?
-        let script = NSAppleScript(source: source)
-        let result = script?.executeAndReturnError(&error)
-        if let err = error {
-            let message = appleScriptErrorMessage(err)
-            print("[LocalCmd] AppleScript error: \(message)")
-            return AppleScriptRunResult(output: nil, errorMessage: message)
+        // NSAppleScript must run on the main thread (Carbon OSA engine). Detection
+        // calls this from background detached tasks, so hop to main to avoid nil
+        // results and OSA-engine corruption (EXC_BAD_ACCESS).
+        func work() -> AppleScriptRunResult {
+            var error: NSDictionary?
+            let script = NSAppleScript(source: source)
+            let result = script?.executeAndReturnError(&error)
+            if let err = error {
+                let message = appleScriptErrorMessage(err)
+                print("[LocalCmd] AppleScript error: \(message)")
+                return AppleScriptRunResult(output: nil, errorMessage: message)
+            }
+            return AppleScriptRunResult(output: result?.stringValue, errorMessage: nil)
         }
-        return AppleScriptRunResult(output: result?.stringValue, errorMessage: nil)
+        if Thread.isMainThread { return work() }
+        return DispatchQueue.main.sync(execute: work)
     }
 
     private static func appleScriptErrorMessage(_ error: NSDictionary) -> String {

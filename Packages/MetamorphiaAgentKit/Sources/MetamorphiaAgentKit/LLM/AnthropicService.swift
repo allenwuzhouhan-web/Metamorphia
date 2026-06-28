@@ -40,6 +40,10 @@ public final class AnthropicService: LLMServiceProtocol, @unchecked Sendable {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        // AUDIT (LOW): the Anthropic API key is sent in the standard `x-api-key`
+        // request header over TLS — this is the provider-mandated auth mechanism,
+        // not a query param, so there is no log/proxy leakage beyond what any HTTPS
+        // header carries. No action required.
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue(anthropicVersion, forHTTPHeaderField: "anthropic-version")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

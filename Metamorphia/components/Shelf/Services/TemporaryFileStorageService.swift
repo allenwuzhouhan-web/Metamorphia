@@ -78,7 +78,16 @@ class TemporaryFileStorageService {
         
         switch type {
         case .data(let data, let suggestedName):
-            let filename = suggestedName ?? ".dat"
+            // Give raw-data files a real unique name + extension instead of a bare
+            // ".dat" (which produces a hidden, base-name-less file). Infer the
+            // extension from the data's content type when no name was suggested.
+            let filename: String
+            if let suggestedName, !suggestedName.isEmpty, suggestedName != ".dat" {
+                filename = suggestedName
+            } else {
+                let ext = Self.inferredFileExtension(for: data) ?? "dat"
+                filename = "file-\(uuid).\(ext)"
+            }
             let dirURL = tempDir.appendingPathComponent(uuid, isDirectory: true)
             let fileURL = dirURL.appendingPathComponent(filename)
             
@@ -132,6 +141,34 @@ class TemporaryFileStorageService {
         }
     }
     
+    /// Best-effort file-extension inference from the data's leading magic bytes,
+    /// so unnamed raw-data temp files get a meaningful extension.
+    private static func inferredFileExtension(for data: Data) -> String? {
+        guard data.count >= 4 else { return nil }
+        let bytes = [UInt8](data.prefix(12))
+
+        func startsWith(_ prefix: [UInt8]) -> Bool {
+            guard bytes.count >= prefix.count else { return false }
+            return Array(bytes.prefix(prefix.count)) == prefix
+        }
+
+        if startsWith([0x25, 0x50, 0x44, 0x46]) { return "pdf" }            // %PDF
+        if startsWith([0x89, 0x50, 0x4E, 0x47]) { return "png" }            // PNG
+        if startsWith([0xFF, 0xD8, 0xFF]) { return "jpg" }                  // JPEG
+        if startsWith([0x47, 0x49, 0x46, 0x38]) { return "gif" }            // GIF8
+        if startsWith([0x49, 0x49, 0x2A, 0x00]) || startsWith([0x4D, 0x4D, 0x00, 0x2A]) { return "tiff" } // TIFF
+        if startsWith([0x42, 0x4D]) { return "bmp" }                        // BM
+        if startsWith([0x50, 0x4B, 0x03, 0x04]) { return "zip" }            // PK..
+        // HEIC/HEIF: "ftyp" box at offset 4 with heic/heix/mif1 brand
+        if bytes.count >= 12, Array(bytes[4..<8]) == [0x66, 0x74, 0x79, 0x70] {
+            let brand = Array(bytes[8..<12])
+            if brand == [0x68, 0x65, 0x69, 0x63] || brand == [0x68, 0x65, 0x69, 0x78] || brand == [0x6D, 0x69, 0x66, 0x31] {
+                return "heic"
+            }
+        }
+        return nil
+    }
+
     private func createFile(at url: URL, data: Data) -> URL? {
         do {
             try data.write(to: url)

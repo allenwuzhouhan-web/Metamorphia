@@ -108,7 +108,21 @@ enum RPCValue: Codable {
     case object([String: RPCValue])
     case array([RPCValue])
 
+    /// Maximum nesting depth permitted when decoding untrusted RPC input. Beyond this the
+    /// decode fails fast, preventing CPU/stack exhaustion from maliciously deep JSON.
+    private static let maxDecodingDepth = 64
+
     init(from decoder: Decoder) throws {
+        // `codingPath` grows by one entry per nested container, so its length is the current
+        // nesting depth — use it to reject pathologically deep structures.
+        guard decoder.codingPath.count <= Self.maxDecodingDepth else {
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "JSON nesting exceeds maximum depth of \(Self.maxDecodingDepth)"
+                )
+            )
+        }
         let container = try decoder.singleValueContainer()
         if container.decodeNil() {
             self = .null

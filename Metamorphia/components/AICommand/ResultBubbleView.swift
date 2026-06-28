@@ -47,6 +47,24 @@ struct ResultBubbleView: View {
         return message.contains(where: { mathChars.contains($0) })
     }
 
+    /// True when the response contains real LaTeX math spans worth typesetting.
+    /// A display span (`$$…$$`, `\[…\]`) always qualifies. An inline `$…$` span
+    /// qualifies only when its body actually looks like math — so prose like
+    /// "$5 to $10" (currency) keeps the plain markdown path instead of rendering
+    /// as garbled math.
+    private var hasRenderableMath: Bool {
+        MathSpanScanner.split(message).contains {
+            switch $0 {
+            case .text:
+                return false
+            case .display:
+                return true
+            case .inline(let body):
+                return MathSpanScanner.looksLikeMath(body)
+            }
+        }
+    }
+
     private var isShort: Bool { message.count < 100 }
 
     init(
@@ -97,7 +115,10 @@ struct ResultBubbleView: View {
             // user can't discover — and cap long responses at a fixed
             // height the user can't see past.
             Group {
-                if let attributed = try? AttributedString(
+                if hasRenderableMath {
+                    // Typeset LaTeX inline (prose reflows; math rides the baseline).
+                    MathResultView(message, fontSize: 12, textColor: .white.opacity(0.92))
+                } else if let attributed = try? AttributedString(
                     markdown: isShort ? displayText : message,
                     options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
                 ) {

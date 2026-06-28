@@ -95,10 +95,19 @@ public final class AXObserverThread {
     // MARK: - Thread entry point
 
     @objc private func threadMain(_ readySemObj: AnyObject) {
-        let readySem = readySemObj as! DispatchSemaphore
+        guard let readySem = readySemObj as? DispatchSemaphore else { return }
 
-        // Capture the run loop before signalling ready.
-        let rl = CFRunLoopGetCurrent()!
+        // Capture the run loop before signalling ready. `CFRunLoopGetCurrent()`
+        // is documented non-null on a live thread, but guard rather than trap so
+        // a pathological failure logs + exits cleanly instead of crashing.
+        guard let rl = CFRunLoopGetCurrent() else {
+            #if DEBUG
+            print("[AXObserverThread] CFRunLoopGetCurrent() returned nil; observer thread aborting.")
+            #endif
+            // Unblock the waiter so start() doesn't hang forever.
+            readySem.signal()
+            return
+        }
 
         lock.withLock {
             _runLoop = rl
@@ -109,7 +118,15 @@ public final class AXObserverThread {
         var ctx = CFRunLoopSourceContext()
         ctx.version = 0
         ctx.perform = { _ in } // no-op
-        let keepAlive = CFRunLoopSourceCreate(nil, 0, &ctx)!
+        guard let keepAlive = CFRunLoopSourceCreate(nil, 0, &ctx) else {
+            #if DEBUG
+            print("[AXObserverThread] CFRunLoopSourceCreate failed; observer thread aborting.")
+            #endif
+            // Drop the run-loop reference we just published and unblock start().
+            lock.withLock { _runLoop = nil }
+            readySem.signal()
+            return
+        }
         CFRunLoopAddSource(rl, keepAlive, .commonModes)
 
         // Signal the calling thread that the run loop is ready.

@@ -45,6 +45,24 @@ public actor MCPHTTPClient: MCPTransport {
     // accumulating and the maxReconnectAttempts cap can eventually trip.
     private static let minStableSeconds: Double = 5
 
+    /// Cap on an accumulated HTTP/JSON response body (1 MB). Prevents a hostile or
+    /// broken server from driving unbounded memory growth via a never-ending body.
+    private static let maxBodyBytes = 1 * 1024 * 1024
+
+    /// Strip credential-shaped substrings from an error body before it is surfaced
+    /// in an `MCPError` (which round-trips into logs). Some servers reflect the
+    /// `Authorization` header in their error responses; this keeps the bearer token
+    /// out of logs while preserving the rest of the diagnostic text.
+    private static func redactBody(_ body: String) -> String {
+        var redacted = body
+        // Redact "Bearer <token>" anywhere in the body.
+        if let regex = try? NSRegularExpression(pattern: "(?i)bearer\\s+[A-Za-z0-9._\\-]+") {
+            let range = NSRange(redacted.startIndex..., in: redacted)
+            redacted = regex.stringByReplacingMatches(in: redacted, range: range, withTemplate: "Bearer [REDACTED]")
+        }
+        return String(redacted.prefix(2048))
+    }
+
     public init(name: String, url: URL, mode: TransportMode, headers: [String: String] = [:]) {
         self.serverName = name
         self.url = url
@@ -184,18 +202,27 @@ public actor MCPHTTPClient: MCPTransport {
         }
 
         guard (200...299).contains(http.statusCode) else {
+            // Cap the error body and redact it: some servers reflect request headers
+            // (including the bearer token) in error responses, and this body flows
+            // into MCPError.httpError, which is later printed in reconnect logs.
             var body = ""
-            for try await line in bytes.lines { body += line }
-            throw MCPError.httpError(statusCode: http.statusCode, body: body)
+            for try await line in bytes.lines {
+                body += line
+                if body.count >= Self.maxBodyBytes { break }
+            }
+            throw MCPError.httpError(statusCode: http.statusCode, body: Self.redactBody(body))
         }
 
         let contentType = http.value(forHTTPHeaderField: "Content-Type") ?? ""
 
         if contentType.contains("text/event-stream") {
-            return try await parseSSEForResponse(bytes: bytes, expectedId: id)
+            return try await parseSSEForResponse(bytes: bytes, expectedId: id, timeout: timeout)
         } else {
             var data = Data()
-            for try await byte in bytes { data.append(byte) }
+            for try await byte in bytes {
+                data.append(byte)
+                if data.count >= Self.maxBodyBytes { throw MCPError.invalidResponse }
+            }
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 throw MCPError.invalidResponse
             }
@@ -326,8 +353,8 @@ public actor MCPHTTPClient: MCPTransport {
         guard let http = response as? HTTPURLResponse else { throw MCPError.invalidResponse }
 
         guard (200...299).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw MCPError.httpError(statusCode: http.statusCode, body: body)
+            let body = String(data: data.prefix(Self.maxBodyBytes), encoding: .utf8) ?? ""
+            throw MCPError.httpError(statusCode: http.statusCode, body: Self.redactBody(body))
         }
 
         if !data.isEmpty,
@@ -394,12 +421,19 @@ public actor MCPHTTPClient: MCPTransport {
 
     private func parseSSEForResponse(
         bytes: URLSession.AsyncBytes,
-        expectedId: Int
+        expectedId: Int,
+        timeout: TimeInterval = 15
     ) async throws -> [String: Any] {
+        // Bound the SSE wait: if the expected id never arrives but the server keeps
+        // the stream open, fall back to a timeout rather than blocking up to the
+        // session's 300s request ceiling.
+        let deadline = Date().addingTimeInterval(timeout)
         var dataBuffer = ""
         for try await line in bytes.lines {
+            if Date() >= deadline { throw MCPError.timeout }
             if line.hasPrefix("data: ") {
                 dataBuffer += String(line.dropFirst(6))
+                if dataBuffer.count >= Self.maxBodyBytes { throw MCPError.invalidResponse }
             } else if line.isEmpty && !dataBuffer.isEmpty {
                 if let data = dataBuffer.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {

@@ -19,6 +19,7 @@
 import SwiftUI
 import Cocoa
 import Defaults
+import UniformTypeIdentifiers
 
 private func applyColorPickerCornerMask(_ view: NSView, radius: CGFloat) {
     view.wantsLayer = true
@@ -128,7 +129,7 @@ class ColorPickerPanel: NSPanel {
         contentView = hostingView
         
         // Set initial size
-        let preferredSize = CGSize(width: 450, height: 600)
+        let preferredSize = CGSize(width: 460, height: 680)
         hostingView.setFrameSize(preferredSize)
         setContentSize(preferredSize)
     }
@@ -209,14 +210,28 @@ struct ColorPickerPanelView: View {
     var body: some View {
         VStack(spacing: 0) {
             headerSection
-            
+
+            sectionPicker
+
             Divider()
                 .background(Color.gray.opacity(0.3))
-            
-            contentSection
+
+            if colorPickerManager.activeSection == .palette {
+                ScrollView {
+                    ColorPaletteView(wheelDiameter: 248)
+                        .padding(16)
+                }
+            } else {
+                contentSection
+            }
         }
         .background(ColorPickerVisualEffectView(material: .hudWindow, blendingMode: .behindWindow))
         .cornerRadius(12)
+        // Accept a dropped image ANYWHERE on the panel (not just the Palette tab) —
+        // it switches to Palette and extracts, so a drop never silently no-ops.
+        .onDrop(of: [.image, .fileURL], isTargeted: nil) { providers in
+            handlePanelImageDrop(providers)
+        }
         .alert("Delete Color", isPresented: $showingDeleteAlert) {
             Button("Cancel", role: .cancel) { }
             Button("Delete", role: .destructive) {
@@ -229,6 +244,37 @@ struct ColorPickerPanelView: View {
         }
     }
     
+    private func handlePanelImageDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first else { return false }
+        if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+            provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+                guard let data, let img = NSImage(data: data) else { return }
+                DispatchQueue.main.async { colorPickerManager.openPalette(with: img) }
+            }
+            return true
+        }
+        if provider.canLoadObject(ofClass: URL.self) {
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url, let img = NSImage(contentsOf: url) else { return }
+                DispatchQueue.main.async { colorPickerManager.openPalette(with: img) }
+            }
+            return true
+        }
+        return false
+    }
+
+    private var sectionPicker: some View {
+        Picker("", selection: $colorPickerManager.activeSection) {
+            ForEach(ColorPickerSection.allCases, id: \.self) { section in
+                Text(section.title).tag(section)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .padding(.horizontal, 16)
+        .padding(.bottom, 12)
+    }
+
     private var headerSection: some View {
         VStack(spacing: 12) {
             // Title and controls

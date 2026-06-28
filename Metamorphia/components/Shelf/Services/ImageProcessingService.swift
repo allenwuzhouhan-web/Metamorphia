@@ -30,8 +30,8 @@ import UniformTypeIdentifiers
 import ImageIO
 
 /// Options for image conversion
-struct ImageConversionOptions {
-    enum ImageFormat {
+struct ImageConversionOptions: Sendable {
+    enum ImageFormat: Sendable {
         case png, jpeg, heic, tiff, bmp
         
         var utType: UTType {
@@ -62,15 +62,25 @@ struct ImageConversionOptions {
 }
 
 /// Service for processing images (background removal, conversion, PDF creation)
-actor ImageProcessingService {
+///
+/// The heavy Vision/CoreImage/PDF work runs off the main actor (the public
+/// entry points hop onto a detached background task) so image processing never
+/// blocks the UI thread. The processing helpers are `nonisolated` accordingly.
+final class ImageProcessingService: Sendable {
     static let shared = ImageProcessingService()
 
     private init() {}
 
     // MARK: - Remove Background
-    
+
     /// Removes the background from an image using Vision framework
     func removeBackground(from url: URL) async throws -> URL? {
+        try await Task.detached(priority: .userInitiated) {
+            try await Self.performRemoveBackground(from: url)
+        }.value
+    }
+
+    private nonisolated static func performRemoveBackground(from url: URL) async throws -> URL? {
         guard let inputImage = NSImage(contentsOf: url) else {
             throw ImageProcessingError.invalidImage
         }
@@ -90,8 +100,8 @@ actor ImageProcessingService {
         
         let mask = try result.generateScaledMaskForImage(forInstances: result.allInstances, from: handler)
         
-        let output = try await applyMask(mask, to: cgImage)
-        
+        let output = try Self.applyMask(mask, to: cgImage)
+
         let processedImage = NSImage(cgImage: output, size: inputImage.size)
         
         // Create temporary file
@@ -113,7 +123,7 @@ actor ImageProcessingService {
         return tempURL
     }
     
-    private func applyMask(_ mask: CVPixelBuffer, to image: CGImage) async throws -> CGImage {
+    private nonisolated static func applyMask(_ mask: CVPixelBuffer, to image: CGImage) throws -> CGImage {
         let ciImage = CIImage(cgImage: image)
         let maskImage = CIImage(cvPixelBuffer: mask)
         
@@ -138,24 +148,30 @@ actor ImageProcessingService {
     
     /// Converts an image with specified options
     func convertImage(from url: URL, options: ImageConversionOptions) async throws -> URL? {
+        try await Task.detached(priority: .userInitiated) {
+            try await Self.performConvertImage(from: url, options: options)
+        }.value
+    }
+
+    private nonisolated static func performConvertImage(from url: URL, options: ImageConversionOptions) async throws -> URL? {
         guard var inputImage = NSImage(contentsOf: url) else {
             throw ImageProcessingError.invalidImage
         }
-        
+
         // Scale image if needed
         if let maxDim = options.maxDimension {
             inputImage = scaleImage(inputImage, maxDimension: maxDim)
         }
-        
+
         // Get image data based on format
         let imageData: Data?
-        
+
         if options.removeMetadata {
             // Create new image without metadata
             guard let cgImage = inputImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
                 throw ImageProcessingError.invalidImage
             }
-            
+
             let newImage = NSImage(cgImage: cgImage, size: inputImage.size)
             imageData = try convertToFormat(newImage, format: options.format, quality: options.compressionQuality)
         } else {
@@ -179,7 +195,7 @@ actor ImageProcessingService {
         return tempURL
     }
     
-    private func convertToFormat(_ image: NSImage, format: ImageConversionOptions.ImageFormat, quality: Double) throws -> Data? {
+    private nonisolated static func convertToFormat(_ image: NSImage, format: ImageConversionOptions.ImageFormat, quality: Double) throws -> Data? {
         guard let tiffData = image.tiffRepresentation,
               let bitmap = NSBitmapImageRep(data: tiffData) else {
             return nil
@@ -215,7 +231,7 @@ actor ImageProcessingService {
         }
     }
     
-    private func scaleImage(_ image: NSImage, maxDimension: CGFloat) -> NSImage {
+    private nonisolated static func scaleImage(_ image: NSImage, maxDimension: CGFloat) -> NSImage {
         guard maxDimension > 0 else { return image }
 
         guard let srcCG = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
@@ -255,10 +271,16 @@ actor ImageProcessingService {
     
     /// Creates a PDF from multiple image URLs
     func createPDF(from imageURLs: [URL], outputName: String? = nil) async throws -> URL? {
+        try await Task.detached(priority: .userInitiated) {
+            try await Self.performCreatePDF(from: imageURLs, outputName: outputName)
+        }.value
+    }
+
+    private nonisolated static func performCreatePDF(from imageURLs: [URL], outputName: String?) async throws -> URL? {
         guard !imageURLs.isEmpty else {
             throw ImageProcessingError.noImagesProvided
         }
-        
+
         let pdfDocument = PDFDocument()
         
         for url in imageURLs {

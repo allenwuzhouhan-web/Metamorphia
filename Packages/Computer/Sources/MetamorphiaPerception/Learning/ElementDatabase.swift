@@ -1,9 +1,12 @@
 import Foundation
 import SQLite3
 
-/// Tells SQLite to copy bound bytes immediately, so no caller-side buffer
-/// lifetime is relied upon (SQLITE_STATIC would trust the pointer to outlive
-/// the bind call, which a temporary String/NSString buffer does not).
+/// SQLite's `SQLITE_TRANSIENT` sentinel destructor. Tells SQLite to copy the
+/// bound bytes immediately, so no caller-side buffer lifetime is relied upon.
+/// Passing `nil` (SQLITE_STATIC) instead would trust the pointer to outlive the
+/// bind call, which a temporary String/NSString buffer does not — a
+/// use-after-free, since the backing buffer can be released before
+/// `sqlite3_step` runs.
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 /// Persistent SQLite database for learned element identities, corrections, workflows, and app profiles.
@@ -595,6 +598,9 @@ public final class ElementDatabase: @unchecked Sendable {
     // MARK: - SQLite Helpers
 
     private func bindText(_ stmt: OpaquePointer?, _ index: Int32, _ value: String) {
+        // `withCString` keeps the buffer valid for the duration of the closure, and
+        // SQLITE_TRANSIENT makes SQLite copy it immediately — so nothing relies on a
+        // temporary buffer surviving past the bind call.
         value.withCString { sqlite3_bind_text(stmt, index, $0, -1, SQLITE_TRANSIENT) }
     }
 

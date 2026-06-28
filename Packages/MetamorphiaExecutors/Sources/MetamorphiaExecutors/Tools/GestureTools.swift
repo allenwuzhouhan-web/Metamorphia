@@ -3,6 +3,14 @@ import CoreGraphics
 import MetamorphiaAgentKit
 import MetamorphiaPerception
 
+// AUDIT: These tools synthesize real HID events into the frontmost app and are
+// therefore NOT read-only. Their names — `click_at`, `double_click_at`,
+// `right_click_at`, `drag`, `swipe`, `long_press`, `type_text`, `key_combo`,
+// `move_mouse` — are classified `.elevated` (never `.safe`) in
+// `MetamorphiaToolSafetyGate.defaultElevatedTools`, and `PerceptionSafetyInspector`
+// escalates the dangerous ones to `.critical`. Keep these names in sync with
+// that set; adding a new destructive gesture tool requires updating the gate.
+
 // MARK: - ClickAtTool
 
 /// Synthesize a mouse click at a screen coordinate. Replaces the slow

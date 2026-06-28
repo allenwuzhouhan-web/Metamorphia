@@ -338,7 +338,15 @@ final class SystemTimerBridge {
             guard let self else { return }
             self.logRestartWorkItem = nil
             let started = self.startLogStream()
-            if !started, AXIsProcessTrusted(), self.ticker == nil {
+            if started {
+                // The log stream is authoritative; tear down the redundant 1s AX
+                // polling ticker that was armed as a fallback during the gap.
+                if self.ticker != nil {
+                    self.ticker?.cancel()
+                    self.ticker = nil
+                    self.logDebug("Log stream resumed; AX ticker torn down")
+                }
+            } else if AXIsProcessTrusted(), self.ticker == nil {
                 self.setupTicker()
             }
         }

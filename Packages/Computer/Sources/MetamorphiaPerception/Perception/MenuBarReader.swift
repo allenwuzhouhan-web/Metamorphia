@@ -39,6 +39,12 @@ public enum MenuBarReader {
     /// Cache TTL in seconds. Menu bars are stable — most app-lifetime-long.
     public static let cacheTTL: TimeInterval = 30.0
 
+    /// Upper bound on the number of per-pid cache entries. Without this the cache
+    /// grows unbounded (one entry per app ever read, never evicted), since entries
+    /// are only dropped on explicit `invalidateCache`. When full, the
+    /// least-recently-captured entry is evicted to make room.
+    public static let maxCacheEntries: Int = 64
+
     // MARK: - Cache
 
     private struct CacheEntry {
@@ -89,9 +95,22 @@ public enum MenuBarReader {
 
         cacheLock.lock()
         cache[pid] = CacheEntry(items: items, capturedAt: Date())
+        evictIfNeededLocked()
         cacheLock.unlock()
 
         return items
+    }
+
+    /// Evict the oldest entries until the cache is within `maxCacheEntries`.
+    /// Caller must hold `cacheLock`.
+    private static func evictIfNeededLocked() {
+        guard cache.count > maxCacheEntries else { return }
+        // Drop the least-recently-captured entries first.
+        let sorted = cache.sorted { $0.value.capturedAt < $1.value.capturedAt }
+        let overflow = cache.count - maxCacheEntries
+        for (pid, _) in sorted.prefix(overflow) {
+            cache.removeValue(forKey: pid)
+        }
     }
 
     /// Invoke a menu item identified by its title path (e.g. `["File", "Export…", "glTF 2.0"]`).

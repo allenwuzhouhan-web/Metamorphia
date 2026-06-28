@@ -120,6 +120,11 @@ public final class AXObserverPool: @unchecked Sendable {
 
     private let lock = NSLock()
     private var attachments: [pid_t: Attachment] = [:]
+    /// pids for which a `detach` arrived while an `attach` was still in flight
+    /// (between `attach()` returning and `performAttach` storing the record).
+    /// `performAttach` consults this set so the freshly-created observer is torn
+    /// down instead of leaked when the caller already asked to detach.
+    private var pendingDetach: Set<pid_t> = []
     private var workspaceObserver: NSObjectProtocol?
     private var workspaceTerminateObserver: NSObjectProtocol?
     private var started = false
@@ -210,8 +215,14 @@ public final class AXObserverPool: @unchecked Sendable {
     public func attach(pid: pid_t, bundleID: String?) -> Handle? {
         guard AXIsProcessTrusted() else { return nil }
 
-        // Idempotency: return existing Handle if already attached.
-        if let existing = lock.withLock({ attachments[pid] }) {
+        // Idempotency: return existing Handle if already attached. Also clear any
+        // stale pending-detach for this pid — a fresh attach intent supersedes a
+        // detach that arrived before the previous attach landed, so performAttach
+        // must not tear this new observer down.
+        if let existing = lock.withLock({ () -> Attachment? in
+            pendingDetach.remove(pid)
+            return attachments[pid]
+        }) {
             return Handle(pid: existing.pid, bundleID: existing.bundleID, attachedAt: existing.attachedAt)
         }
 
@@ -238,8 +249,20 @@ public final class AXObserverPool: @unchecked Sendable {
     }
 
     /// Detach the observer for `pid`. No-op if `pid` is not attached.
+    ///
+    /// If an `attach` for the same pid is still in flight on the observer thread
+    /// (the record isn't stored yet), we mark the pid pending-detach so
+    /// `performAttach` tears the new observer down instead of leaking it.
     public func detach(pid: pid_t) {
-        let attachment = lock.withLock { attachments.removeValue(forKey: pid) }
+        let attachment = lock.withLock { () -> Attachment? in
+            if let existing = attachments.removeValue(forKey: pid) {
+                return existing
+            }
+            // No record yet — an attach may be in flight. Record the intent so
+            // performAttach cleans up when it lands.
+            pendingDetach.insert(pid)
+            return nil
+        }
         guard let attachment = attachment else { return }
         scheduleDetachCleanup(attachment)
     }
@@ -306,9 +329,14 @@ public final class AXObserverPool: @unchecked Sendable {
             contextPtr: ctxPtr
         )
 
-        lock.withLock {
-            // Guard against a concurrent detach that arrived while we were on
-            // the observer thread. If the slot was already removed, clean up.
+        let shouldTearDown: Bool = lock.withLock {
+            // A detach arrived while we were attaching on the observer thread —
+            // honor it: do NOT store, tear the just-created observer down so it
+            // isn't leaked.
+            if pendingDetach.remove(pid) != nil {
+                return true
+            }
+            // Guard against a concurrent attach that already filled the slot.
             guard attachments[pid] == nil else {
                 // Already replaced (edge case) — undo the run-loop source and
                 // notification registrations this performAttach already installed,
@@ -319,18 +347,25 @@ public final class AXObserverPool: @unchecked Sendable {
                 }
                 CFRunLoopRemoveSource(runLoop, AXObserverGetRunLoopSource(observer), .defaultMode)
                 Unmanaged<AXObserverCallbackContext>.fromOpaque(ctxPtr).release()
-                return
+                return false
             }
             attachments[pid] = record
+            return false
+        }
+
+        if shouldTearDown {
+            // We're already on the observer thread, so clean up inline rather
+            // than re-scheduling. Mirrors scheduleDetachCleanup's teardown.
+            Self.teardownObserver(record)
         }
     }
 
-    // MARK: - Internal: observer-thread detach
-
-    private func scheduleDetachCleanup(_ attachment: Attachment) {
-        AXObserverThread.shared.perform {
-            guard let runLoop = AXObserverThread.shared.runLoopRef() else { return }
-
+    /// Synchronously tear down an observer's run-loop source, notifications, and
+    /// retained callback context. Safe to call only on the AXObserverThread.
+    /// `static` so the detach block needn't capture (and risk outliving / dropping)
+    /// `self` — the teardown only needs the attachment and shared statics.
+    private static func teardownObserver(_ attachment: Attachment) {
+        if let runLoop = AXObserverThread.shared.runLoopRef() {
             for notifName in AXObserverPool.watchedNotifications {
                 AXObserverRemoveNotification(
                     attachment.observer,
@@ -338,15 +373,23 @@ public final class AXObserverPool: @unchecked Sendable {
                     notifName as CFString
                 )
             }
-
             CFRunLoopRemoveSource(
                 runLoop,
                 AXObserverGetRunLoopSource(attachment.observer),
                 .defaultMode
             )
+        }
+        // Balance the passRetained from attach().
+        Unmanaged<AXObserverCallbackContext>.fromOpaque(attachment.contextPtr).release()
+    }
 
-            // Balance the passRetained from attach().
-            Unmanaged<AXObserverCallbackContext>.fromOpaque(attachment.contextPtr).release()
+    // MARK: - Internal: observer-thread detach
+
+    private func scheduleDetachCleanup(_ attachment: Attachment) {
+        AXObserverThread.shared.perform {
+            // Always release the retained context, even if the run loop is gone —
+            // teardownObserver releases unconditionally so the context can't leak.
+            AXObserverPool.teardownObserver(attachment)
         }
     }
 

@@ -55,11 +55,14 @@ public final class WorkspaceTriggerSource {
 
     // MARK: - CG callback registration guard
 
-    /// True while the CG reconfig callback is registered. Registered in start()
-    /// and removed in stop() so the process-global callback never outlives the
-    /// logically-stopped source. CGDisplayRemoveReconfigurationCallback matches
-    /// on the exact (function pointer, userInfo) pair, so re-registering with the
-    /// same callback and self pointer on a later start() is valid.
+    /// True while the CG reconfig callback is registered. The callback passes
+    /// `Unmanaged.passUnretained(self)` as its context, so it MUST be removed
+    /// (via `CGDisplayRemoveReconfigurationCallback`, which requires the exact
+    /// same C-function pointer + context) before this object deallocates —
+    /// otherwise the C callback dereferences freed memory on the next display
+    /// reconfiguration. We balance register in `start()` with remove in `stop()`
+    /// / `deinit`. Re-registering with the same callback and self pointer on a
+    /// later `start()` is valid because the remove matches on that exact pair.
     private var didRegisterCGCallback = false
 
     // MARK: - Init
@@ -129,7 +132,9 @@ public final class WorkspaceTriggerSource {
             ) { [weak self] _ in self?.bus.post(.systemWake) }
         )
 
-        // Display reconfiguration — register the C callback only once.
+        // Display reconfiguration — register the C callback. Balanced by the
+        // matching CGDisplayRemoveReconfigurationCallback in stop()/deinit so the
+        // callback can never fire after self deallocates.
         if !didRegisterCGCallback {
             didRegisterCGCallback = true
             CGDisplayRegisterReconfigurationCallback(
@@ -167,13 +172,7 @@ public final class WorkspaceTriggerSource {
         // Remove the process-global reconfiguration callback so no stale
         // .displayConfigurationChanged events post after stop() and the callback
         // no longer holds this instance's self pointer once it is deallocated.
-        if didRegisterCGCallback {
-            CGDisplayRemoveReconfigurationCallback(
-                cgReconfigCallback,
-                Unmanaged.passUnretained(self).toOpaque()
-            )
-            didRegisterCGCallback = false
-        }
+        removeCGReconfigCallback()
 
         started = false
     }
@@ -181,16 +180,31 @@ public final class WorkspaceTriggerSource {
     // MARK: - Deinit
 
     deinit {
-        // Balance the CG reconfiguration registration so the process-global
-        // callback no longer holds this instance's (now dangling) self pointer.
-        // CGDisplayRemoveReconfigurationCallback matches on the exact
-        // (function pointer, userInfo) pair, so passing the same callback and
-        // self pointer removes precisely this instance's registration.
+        // The CG reconfig callback captures an unretained pointer to self, so it
+        // must be removed before deallocation or it will deref freed memory on
+        // the next display reconfiguration. CGDisplayRemoveReconfigurationCallback
+        // matches on the exact (function pointer, userInfo) pair, so passing the
+        // same callback and self pointer removes precisely this instance's
+        // registration. The function pointer and context are both fixed values,
+        // so this is safe to call from deinit.
         if didRegisterCGCallback {
             CGDisplayRemoveReconfigurationCallback(
                 cgReconfigCallback,
                 Unmanaged.passUnretained(self).toOpaque()
             )
         }
+    }
+
+    // MARK: - CG callback teardown
+
+    /// Remove the CG reconfiguration callback registered in `start()`, using the
+    /// exact same function pointer + context the API requires for a match.
+    private func removeCGReconfigCallback() {
+        guard didRegisterCGCallback else { return }
+        didRegisterCGCallback = false
+        CGDisplayRemoveReconfigurationCallback(
+            cgReconfigCallback,
+            Unmanaged.passUnretained(self).toOpaque()
+        )
     }
 }

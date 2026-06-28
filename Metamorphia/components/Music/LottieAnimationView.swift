@@ -30,12 +30,16 @@ struct LottieAnimationView: View {
     /// unmounted so its render loop is torn down (matching the sibling
     /// AudioVisualizerView, which stops animating the moment playback pauses).
     var isPlaying: Bool = true
-    let state1 = LUStateData(type: .loadedFrom(URL(string: "https://assets9.lottiefiles.com/packages/lf20_mniampqn.json")!), speed: 1.0, loopMode: .loop)
+    private static let defaultVisualizerURL = URL(string: "https://assets9.lottiefiles.com/packages/lf20_mniampqn.json")
     @Default(.selectedVisualizer) var selectedVisualizer
     var body: some View {
         if isPlaying {
             if selectedVisualizer == nil {
-                LottieView(state: state1)
+                if let url = Self.defaultVisualizerURL {
+                    LottieView(state: LUStateData(type: .loadedFrom(url), speed: 1.0, loopMode: .loop))
+                } else {
+                    Color.clear
+                }
             } else {
                 LottieView(
                     state: LUStateData(

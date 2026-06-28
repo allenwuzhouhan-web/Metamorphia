@@ -33,10 +33,19 @@ final class VoiceService: ObservableObject {
     @Published var state: VoiceState = .idle
     @Published var partialTranscription: String = ""
 
+    // Canonical UserDefaults keys (fix #2). The Settings UI persists voice
+    // on/off via the `Defaults` library under `"voiceEnabled"` /
+    // `"voiceWakeWordEnabled"`. VoiceService previously read its own
+    // `"metamorphia_voice_*"` keys, so the two diverged at launch (the
+    // service never observed what the user toggled in Settings). Read AND
+    // write the same keys the UI uses so state is consistent on every launch.
+    private static let enabledKey = "voiceEnabled"
+    private static let alwaysListeningKey = "voiceWakeWordEnabled"
+
     var isEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: "metamorphia_voice_enabled") }
+        get { UserDefaults.standard.bool(forKey: Self.enabledKey) }
         set {
-            UserDefaults.standard.set(newValue, forKey: "metamorphia_voice_enabled")
+            UserDefaults.standard.set(newValue, forKey: Self.enabledKey)
             if newValue && alwaysListening {
                 startBackgroundListening()
             } else if !newValue {
@@ -46,9 +55,9 @@ final class VoiceService: ObservableObject {
     }
 
     var alwaysListening: Bool {
-        get { UserDefaults.standard.bool(forKey: "metamorphia_voice_always_listening") }
+        get { UserDefaults.standard.bool(forKey: Self.alwaysListeningKey) }
         set {
-            UserDefaults.standard.set(newValue, forKey: "metamorphia_voice_always_listening")
+            UserDefaults.standard.set(newValue, forKey: Self.alwaysListeningKey)
             if newValue && isEnabled {
                 startBackgroundListening()
             } else if !newValue {

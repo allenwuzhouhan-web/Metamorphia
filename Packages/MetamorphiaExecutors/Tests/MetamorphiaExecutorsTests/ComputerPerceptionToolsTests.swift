@@ -11,9 +11,14 @@ import MetamorphiaPerception
 /// headless runs skip them cleanly without failing the suite.
 final class ComputerPerceptionToolsTests: XCTestCase {
 
+    // MARK: - Bootstrap
+
     /// Bootstraps the process-global perception runtime before any perception
-    /// test runs; without it the pipeline traps in PerceptionHost and aborts the
-    /// whole test binary. Idempotent and process-global.
+    /// test runs. The pipeline reaches `PerceptionRuntime.host` on first access
+    /// and `preconditionFailure`s (signal 5, aborting the whole test binary) if
+    /// `bootstrap`/`bootstrapForTests` was never called, so we install a
+    /// throwaway temp-dir host first. The call is idempotent and process-global,
+    /// so it also covers sibling perception test classes whatever the run order.
     override class func setUp() {
         super.setUp()
         if !PerceptionRuntime.isBootstrapped {
@@ -172,10 +177,11 @@ final class ComputerPerceptionToolsTests: XCTestCase {
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
-    /// Skip execution-heavy tests in CI / headless environments. The ScreenMap
-    /// capture pipeline is safe to call without permissions (it returns an
-    /// empty map), but CI runners with no display may still trip on AppKit
-    /// init or the menu-bar reader — a conservative skip keeps green.
+    /// Skip execution-heavy tests in CI / headless environments. The capture
+    /// pipeline requires `PerceptionRuntime` to have been bootstrapped (see
+    /// `setUp`) — without it the pipeline traps on `PerceptionRuntime.host`.
+    /// Even bootstrapped, CI runners with no display may trip on AppKit init or
+    /// the menu-bar reader, so a conservative skip keeps green.
     private func skipIfHeadlessCI() throws {
         let env = ProcessInfo.processInfo.environment
         if env["CI"] != nil || env["METAMORPHIA_CI"] != nil || env["GITHUB_ACTIONS"] != nil {

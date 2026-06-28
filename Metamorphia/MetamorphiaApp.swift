@@ -477,6 +477,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let screenHeight = NSScreen.main?.visibleFrame.height ?? 800
             let maxFraction = Defaults[.terminalMaxHeightFraction]
             baseSize.height = min(screenHeight * maxFraction, max(300, screenHeight * maxFraction))
+        } else if coordinator.currentView == .graphing {
+            // Graphing calculator: canvas + curve list + parameter sliders need room.
+            let screenHeight = NSScreen.main?.visibleFrame.height ?? 800
+            baseSize.height = min(screenHeight * 0.6, 560)
+        } else if coordinator.currentView == .equation {
+            // LaTeX scratchpad: editor + live preview + export toolbar.
+            baseSize.height = max(baseSize.height, 380)
+        } else if coordinator.currentView == .tools {
+            // Scratchpad tools tray: a compact grid of draggable tool tiles.
+            baseSize.height = max(baseSize.height, 200)
         } else if vm.notchState == .minimized {
             // Idle-height bar, slightly wider so there's room for the pulse
             // dot + live-status label beside the notch cutout.

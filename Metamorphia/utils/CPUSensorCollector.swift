@@ -191,10 +191,15 @@ final class CPUSensorCollector {
             CFDictionaryGetValueIfPresent(data, Unmanaged.passUnretained(key).toOpaque(), pointer)
         }
         guard found, let rawValue else { return [] }
+        // Validate the dynamic CFTypeID before bitcasting opaque IOReport pointers.
+        let arrayCandidate = unsafeBitCast(rawValue, to: CFTypeRef.self)
+        guard CFGetTypeID(arrayCandidate) == CFArrayGetTypeID() else { return [] }
         let array = unsafeBitCast(rawValue, to: CFArray.self)
         var result: [IOSample] = []
         for index in 0..<CFArrayGetCount(array) {
-            let element = CFArrayGetValueAtIndex(array, index)
+            guard let element = CFArrayGetValueAtIndex(array, index) else { continue }
+            let entryCandidate = unsafeBitCast(element, to: CFTypeRef.self)
+            guard CFGetTypeID(entryCandidate) == CFDictionaryGetTypeID() else { continue }
             let entry = unsafeBitCast(element, to: CFDictionary.self)
             let group = IOReportChannelGetGroup(entry)?.takeUnretainedValue() as String? ?? ""
             let subGroup = IOReportChannelGetSubGroup(entry)?.takeUnretainedValue() as String? ?? ""

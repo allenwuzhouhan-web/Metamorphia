@@ -45,19 +45,25 @@ class DownloadManager {
         FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
     }
     
+    private var enableListenerCancellable: AnyCancellable?
+
     init() {
         startMonitoringIfNeeded()
 
-        Defaults.publisher(.enableDownloadListener)
+        enableListenerCancellable = Defaults.publisher(.enableDownloadListener)
             .sink { [weak self] _ in
                 guard let self else { return }
                 Task { @MainActor in
                     self.startMonitoringIfNeeded()
                 }
             }
-            .store(in: &cancellables)
     }
-    
+
+    // No deinit: DownloadManager is a process-lifetime `shared` singleton and never
+    // deallocates. The DispatchSource/fd leak is prevented by startMonitoring() being
+    // idempotent (it tears down any already-armed source before opening a new one).
+    // A @MainActor deinit cannot legally touch the actor-isolated `source` anyway.
+
     private func startMonitoringIfNeeded() {
         if Defaults[.enableDownloadListener] {
             startMonitoring()
@@ -68,8 +74,14 @@ class DownloadManager {
     }
     
     private func startMonitoring() {
-        guard source == nil, let downloadsDirectory else { return }
-        
+        guard let downloadsDirectory else { return }
+
+        // Tear down any source/fd already armed so a second start can't leak the
+        // previous DispatchSource or file descriptor.
+        if source != nil {
+            stopMonitoring()
+        }
+
         hasPerformedInitialScan = false
         initialCrDownloadFiles.removeAll()
         previousAllFiles.removeAll()

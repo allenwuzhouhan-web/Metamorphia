@@ -10,9 +10,13 @@ import MetamorphiaPerception
 /// environment check as the other perception tool tests.
 final class ScreenQueryToolTests: XCTestCase {
 
+    // MARK: - Bootstrap
+
     /// Bootstraps the process-global perception runtime before any perception
-    /// test runs; without it the pipeline traps in PerceptionHost and aborts the
-    /// whole test binary. Idempotent and process-global.
+    /// test runs. `screen_query` execution reaches `PerceptionRuntime.host`,
+    /// which `preconditionFailure`s (signal 5, aborting the whole test binary)
+    /// if the runtime was never bootstrapped. Install a throwaway temp-dir host
+    /// before any test runs. Idempotent and process-global.
     override class func setUp() {
         super.setUp()
         if !PerceptionRuntime.isBootstrapped {

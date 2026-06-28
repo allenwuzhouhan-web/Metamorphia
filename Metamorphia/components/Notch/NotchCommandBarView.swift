@@ -104,6 +104,9 @@ struct NotchCommandBarView: View {
             // so the user sees it without a round-trip. The call is
             // synchronous on the MainActor and returns in < 1 ms.
             viewModel.consumeStagedResponse()
+            // If a reviewed document's comments were cleared while we were away,
+            // run the verification pass.
+            viewModel.checkArmedRecheckOnAppear()
             DispatchQueue.main.async {
                 inputFocused = true
             }
@@ -117,6 +120,9 @@ struct NotchCommandBarView: View {
                 viewModel.cancelChoice()
             } else if case .browserChoice = viewModel.inputBarState {
                 // T7: dismiss browser choice card; original text stays in currentInput.
+                viewModel.cancelChoice()
+            } else if case .purposeQuestion = viewModel.inputBarState {
+                // Dismiss the purpose question; original text stays in currentInput.
                 viewModel.cancelChoice()
             } else {
                 CommandBarCoordinator.shared.dismiss()
@@ -148,6 +154,14 @@ struct NotchCommandBarView: View {
                 query: query,
                 onPickVisible: { viewModel.submitBrowserTask(query: query, visible: true) },
                 onPickBackground: { viewModel.submitBrowserTask(query: query, visible: false) },
+                onCancel: { viewModel.cancelChoice() }
+            )
+        case .purposeQuestion(let question, let originalPrompt):
+            PurposeQuestionCard(
+                question: question,
+                onSubmit: { purpose in
+                    viewModel.submitReviewWithPurpose(originalPrompt: originalPrompt, purpose: purpose)
+                },
                 onCancel: { viewModel.cancelChoice() }
             )
         case .thoughtRecall:

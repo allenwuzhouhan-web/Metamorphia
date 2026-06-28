@@ -107,7 +107,9 @@ public struct SearchWebTool: ToolDefinition {
         let max = optionalInt("max_results", from: args) ?? 5
 
         let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-        let url = URL(string: "https://html.duckduckgo.com/html/?q=\(encoded)")!
+        guard let url = URL(string: "https://html.duckduckgo.com/html/?q=\(encoded)") else {
+            return "Error: could not build a search URL for query '\(query)'."
+        }
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 20

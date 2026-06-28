@@ -50,6 +50,18 @@ final class ShelfItemViewModel: ObservableObject {
     /// pasteboard, so the parked security-scoped accesses can be released.
     private static var copiedChangeCount: Int = 0
 
+    /// Unconditionally stop holding security-scoped access for previously-copied
+    /// URLs. Used when a fresh Copy supersedes an earlier one before writing the
+    /// new pasteboard contents.
+    @MainActor
+    private static func releaseCopiedURLs() {
+        for url in copiedURLs {
+            url.stopAccessingSecurityScopedResource()
+        }
+        copiedURLs.removeAll()
+        copiedChangeCount = 0
+    }
+
     /// Releases the parked security-scoped accesses for `copiedURLs` if the general
     /// pasteboard has been written by anyone since the Copy that opened them. This
     /// bounds retention to "until the next pasteboard write" instead of "until the
@@ -61,6 +73,7 @@ final class ShelfItemViewModel: ObservableObject {
             url.stopAccessingSecurityScopedResource()
         }
         copiedURLs.removeAll()
+        copiedChangeCount = 0
     }
 
     private let selection = ShelfSelectionModel.shared
@@ -586,13 +599,10 @@ final class ShelfItemViewModel: ObservableObject {
             case "Copy":
                 let selected = ShelfSelectionModel.shared.selectedItems(in: ShelfStateViewModel.shared.items)
                 let pb = NSPasteboard.general
-                
-                // Stop accessing previously copied URLs
-                for url in ShelfItemViewModel.copiedURLs {
-                    url.stopAccessingSecurityScopedResource()
-                }
-                ShelfItemViewModel.copiedURLs.removeAll()
-                
+
+                // Stop accessing previously copied URLs (and cancel any pending release)
+                ShelfItemViewModel.releaseCopiedURLs()
+
                 pb.clearContents()
                 Task {
                     let fileURLs = await selected.asyncCompactMap { item -> URL? in
@@ -605,8 +615,9 @@ final class ShelfItemViewModel: ObservableObject {
                         // Start security-scoped access for all URLs and keep them active
                         ShelfItemViewModel.copiedURLs = fileURLs.filter { $0.startAccessingSecurityScopedResource() }
                         NSLog("🔐 Started security-scoped access for \(ShelfItemViewModel.copiedURLs.count) copied files")
-                        
-                        // Write to pasteboard
+
+                        // Write to pasteboard, then schedule release so we don't
+                        // hold the scoped-access handle for the app's lifetime.
                         pb.writeObjects(fileURLs as [NSURL])
                         // Remember the change count so a later pasteboard write by
                         // anyone can release these parked accesses.

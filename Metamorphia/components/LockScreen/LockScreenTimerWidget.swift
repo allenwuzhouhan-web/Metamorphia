@@ -20,7 +20,13 @@ import SwiftUI
 import Defaults
 
 struct LockScreenTimerWidget: View {
+    /// Maximum widget width — also the slider's upper bound and the 100%
+    /// reference width used for the live preview scaling.
     static let defaultWidth: Double = 420
+    /// Width the "Reset to default" action restores. This MUST equal the
+    /// persisted `Defaults[.lockScreenTimerWidgetWidth]` default (350) so that
+    /// resetting matches a fresh install (fix #3); previously it jumped to 420.
+    static let resetWidth: Double = 350
     static let preferredHeight: CGFloat = 96
     static var preferredSize: CGSize {
         CGSize(width: CGFloat(Defaults[.lockScreenTimerWidgetWidth]), height: preferredHeight)

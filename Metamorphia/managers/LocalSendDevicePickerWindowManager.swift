@@ -37,8 +37,10 @@ final class LocalSendDevicePickerWindowManager {
     private var window: NSWindow?
     private var onDeviceSelected: ((LocalSendDeviceInfo) -> Void)?
     private var onDismiss: (() -> Void)?
-    private var clickMonitor: Any?
-    
+    // Token for the click-outside monitor; must be removed on hide() so monitors
+    // don't accumulate on every show/hide cycle.
+    private var clickOutsideMonitor: Any?
+
     private init() {}
     
     func show(
@@ -99,12 +101,14 @@ final class LocalSendDevicePickerWindowManager {
         
         window = newWindow
         newWindow.makeKeyAndOrderFront(nil)
-        
-        // Add click-outside-to-dismiss
-        if let clickMonitor {
-            NSEvent.removeMonitor(clickMonitor)
+
+        // Add click-outside-to-dismiss. Remove any stale monitor first so tokens
+        // don't accumulate, then retain the new token for removal in hide().
+        if let existingMonitor = clickOutsideMonitor {
+            NSEvent.removeMonitor(existingMonitor)
+            clickOutsideMonitor = nil
         }
-        clickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+        clickOutsideMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
             guard let self, let window = self.window else { return event }
             let locationInWindow = event.locationInWindow
             let windowFrame = window.frame
@@ -112,7 +116,7 @@ final class LocalSendDevicePickerWindowManager {
                 x: windowFrame.origin.x + locationInWindow.x,
                 y: windowFrame.origin.y + locationInWindow.y
             )
-            
+
             if !windowFrame.contains(clickLocation) && event.window != window {
                 self.onDismiss?()
                 self.hide()
@@ -120,12 +124,12 @@ final class LocalSendDevicePickerWindowManager {
             return event
         }
     }
-    
+
     func hide() {
-        if let clickMonitor {
-            NSEvent.removeMonitor(clickMonitor)
+        if let monitor = clickOutsideMonitor {
+            NSEvent.removeMonitor(monitor)
+            clickOutsideMonitor = nil
         }
-        clickMonitor = nil
         window?.orderOut(nil)
         window = nil
         onDeviceSelected = nil

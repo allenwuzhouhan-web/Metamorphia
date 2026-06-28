@@ -92,13 +92,20 @@ private struct ScrollMonitor: NSViewRepresentable {
         func installMonitor(on view: NSView) {
             removeMonitor()
             observedView = view
-            monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel]) { [weak self] event in
+            // addLocal/GlobalMonitorForEvents can return nil; only store a real token.
+            let localHandler: (NSEvent) -> NSEvent? = { [weak self] event in
                 guard let self else { return event }
                 self.handleScroll(event)
                 return event
             }
-            globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.scrollWheel]) { [weak self] event in
+            if let localToken = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel], handler: localHandler) {
+                monitor = localToken
+            }
+            let globalHandler: (NSEvent) -> Void = { [weak self] event in
                 self?.handleScroll(event)
+            }
+            if let globalToken = NSEvent.addGlobalMonitorForEvents(matching: [.scrollWheel], handler: globalHandler) {
+                globalMonitor = globalToken
             }
         }
 

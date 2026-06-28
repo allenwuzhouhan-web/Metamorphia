@@ -68,15 +68,13 @@ class SparkleNSView: NSView {
         emitterLayer.frame = self.bounds
         emitterLayer.emitterSize = self.bounds.size
         emitterLayer.emitterPosition = CGPoint(x: bounds.width / 2, y: bounds.height / 2)
-        
-        // Adjust birth rate based on view size, but keep emission paused while
-        // the view is detached from any window so a layout/resize pass during
-        // teardown cannot silently re-arm the emitter offscreen.
-        let area = bounds.width * bounds.height
-        let baseBirthRate: Float = 50
-        let adjustedBirthRate = 20 // Assuming 200x200 as base size
-        let rate: Float = window != nil ? Float(adjustedBirthRate) : 0
-        emitterLayer.emitterCells?.first?.birthRate = rate
+
+        // Use a fixed birth rate, but keep emission paused while the view is
+        // detached from any window so a layout/resize pass during teardown
+        // cannot silently re-arm the emitter offscreen. (The previous
+        // `area`/`baseBirthRate` locals were computed but never used.)
+        let activeBirthRate: Float = 20
+        emitterLayer.emitterCells?.first?.birthRate = window != nil ? activeBirthRate : 0
     }
     
     override func setFrameSize(_ newSize: NSSize) {

@@ -1449,33 +1449,62 @@ private final class FocusMetadataReader {
 
     static let shared = FocusMetadataReader()
 
+    /// Guards the parsed-config cache. `accentColor`/`activeIcon` are read on the
+    /// render thread, so accesses must be serialized.
+    private let cacheLock = NSLock()
+    private var cachedRoot: DNDConfigRoot?
+    private var cachedModificationDate: Date?
+
+    /// Returns the parsed configuration, reloading from disk only when the file's
+    /// modification date changes. This avoids a synchronous read + JSON decode of
+    /// ModeConfigurations.json on every `accentColor`/`activeIcon` property access.
+    private func loadConfigRoot() -> DNDConfigRoot? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+
+        let attributes = try? FileManager.default.attributesOfItem(atPath: pathToDatabase.path)
+        let modificationDate = attributes?[.modificationDate] as? Date
+
+        if let cachedRoot, cachedModificationDate == modificationDate {
+            return cachedRoot
+        }
+
+        do {
+            let data = try Data(contentsOf: pathToDatabase)
+            let root = try JSONDecoder().decode(DNDConfigRoot.self, from: data)
+            cachedRoot = root
+            cachedModificationDate = modificationDate
+            return root
+        } catch {
+            print("ModeConfigurations.json decode error: \(error)")
+            cachedRoot = nil
+            cachedModificationDate = nil
+            return nil
+        }
+    }
+
     private func getModeConfig(for focusName: String, identifier: String? = nil) -> DNDMode? {
         guard FullDiskAccessAuthorization.hasPermission() else { return nil }
 
         let trimmedName = focusName.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedIdentifier = identifier?.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        do {
-            let data = try Data(contentsOf: pathToDatabase)
-            let root = try JSONDecoder().decode(DNDConfigRoot.self, from: data)
+        guard let root = loadConfigRoot() else { return nil }
 
-            for entry in root.data {
-                for wrapper in entry.modeConfigurations.values {
-                    let mode = wrapper.mode
+        for entry in root.data {
+            for wrapper in entry.modeConfigurations.values {
+                let mode = wrapper.mode
 
-                    if let id = trimmedIdentifier, !id.isEmpty,
-                       mode.modeIdentifier.compare(id, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame {
-                        return mode
-                    }
+                if let id = trimmedIdentifier, !id.isEmpty,
+                   mode.modeIdentifier.compare(id, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame {
+                    return mode
+                }
 
-                    if !trimmedName.isEmpty,
-                       mode.name.compare(trimmedName, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame {
-                        return mode
-                    }
+                if !trimmedName.isEmpty,
+                   mode.name.compare(trimmedName, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame {
+                    return mode
                 }
             }
-        } catch {
-            print("ModeConfigurations.json decode error: \(error)")
         }
 
         return nil

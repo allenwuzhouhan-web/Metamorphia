@@ -32,6 +32,8 @@
 	<key>com.apple.security.temporary-exception.apple-events</key>
 	<array>
 		<string>com.microsoft.Powerpoint</string>
+		<string>com.microsoft.Excel</string>
+		<string>com.microsoft.Word</string>
 		<string>com.spotify.client</string>
 		<string>com.apple.Music</string>
 		<string>com.apple.systemevents</string>

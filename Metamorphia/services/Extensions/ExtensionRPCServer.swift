@@ -19,6 +19,7 @@
 import Foundation
 import Network
 import Defaults
+import Combine
 
 /// WebSocket server for Metamorphia RPC.
 /// Uses Apple's Network.framework (`NWListener`) — no external dependencies.
@@ -35,17 +36,52 @@ final class ExtensionRPCServer {
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
 
-    private init() {}
+    /// Hard upper bound on a single inbound RPC frame (16 MB). Frames larger than this are
+    /// dropped without decoding to bound memory/CPU on the main actor.
+    private static let maxInboundFrameBytes = 16 * 1024 * 1024
+
+    private var featureToggleCancellable: AnyCancellable?
+
+    private init() {
+        // Start/stop the listener in lockstep with the feature toggle so the port is only open
+        // while third-party extensions are enabled, even if the user toggles it after launch.
+        // `options: []` skips the initial emission so this doesn't re-enter `start()` during init.
+        featureToggleCancellable = Defaults.publisher(.enableThirdPartyExtensions, options: [])
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] change in
+                guard let self else { return }
+                if change.newValue {
+                    self.start()
+                } else {
+                    self.stop()
+                }
+            }
+    }
 
     // MARK: - Lifecycle
 
     func start() {
+        // Only open the port when third-party extensions are enabled. When the feature is off,
+        // the RPC port must not be reachable at all (mirrors the gate the service methods enforce).
+        guard Defaults[.enableThirdPartyExtensions] else {
+            logDiagnostics("RPC server not started: third-party extensions disabled")
+            return
+        }
+
         guard listener == nil else {
             logDiagnostics("RPC server already running")
             return
         }
 
         let params = NWParameters(tls: nil)
+        // Restrict the listener to loopback only so the port is unreachable from the LAN.
+        // `requiredLocalEndpoint` pins binding to 127.0.0.1:<port>; prohibiting non-loopback
+        // interface types fails closed if the local endpoint hint is ever relaxed.
+        params.requiredLocalEndpoint = NWEndpoint.hostPort(
+            host: "127.0.0.1",
+            port: NWEndpoint.Port(integerLiteral: port)
+        )
+        params.prohibitedInterfaceTypes = [.wifi, .cellular, .wiredEthernet]
         let wsOptions = NWProtocolWebSocket.Options()
         wsOptions.autoReplyPing = true
         params.defaultProtocolStack.applicationProtocols.insert(wsOptions, at: 0)
@@ -229,6 +265,22 @@ final class ExtensionRPCServer {
             }
 
             if let data = content, !data.isEmpty {
+                // Reject oversized frames before decoding to bound memory/CPU on the main actor.
+                guard data.count <= Self.maxInboundFrameBytes else {
+                    Task { @MainActor in
+                        self.logDiagnostics("Dropped oversized RPC frame (\(data.count) bytes) for \(connID.uuidString.prefix(8))")
+                        let errorResponse = RPCErrorResponse(
+                            error: RPCErrorObject(code: RPCErrorCode.invalidRequest, message: "Request too large"),
+                            id: nil
+                        )
+                        self.sendResponse(errorResponse, to: connID)
+                    }
+                    // Continue receiving so the connection isn't wedged.
+                    Task { @MainActor in
+                        self.receiveMessage(connID: connID)
+                    }
+                    return
+                }
                 Task { @MainActor in
                     await self.processMessage(data: data, connID: connID)
                 }
