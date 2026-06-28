@@ -135,6 +135,15 @@ public final class BrowserTabSensor {
         self.allowlist = allowlist
     }
 
+    deinit {
+        // Tear down the repeating poll timer with the owner regardless of pause
+        // state. The main RunLoop strongly retains a scheduled repeating Timer
+        // independently of this object, so without this it would keep firing
+        // after release. Safe to touch from a nonisolated deinit: this is the
+        // last reference and invalidate() is the only access.
+        pollTimer?.invalidate()
+    }
+
     // MARK: - Lifecycle
 
     public func start() {

@@ -310,7 +310,14 @@ public final class AXObserverPool: @unchecked Sendable {
             // Guard against a concurrent detach that arrived while we were on
             // the observer thread. If the slot was already removed, clean up.
             guard attachments[pid] == nil else {
-                // Already replaced (edge case) — release context and bail.
+                // Already replaced (edge case) — undo the run-loop source and
+                // notification registrations this performAttach already installed,
+                // then release the context and bail. Otherwise the orphaned source
+                // and per-pid AX registrations leak.
+                for notifName in AXObserverPool.watchedNotifications {
+                    AXObserverRemoveNotification(observer, appElement, notifName as CFString)
+                }
+                CFRunLoopRemoveSource(runLoop, AXObserverGetRunLoopSource(observer), .defaultMode)
                 Unmanaged<AXObserverCallbackContext>.fromOpaque(ctxPtr).release()
                 return
             }

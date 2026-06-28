@@ -106,9 +106,23 @@ extension AppDelegate {
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
-    var windows: [NSScreen: NSWindow] = [:]
-    var viewModels: [NSScreen: MetamorphiaViewModel] = [:]
+    // Keyed by stable CGDirectDisplayID rather than NSScreen, because macOS
+    // hands out fresh NSScreen instances on every display reconfiguration and
+    // those would never match a cached entry, orphaning the previous screen's
+    // window + view model and spawning a duplicate for the same display.
+    var windows: [CGDirectDisplayID: NSWindow] = [:]
+    var viewModels: [CGDirectDisplayID: MetamorphiaViewModel] = [:]
     var window: NSWindow?
+
+    /// Stable display identifier for keying `windows` / `viewModels`.
+    /// Returns `nil` only for screens without an `NSScreenNumber` (none in
+    /// practice), in which case the caller should skip that screen.
+    func displayID(for screen: NSScreen) -> CGDirectDisplayID? {
+        guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            return nil
+        }
+        return number.uint32Value
+    }
     let vm: MetamorphiaViewModel = .init()
 
     override init() {
@@ -541,7 +555,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard size.width > 0, size.height > 0 else { return }
 
         if Defaults[.showOnAllDisplays] {
-            for (screen, window) in windows {
+            for (displayID, window) in windows {
+                guard let screen = NSScreen.screens.first(where: { self.displayID(for: $0) == displayID }) else { continue }
                 let screenSize = adjustedSizeForScreen(size, screen: screen)
                 if force || window.frame.size != screenSize {
                     resizeWindow(window, on: screen, to: screenSize, animated: animated)
@@ -889,7 +904,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if Defaults[.showOnAllDisplays] {
                 for screen in NSScreen.screens {
                     if screen.frame.contains(mouseLocation) {
-                        if let screenViewModel = self.viewModels[screen] {
+                        if let displayID = self.displayID(for: screen),
+                           let screenViewModel = self.viewModels[displayID] {
                             viewModel = screenViewModel
                             break
                         }
@@ -1256,29 +1272,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     @objc func adjustWindowPosition(changeAlpha: Bool = false) {
         if Defaults[.showOnAllDisplays] {
-            let currentScreens = Set(NSScreen.screens)
-            
-            for screen in windows.keys where !currentScreens.contains(screen) {
-                if let window = windows[screen] {
+            let currentScreens = NSScreen.screens
+            let currentDisplayIDs = Set(currentScreens.compactMap { displayID(for: $0) })
+
+            for displayID in Array(windows.keys) where !currentDisplayIDs.contains(displayID) {
+                if let window = windows[displayID] {
                     window.close()
                     NotchSpaceManager.shared.notchSpace.windows.remove(window)
-                    windows.removeValue(forKey: screen)
-                    viewModels.removeValue(forKey: screen)
+                    windows.removeValue(forKey: displayID)
+                    viewModels.removeValue(forKey: displayID)
                 }
             }
-            
+
             for screen in currentScreens {
-                if windows[screen] == nil {
+                guard let displayID = displayID(for: screen) else { continue }
+                if windows[displayID] == nil {
                     let viewModel = MetamorphiaViewModel(screen: screen.localizedName)
                     let window = createMetamorphiaWindow(for: screen, with: viewModel)
-                    
-                    windows[screen] = window
-                    viewModels[screen] = viewModel
+
+                    windows[displayID] = window
+                    viewModels[displayID] = viewModel
                 }
-                
-                if let window = windows[screen], let viewModel = viewModels[screen] {
+
+                if let window = windows[displayID], let viewModel = viewModels[displayID] {
                     positionWindow(window, on: screen, changeAlpha: changeAlpha)
-                    
+
                     if viewModel.notchState == .closed {
                         viewModel.close()
                     }

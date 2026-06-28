@@ -24,6 +24,11 @@ import OrderedCollections
 class TrayDrop: ObservableObject {
     static let shared = TrayDrop()
 
+    /// Upper bound on retained drops. Each item keeps a decoded preview in
+    /// memory plus an on-disk copy, so the oldest entries are evicted once the
+    /// list grows past this to keep memory and disk usage bounded.
+    static let maxItemCount = 50
+
     @Published var items: OrderedSet<DropItem>
     var isEmpty: Bool { items.isEmpty }
     @Published var isLoading: Int = 0
@@ -48,9 +53,19 @@ class TrayDrop: ObservableObject {
 
         DispatchQueue.main.async {
             dropItems.forEach { self.items.updateOrInsert($0, at: 0) }
+            self.evictOverflow()
             self.isLoading -= 1
         }
         print("DONE")
+    }
+
+    /// Drops the oldest items (and their on-disk copies) once the retained
+    /// count exceeds `maxItemCount`. Newest items are inserted at index 0, so
+    /// the overflow lives at the tail.
+    private func evictOverflow() {
+        while items.count > Self.maxItemCount, let oldest = items.last {
+            delete(item: oldest)
+        }
     }
 
     func cleanExpiredFiles() {

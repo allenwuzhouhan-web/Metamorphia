@@ -129,6 +129,11 @@ public actor InterestGraphStore {
 
     static let decayTau: TimeInterval = 21 * 86_400   // 21 days
 
+    /// Max co-occurrence edges retained per node. Set well above any
+    /// `edgesOut(entity:limit:)` query so trimming only discards low-count
+    /// tail edges that would never surface in a top-`limit` result.
+    private static let maxCoOccurrences = 64
+
     // MARK: - State
 
     private var nodes: [String: InterestNode] = [:]   // entityId → node
@@ -253,6 +258,12 @@ public actor InterestGraphStore {
             }
         }
 
+        // Bound each touched node's co-occurrence map so a frequently-seen
+        // entity can't accumulate an unbounded key set across the app's life.
+        for id in Set(allIds) where nodes[id] != nil {
+            trimCoOccurrences(&nodes[id]!)
+        }
+
         evictIfNeeded()
         scheduleWrite()
     }
@@ -324,6 +335,18 @@ public actor InterestGraphStore {
         for node in sorted.prefix(dropCount) {
             nodes.removeValue(forKey: node.entityId)
         }
+    }
+
+    /// Keep only the highest-count co-occurrence edges once the map grows
+    /// past twice the cap, discarding the low-count tail. Hysteresis (trim at
+    /// 2*K, keep K) avoids re-sorting on every potentiate.
+    private func trimCoOccurrences(_ node: inout InterestNode) {
+        let k = Self.maxCoOccurrences
+        guard node.coOccurrences.count > 2 * k else { return }
+        let topEdges = node.coOccurrences.sorted { $0.value > $1.value }
+            .prefix(k)
+            .map { ($0.key, $0.value) }
+        node.coOccurrences = Dictionary(topEdges, uniquingKeysWith: { a, _ in a })
     }
 
     /// Lower = evicted first. `.entity`-type nodes survive longest.

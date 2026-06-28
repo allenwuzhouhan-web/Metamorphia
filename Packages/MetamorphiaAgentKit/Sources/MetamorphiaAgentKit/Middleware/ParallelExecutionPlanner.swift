@@ -73,6 +73,9 @@ public final class ParallelExecutionPlanner: AgentMiddleware {
         if toolCalls.count > 1 {
             stats.parallelBatches += 1
             stats.waveHistory.append(toolCalls.map { $0.function.name })
+            if stats.waveHistory.count > 50 {
+                stats.waveHistory = Array(stats.waveHistory.suffix(50))
+            }
             stats.estimatedTimeSaved += Double(toolCalls.count - 1) * 1.0
         } else {
             stats.sequentialCalls += 1

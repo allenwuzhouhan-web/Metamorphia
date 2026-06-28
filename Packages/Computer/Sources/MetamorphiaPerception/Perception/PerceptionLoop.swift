@@ -105,23 +105,32 @@ public actor PerceptionLoop {
     /// Cancelling the stream (by terminating its `for await` loop or dropping the
     /// iterator) automatically unregisters the subscriber.
     public nonisolated func observe() -> AsyncStream<ScreenMap> {
-        return AsyncStream<ScreenMap>(bufferingPolicy: .bufferingNewest(1)) { continuation in
-            let id = UUID()
-            Task { [weak self] in
-                await self?.registerContinuation(id: id, continuation: continuation)
-            }
-            continuation.onTermination = { [weak self] _ in
-                Task { [weak self] in
-                    await self?.unregisterContinuation(id: id)
-                }
-            }
+        let (stream, continuation) = AsyncStream<ScreenMap>.makeStream(
+            of: ScreenMap.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        let id = UUID()
+        // Install registration AND termination handling in a single actor hop so
+        // a fast stream teardown can never invert the order (unregister-before-
+        // register) and leave a permanently-installed, never-fed continuation.
+        Task { [weak self] in
+            await self?.registerContinuation(id: id, continuation: continuation)
         }
+        return stream
     }
 
     // MARK: - Internal (actor-isolated)
 
     private func registerContinuation(id: UUID, continuation: AsyncStream<ScreenMap>.Continuation) {
         continuations[id] = continuation
+        // Assigned only after the continuation is in the dictionary and within
+        // actor isolation: a later termination can only remove an entry that
+        // exists, so the register/unregister ordering race is closed.
+        continuation.onTermination = { [weak self] _ in
+            Task { [weak self] in
+                await self?.unregisterContinuation(id: id)
+            }
+        }
     }
 
     private func unregisterContinuation(id: UUID) {

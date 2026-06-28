@@ -45,6 +45,23 @@ final class ShelfItemViewModel: ObservableObject {
     private var quickShareLifecycle: SharingLifecycleDelegate?
     private var sharingAccessingURLs: [URL] = []
     private static var copiedURLs: [URL] = []
+    /// `NSPasteboard.general.changeCount` captured when `copiedURLs` were written.
+    /// Once the live change count moves past this value, something else replaced the
+    /// pasteboard, so the parked security-scoped accesses can be released.
+    private static var copiedChangeCount: Int = 0
+
+    /// Releases the parked security-scoped accesses for `copiedURLs` if the general
+    /// pasteboard has been written by anyone since the Copy that opened them. This
+    /// bounds retention to "until the next pasteboard write" instead of "until the
+    /// next shelf Copy", which would otherwise keep them open for the app's lifetime.
+    private static func releaseCopiedURLsIfPasteboardChanged() {
+        guard !copiedURLs.isEmpty else { return }
+        guard NSPasteboard.general.changeCount != copiedChangeCount else { return }
+        for url in copiedURLs {
+            url.stopAccessingSecurityScopedResource()
+        }
+        copiedURLs.removeAll()
+    }
 
     private let selection = ShelfSelectionModel.shared
 
@@ -55,6 +72,9 @@ final class ShelfItemViewModel: ObservableObject {
         let initialName = item.displayName
         self.displayName = initialName
         self.draftTitle = initialName
+        // Reclaim any copied-file accesses parked by an earlier Copy if the
+        // pasteboard has since been replaced by anyone.
+        ShelfItemViewModel.releaseCopiedURLsIfPasteboardChanged()
         Task { await loadThumbnail() }
     }
 
@@ -71,6 +91,7 @@ final class ShelfItemViewModel: ObservableObject {
         draftTitle = initialName
         thumbnail = nil
         placeholderIcon = nil
+        ShelfItemViewModel.releaseCopiedURLsIfPasteboardChanged()
         Task { await loadThumbnail() }
     }
 
@@ -557,6 +578,9 @@ final class ShelfItemViewModel: ObservableObject {
                 if !paths.isEmpty {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(paths.joined(separator: "\n"), forType: .string)
+                    // This write replaces the previously copied file URLs, so the
+                    // parked security-scoped accesses for them can be released.
+                    ShelfItemViewModel.releaseCopiedURLsIfPasteboardChanged()
                 }
 
             case "Copy":
@@ -584,6 +608,9 @@ final class ShelfItemViewModel: ObservableObject {
                         
                         // Write to pasteboard
                         pb.writeObjects(fileURLs as [NSURL])
+                        // Remember the change count so a later pasteboard write by
+                        // anyone can release these parked accesses.
+                        ShelfItemViewModel.copiedChangeCount = pb.changeCount
                     } else {
                         let strings = selected.map { $0.displayName }
                         if !strings.isEmpty {

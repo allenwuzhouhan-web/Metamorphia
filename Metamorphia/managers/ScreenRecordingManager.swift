@@ -67,6 +67,7 @@ class ScreenRecordingManager: ObservableObject {
     private var recordingStartTime: Date?
     private var durationTimer: Timer?
     private var debounceIdleTask: Task<Void, Never>?
+    private var hasRegisteredCallbacks = false
     
     // MARK: - Configuration
     private let debounceDelay: TimeInterval = 0.2 // Debounce rapid changes
@@ -144,17 +145,24 @@ class ScreenRecordingManager: ObservableObject {
     
     /// Setup private API notifications for screen capture events
     private func setupPrivateAPINotifications() {
+        // The global CGS registration cannot be undone (there is no
+        // CGSUnregisterNotifyProc), so register exactly once for the process
+        // lifetime. Repeated start/stop cycles would otherwise accumulate
+        // duplicate callbacks that all fire on every screen-capture event.
+        guard !hasRegisteredCallbacks else { return }
+
         // Pass self as context to the global callback function
         let context = Unmanaged.passUnretained(self).toOpaque()
-        
+
         // Register for remote session events (screen capture start/stop)
         // kCGSessionRemoteConnect - fires when screen sharing/recording starts
         let registered1 = CGSRegisterNotifyProc(screenCaptureEventCallback, 1502, context)
-        
+
         // kCGSessionRemoteDisconnect - fires when screen sharing/recording stops
         let registered2 = CGSRegisterNotifyProc(screenCaptureEventCallback, 1503, context)
-        
+
         if registered1 && registered2 {
+            hasRegisteredCallbacks = true
             print("ScreenRecordingManager: ✅ Private API notifications registered")
         } else {
             print("ScreenRecordingManager: ⚠️ Failed to register private API notifications")

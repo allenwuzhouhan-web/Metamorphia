@@ -641,7 +641,7 @@ public final class PerceptionPipeline: @unchecked Sendable {
         let axBox       = await axTask
         let windowsBox  = await windowsTask
         let displaysBox = await displaysTask
-        _ = await dhashTask   // dHash lane: hash+image captured but not merged here
+        let dhashBox    = await dhashTask   // dHash lane: full-res image retained for vision-diff reuse below
         let menusBox    = await menusTask
         let domBox      = await browserDOMTask
 
@@ -702,7 +702,8 @@ public final class PerceptionPipeline: @unchecked Sendable {
         // resolved, annotate matching AX elements with domSelector/domNodeId
         // so `SemanticExecutor.press` can take the CDP path. Skipped for
         // non-browser frontmost apps (fetchInteractiveNodes early-returns),
-        // and the fetcher's fingerprint cache makes repeated calls cheap.
+        // and the fetcher's enumeration fingerprint cache makes repeated calls
+        // on an unchanged tab cheap (a URL/title probe, no full DOM scan).
         let resolvedElements: [ScreenElement]
         if resolvedDOM != nil, lanes.contains(.browserDOM) {
             let focusedWindowBounds = resolvedWindows.first(where: { $0.isFocused })?.bounds
@@ -724,6 +725,19 @@ public final class PerceptionPipeline: @unchecked Sendable {
             offScreenHint: base?.metadata.offScreenHint,
             timing: nil
         )
+
+        // Rank 8 — when the .dHash lane was requested it already paid for a
+        // full-res capture; retain that frame for VisionDiffer instead of
+        // discarding it (and re-capturing later). Gated on an active vision-diff
+        // session exactly like the full `capture()` path, so the common push
+        // path that never calls `visionDiff()` pins nothing in memory.
+        if let retainedImage = dhashBox.value?.image, await visualDiffState.isActive {
+            let mainDisplayIndex = resolvedDisplays.first(where: \.isMain)?.index ?? 0
+            let state = visualDiffState
+            Task.detached(priority: .utility) { [state] in
+                await state.store(retainedImage, displayIndex: mainDisplayIndex)
+            }
+        }
 
         return ScreenMap(
             timestamp: Date(),
