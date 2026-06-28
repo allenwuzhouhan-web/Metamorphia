@@ -38,23 +38,16 @@ struct MenuBarTaskStatusDot: View {
     @ObservedObject private var store = MenuBarTaskStatusStore.shared
 
     var body: some View {
-        Group {
-            if store.status == .inProgress {
-                // Only the in-progress state pulses, so the schedule runs solely
-                // while a task is active and stops the moment it finishes.
-                // Throttle to ~15fps so a long-running task doesn't churn a fresh
-                // NSImage/CGContext per display frame (up to 120Hz on ProMotion)
-                // just to redraw an 18x18 dot; the pulse stays smooth to the eye.
-                TimelineView(.animation(minimumInterval: 1.0 / 15.0)) { context in
-                    dotImage(phase: context.date.timeIntervalSinceReferenceDate)
-                }
-            } else {
-                // Idle/static states render a single frame with no timer, so the
-                // menu-bar item can sleep and App Nap can engage.
-                dotImage(phase: 0)
-            }
-        }
-        .frame(width: 18, height: 18)
+        // A STATIC dot — never animate a MenuBarExtra label. Every frame of a
+        // pulsing menu-bar image forces SwiftUI to re-host the label to an
+        // NSImage and AppKit to relayout the status item (NSStatusBarButton
+        // setImage: → NSStatusItem._adjustLength → NSButtonCell cellSize), all on
+        // the main thread. Driving that per display frame while a task runs pegs
+        // the main thread and freezes the entire UI for the task's duration. The
+        // status colour alone (yellow/green/red) signals activity; the image now
+        // changes only on a status transition, not per frame.
+        dotImage(phase: 0)
+            .frame(width: 18, height: 18)
     }
 
     private func dotImage(phase: Double) -> some View {

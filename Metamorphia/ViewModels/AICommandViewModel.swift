@@ -439,6 +439,7 @@ public final class AICommandViewModel: ObservableObject {
     /// so the conversation history reflects what the user actually typed.
     public func submit(prompt: String, systemPrompt: String) async {
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        FreezeDiagnostics.mark("submit:start")
 
         if ConversationContinuationService.parseWeChatDirectMessageRequest(prompt) != nil {
             currentInput = ""
@@ -783,12 +784,14 @@ public final class AICommandViewModel: ObservableObject {
 
         let runTrace = AgentTrace(goal: commandWithAttachments)
 
+        FreezeDiagnostics.mark("submit:agentLoop:start")
         let outcome = await loop.submit(
             command: commandWithAttachments,
             systemPrompt: primedPrompt,
             previousMessages: priorMessages,
             trace: runTrace
         )
+        FreezeDiagnostics.mark("submit:agentLoop:done")
 
         if !outcome.wasCancelled, let scorer = intentScorer {
             scorer.recordOutcome(query: agentPrompt, toolsUsed: outcome.toolsUsed)
@@ -2064,6 +2067,7 @@ extension AICommandViewModel: AgentProgressSink {
                 case .result, .error, .ready:
                     break
                 default:
+                    if self.streamingBuffer.isEmpty { FreezeDiagnostics.mark("submit:streaming:firstToken") }
                     self.streamingBuffer += chunk
                     self.inputBarState = .streaming(partialText: self.streamingBuffer)
                 }

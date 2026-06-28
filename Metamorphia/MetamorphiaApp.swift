@@ -603,6 +603,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // DEBUG-only: detect main-thread hangs and capture the frozen stack.
+        FreezeDiagnostics.start()
+
         // Wire up Metamorphia AI features (command bar, agent loop, hotkey).
         MetamorphiaBootstrap.configure()
 
