@@ -60,7 +60,8 @@ public enum UndoAdvisor {
         // Get menu bar
         var menuBarRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(appElement, kAXMenuBarAttribute as CFString, &menuBarRef) == .success,
-              let menuBar = menuBarRef else {
+              let menuBar = menuBarRef,
+              CFGetTypeID(menuBar) == AXUIElementGetTypeID() else {
             return UndoState(canUndo: false, undoLabel: nil, canRedo: false, redoLabel: nil, shortcut: nil)
         }
 

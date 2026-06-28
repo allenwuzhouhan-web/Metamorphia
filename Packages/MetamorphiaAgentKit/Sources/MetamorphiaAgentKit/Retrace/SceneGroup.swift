@@ -19,6 +19,7 @@ public struct RecallScene: Sendable, Hashable, Identifiable {
     }
 
     public init(id: UUID = UUID(), span: ClosedRange<Date>, sessionIDs: Set<UUID>, chipEntities: [String], members: [SearchHit], anchorReason: String?) {
+        precondition(!members.isEmpty, "RecallScene requires at least one member; hero reads members.first")
         self.id = id
         self.span = span
         self.sessionIDs = sessionIDs

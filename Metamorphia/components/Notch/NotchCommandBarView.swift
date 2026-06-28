@@ -343,6 +343,7 @@ struct NotchCommandBarView: View {
     private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
         guard !providers.isEmpty else { return false }
         var pendingURLs: [URL] = []
+        let pendingURLsLock = NSLock()
         let group = DispatchGroup()
         for provider in providers {
             group.enter()
@@ -350,7 +351,7 @@ struct NotchCommandBarView: View {
                 defer { group.leave() }
                 if let data = item as? Data,
                    let url = URL(dataRepresentation: data, relativeTo: nil) {
-                    pendingURLs.append(url)
+                    pendingURLsLock.lock(); pendingURLs.append(url); pendingURLsLock.unlock()
                 }
             }
         }

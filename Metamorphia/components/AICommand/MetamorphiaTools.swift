@@ -88,7 +88,7 @@ public struct ReadClipboardHistoryTool: ToolDefinition {
     public init() {}
     public func execute(arguments: String) async throws -> String {
         let args = try parseArguments(arguments)
-        let count = optionalInt("count", from: args) ?? 10
+        let count = max(1, min(50, optionalInt("count", from: args) ?? 10))
 
         let items: [String] = await MainActor.run {
             ClipboardManager.shared.clipboardHistory.prefix(count).map { item in
@@ -176,7 +176,7 @@ public struct ReadRecentNotesTool: ToolDefinition {
     public init() {}
     public func execute(arguments: String) async throws -> String {
         let args = try parseArguments(arguments)
-        let limit = optionalInt("limit", from: args) ?? 10
+        let limit = max(1, min(50, optionalInt("limit", from: args) ?? 10))
 
         let formatted: String = await MainActor.run {
             let notes = Defaults[.savedNotes]

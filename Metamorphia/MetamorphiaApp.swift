@@ -849,9 +849,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self.cleanupWindows(shouldInvert: true)
 
             if !Defaults[.showOnAllDisplays] {
+                guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
                 let viewModel = self.vm
                 let window = self.createMetamorphiaWindow(
-                    for: NSScreen.main ?? NSScreen.screens.first!, with: viewModel)
+                    for: screen, with: viewModel)
                 self.window = window
                 self.adjustWindowPosition(changeAlpha: true)
             } else {
@@ -927,10 +928,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         registerOptionalShortcutHandlers()
         updateFeatureShortcutAvailability()
 
-        if !Defaults[.showOnAllDisplays] {
+        if !Defaults[.showOnAllDisplays], let screen = NSScreen.main ?? NSScreen.screens.first {
             let viewModel = self.vm
             let window = createMetamorphiaWindow(
-                for: NSScreen.main ?? NSScreen.screens.first!, with: viewModel)
+                for: screen, with: viewModel)
             self.window = window
             adjustWindowPosition(changeAlpha: true)
         } else {
