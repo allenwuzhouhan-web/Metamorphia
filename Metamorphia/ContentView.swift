@@ -841,6 +841,15 @@ struct ContentView: View {
                       } else if !coordinator.expandingView.show && vm.notchState == .closed && calendarLens.upcomingBrief != nil && !doNotDisturbManager.isDoNotDisturbActive && !vm.hideOnClosed {
                           // Continuum Phase 7: meeting pre-brief flash.
                           MeetingBriefLiveActivity()
+                      } else if !coordinator.expandingView.show && vm.notchState == .closed && (CommandBarCoordinator.shared.viewModel?.isProcessing ?? false) && !vm.hideOnClosed {
+                          // The Pulse: transient agent presence. Renders ONLY while the
+                          // agent is working and is mutually exclusive with the idle
+                          // face below (this branch wins, suppressing the face). When
+                          // the agent goes idle the chain falls through to the face.
+                          if let agentVM = CommandBarCoordinator.shared.viewModel {
+                              AgentPresenceLiveActivity(agentViewModel: agentVM)
+                                  .transition(.blurReplace.animation(.interactiveSpring(dampingFraction: 1.2)))
+                          }
                       } else if !coordinator.expandingView.show && vm.notchState == .closed && (!musicManager.isPlaying && musicManager.isPlayerIdle) && Defaults[.showNotHumanFace] && !vm.hideOnClosed  {
                           MetamorphiaFaceAnimation().animation(.interactiveSpring, value: musicManager.isPlayerIdle)
                       } else if vm.notchState == .open {

@@ -156,6 +156,37 @@ final class RemoteCommandListener {
             MusicManager.shared.previousTrack()
         case .setKeepAwake(let on):
             KeepAwake.shared.setEnabled(on)
+        case .askAgent(let prompt, let sessionID):
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let text = await MetamorphiaIntentEngine.run(
+                    prompt: prompt,
+                    systemPrompt: MetamorphiaIntentEngine.defaultSystemPrompt,
+                    showNotch: true
+                )
+                await self.writeTurnResult(
+                    TurnResult(
+                        sessionID: sessionID,
+                        text: text,
+                        status: "complete",
+                        updatedAt: Date()
+                    )
+                )
+            }
+        }
+    }
+
+    private func writeTurnResult(_ result: TurnResult) async {
+        let record = CKRecord(recordType: CloudKeys.RecordType.turnResult)
+        record[CloudKeys.Field.sessionID] = result.sessionID as CKRecordValue
+        record[CloudKeys.Field.text]      = result.text      as CKRecordValue
+        record[CloudKeys.Field.status]    = result.status    as CKRecordValue
+        record[CloudKeys.Field.updatedAt] = result.updatedAt as CKRecordValue
+        do {
+            try await database.save(record)
+            Logger.log("[RemoteCommands] Wrote TurnResult for session \(result.sessionID)", category: .network)
+        } catch {
+            Logger.log("[RemoteCommands] TurnResult write failed: \(error.localizedDescription)", category: .error)
         }
     }
 

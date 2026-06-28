@@ -68,6 +68,50 @@ final class MetamorphiaServicesProvider: NSObject {
         }
     }
 
+    // MARK: - Writing Tools services
+
+    @objc func proofreadService(
+        _ pboard: NSPasteboard,
+        userData: String?,
+        error: AutoreleasingUnsafeMutablePointer<NSString>
+    ) { runWritingService(.proofread, pboard, error) }
+
+    @objc func rewriteService(
+        _ pboard: NSPasteboard,
+        userData: String?,
+        error: AutoreleasingUnsafeMutablePointer<NSString>
+    ) { runWritingService(.rewrite, pboard, error) }
+
+    @objc func summarizeService(
+        _ pboard: NSPasteboard,
+        userData: String?,
+        error: AutoreleasingUnsafeMutablePointer<NSString>
+    ) { runWritingService(.summarize, pboard, error) }
+
+    @objc func replyService(
+        _ pboard: NSPasteboard,
+        userData: String?,
+        error: AutoreleasingUnsafeMutablePointer<NSString>
+    ) { runWritingService(.reply, pboard, error) }
+
+    private func runWritingService(
+        _ verb: AIActionRunner.WritingVerb,
+        _ pboard: NSPasteboard,
+        _ error: AutoreleasingUnsafeMutablePointer<NSString>
+    ) {
+        guard let text = pboard.string(forType: .string),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            error.pointee = "No text on the pasteboard."
+            return
+        }
+        Task { @MainActor in
+            // The Services path receives the selection via pasteboard (the OS
+            // serializes it before invoking us). No AX capture is needed; show
+            // the notch so the result is visible to the user.
+            _ = await AIActionRunner.runFromPasteboardText(verb: verb, text: text)
+        }
+    }
+
     // MARK: - Helpers
 
     private static func extractFileURLs(from pboard: NSPasteboard) -> [URL] {

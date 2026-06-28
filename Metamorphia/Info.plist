@@ -68,6 +68,74 @@
 				<string>NSStringPboardType</string>
 			</array>
 		</dict>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Proofread with Metamorphia</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>proofreadService</string>
+			<key>NSPortName</key>
+			<string>Metamorphia</string>
+			<key>NSSendTypes</key>
+			<array>
+				<string>public.plain-text</string>
+				<string>public.utf8-plain-text</string>
+				<string>NSStringPboardType</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Rewrite with Metamorphia</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>rewriteService</string>
+			<key>NSPortName</key>
+			<string>Metamorphia</string>
+			<key>NSSendTypes</key>
+			<array>
+				<string>public.plain-text</string>
+				<string>public.utf8-plain-text</string>
+				<string>NSStringPboardType</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Summarize with Metamorphia</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>summarizeService</string>
+			<key>NSPortName</key>
+			<string>Metamorphia</string>
+			<key>NSSendTypes</key>
+			<array>
+				<string>public.plain-text</string>
+				<string>public.utf8-plain-text</string>
+				<string>NSStringPboardType</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Draft Reply with Metamorphia</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>replyService</string>
+			<key>NSPortName</key>
+			<string>Metamorphia</string>
+			<key>NSSendTypes</key>
+			<array>
+				<string>public.plain-text</string>
+				<string>public.utf8-plain-text</string>
+				<string>NSStringPboardType</string>
+			</array>
+		</dict>
 	</array>
 </dict>
 </plist>
