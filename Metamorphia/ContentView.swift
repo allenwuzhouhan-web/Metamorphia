@@ -1804,6 +1804,7 @@ struct ContentView: View {
     /// the extracted files. Non-file providers are silently skipped.
     private func routeDropToCommandBar(providers: [NSItemProvider]) {
         var urls: [URL] = []
+        let urlsLock = NSLock()
         let group = DispatchGroup()
         for provider in providers where provider.hasItemConformingToTypeIdentifier("public.file-url") {
             group.enter()
@@ -1811,7 +1812,7 @@ struct ContentView: View {
                 defer { group.leave() }
                 if let data = item as? Data,
                    let url = URL(dataRepresentation: data, relativeTo: nil) {
-                    urls.append(url)
+                    urlsLock.lock(); urls.append(url); urlsLock.unlock()
                 }
             }
         }

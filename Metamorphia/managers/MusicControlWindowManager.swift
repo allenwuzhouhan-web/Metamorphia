@@ -38,6 +38,11 @@ final class MusicControlWindowManager {
     private var hostingView: NSHostingView<MusicControlOverlay>?
     private var hasDelegated = false
     private var lastMetrics: MusicControlWindowMetrics?
+    // Bumped every time present() shows the window. A pending hide captures the
+    // token at the moment its fade starts; if present() re-shows the overlay
+    // during that fade the token changes, so the hide's completion handler can
+    // detect that a newer present now owns the window and skip its teardown.
+    private var presentationToken = 0
 
     private init() {}
 
@@ -64,6 +69,7 @@ final class MusicControlWindowManager {
 
         let targetFrame = frame(for: fittingSize, viewModel: viewModel, screen: screen, metrics: metrics)
         lastMetrics = metrics
+        presentationToken &+= 1
 
         if !hasDelegated {
             SkyLightOperator.shared.delegateWindow(window)
@@ -85,6 +91,9 @@ final class MusicControlWindowManager {
                 window.setFrame(targetFrame, display: false)
             }
         } else {
+            // Re-presenting during a hide fade: the new animator values below
+            // supersede the in-flight fade and restore full opacity, and the
+            // presentation-token guard stops the stale hide from tearing down.
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.16
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
@@ -126,6 +135,7 @@ final class MusicControlWindowManager {
 
         let retreatFrame = notchRetreatFrame(from: window.frame)
         let originalFrame = window.frame
+        let tokenAtHide = presentationToken
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.18
@@ -133,11 +143,16 @@ final class MusicControlWindowManager {
             window.animator().setFrame(retreatFrame, display: true)
             window.animator().alphaValue = 0
         } completionHandler: { [weak self] in
+            // A re-entrant present() during the fade may have re-shown this
+            // exact window. If a newer present has taken ownership (the window
+            // changed or the presentation token advanced), skip the
+            // order-out/teardown so we don't clobber the freshly shown overlay.
+            guard let self, self.window === window, self.presentationToken == tokenAtHide else { return }
             window.setFrame(originalFrame, display: false)
             window.orderOut(nil)
             window.alphaValue = 0
             if tearDown {
-                self?.tearDownWindowResources(using: window)
+                self.tearDownWindowResources(using: window)
             }
         }
     }

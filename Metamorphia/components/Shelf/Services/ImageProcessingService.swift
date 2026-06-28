@@ -62,13 +62,11 @@ struct ImageConversionOptions {
 }
 
 /// Service for processing images (background removal, conversion, PDF creation)
-@MainActor
-final class ImageProcessingService {
+actor ImageProcessingService {
     static let shared = ImageProcessingService()
-    
+
     private init() {}
-    private let ciContext = CIContext(options: nil)
-    
+
     // MARK: - Remove Background
     
     /// Removes the background from an image using Vision framework
@@ -298,7 +296,7 @@ final class ImageProcessingService {
     // MARK: - Helper Methods
     
     /// Checks if a URL is an image file
-    func isImageFile(_ url: URL) -> Bool {
+    nonisolated func isImageFile(_ url: URL) -> Bool {
         guard let contentType = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType else {
             return false
         }

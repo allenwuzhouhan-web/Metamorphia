@@ -128,6 +128,22 @@ enum LocalCommandHelpers {
         runAppleScriptDetailed(source).output
     }
 
+    /// Dedicated serial queue for NSAppleScript. Apple Events block the calling
+    /// thread until the target app replies (up to the Apple Event timeout), so
+    /// they must never run on the main thread (UI hang); the single serial queue
+    /// also keeps NSAppleScript work off arbitrary concurrent pool threads.
+    private static let appleScriptQueue = DispatchQueue(label: "com.metamorphia.applescript")
+
+    /// Async wrapper that runs `runAppleScript` on the dedicated background queue,
+    /// safe to `await` from the main actor without blocking it.
+    static func runAppleScriptOffMain(_ source: String) async -> String? {
+        await withCheckedContinuation { continuation in
+            appleScriptQueue.async {
+                continuation.resume(returning: runAppleScript(source))
+            }
+        }
+    }
+
     /// Same as `runAppleScript`, but preserves the AppleScript error text for UI diagnostics.
     static func runAppleScriptDetailed(_ source: String) -> AppleScriptRunResult {
         var error: NSDictionary?

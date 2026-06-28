@@ -346,7 +346,54 @@ struct LockScreenWeatherWidget: View {
 		return allowed.contains(event.calendar.id)
 	}
 
+	/// Cache for `nextCalendarEvent`. It is a reference type so its contents can be
+	/// mutated during a `body` pass without invalidating the view (the `@State`
+	/// reference itself never changes). The computation runs ~10x per body via the
+	/// various row/visibility helpers; memoizing it on the inputs that affect the
+	/// result collapses that to a single sort+filter per tick.
+	private final class NextEventCache {
+		struct Key: Equatable {
+			let now: Date
+			let events: [EventModel]
+			let entireDuration: Bool
+			let afterStartEnabled: Bool
+			let afterStartWindow: String
+			let lookaheadWindow: String
+			let selectionMode: String
+			let selectedCalendarIDs: Set<String>
+		}
+
+		private var key: Key?
+		private var value: EventModel?
+
+		func resolve(_ newKey: Key, compute: () -> EventModel?) -> EventModel? {
+			if let key, key == newKey {
+				return value
+			}
+			let result = compute()
+			key = newKey
+			value = result
+			return result
+		}
+	}
+
+	@State private var nextEventCache = NextEventCache()
+
 	private var nextCalendarEvent: EventModel? {
+		let key = NextEventCache.Key(
+			now: currentTime,
+			events: calendarManager.lockScreenEvents,
+			entireDuration: lockScreenShowCalendarEventEntireDuration,
+			afterStartEnabled: lockScreenShowCalendarEventAfterStartEnabled,
+			afterStartWindow: lockScreenShowCalendarEventAfterStartWindow,
+			lookaheadWindow: lockScreenCalendarEventLookaheadWindow,
+			selectionMode: lockScreenCalendarSelectionMode,
+			selectedCalendarIDs: lockScreenSelectedCalendarIDs
+		)
+		return nextEventCache.resolve(key) { computeNextCalendarEvent() }
+	}
+
+	private func computeNextCalendarEvent() -> EventModel? {
 		let now = currentTime
 
 		if lockScreenShowCalendarEventEntireDuration {

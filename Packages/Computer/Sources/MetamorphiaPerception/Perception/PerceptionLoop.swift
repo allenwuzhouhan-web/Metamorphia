@@ -32,8 +32,9 @@ public enum LoopMode: String, Sendable, Codable {
 ///    DevTools Protocol, by `BrowserDOMFetcher`).
 ///  - **Cheap on idle screens.** When nothing changes, the loop still ticks but no
 ///    subscriber receives a frame — the content-hash gate short-circuits emission.
-///  - **Adaptive throttle.** After 1 s of unchanged frames the loop drops to 2 Hz;
-///    on the next change it snaps back to the configured target rate for 3 s.
+///  - **Adaptive throttle.** After `activeHoldDuration` (3 s) of unchanged frames the
+///    loop drops to 2 Hz; on the next change it snaps back to the configured target
+///    rate and holds it for another 3 s.
 ///  - **Latest-wins backpressure.** Slow consumers see only the newest frame, not a
 ///    backlog — implemented with `AsyncStream.Continuation.bufferingPolicy(.bufferingNewest(1))`.
 ///  - **Fair cooperation with the shared pipeline.** Uses the pipeline's 200 ms cache
@@ -133,15 +134,10 @@ public actor PerceptionLoop {
             let tickStart = Date()
 
             // Decide the effective rate for this tick based on recent activity.
+            // Hold the active rate for `activeHoldDuration` after the last
+            // emission, then back off to `idleHz`.
             let timeSinceLastEmission = Date().timeIntervalSince(lastEmissionTime)
-            let effectiveHz: Double
-            if timeSinceLastEmission < activeHoldDuration {
-                effectiveHz = targetHz
-            } else if timeSinceLastEmission < idleThreshold + activeHoldDuration {
-                effectiveHz = targetHz
-            } else {
-                effectiveHz = idleHz
-            }
+            let effectiveHz = (timeSinceLastEmission < activeHoldDuration) ? targetHz : idleHz
             let tickInterval = 1.0 / effectiveHz
 
             // Wave 6 — push mode: tick is a heartbeat only. Post to TriggerBus

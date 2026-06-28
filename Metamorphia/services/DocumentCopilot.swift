@@ -192,8 +192,7 @@ enum DocumentCopilot {
         let resolvedKind = candidate.kind
         if let requestedKind, requestedKind != resolvedKind { return nil }
 
-        // NSAppleScript is not thread-safe — run the descriptor probe on the main actor.
-        let descriptor = await MainActor.run { frontmostDocumentDescriptor(bundleID: bundleID) }
+        let descriptor = await frontmostDocumentDescriptor(bundleID: bundleID)
 
         if let descriptor,
            let path = descriptor.path,
@@ -270,13 +269,15 @@ enum DocumentCopilot {
         return URL(fileURLWithPath: expanded)
     }
 
-    private static func frontmostDocumentDescriptor(bundleID: String) -> (title: String, path: String?)? {
+    private static func frontmostDocumentDescriptor(bundleID: String) async -> (title: String, path: String?)? {
+        // NSAppleScript blocks until the target app replies, so run it on the
+        // dedicated background queue rather than the main actor (avoids UI hang).
         let payload: String?
         switch bundleID {
         case powerPointBundleID:
-            payload = LocalCommandHelpers.runAppleScript(powerPointScript)
+            payload = await LocalCommandHelpers.runAppleScriptOffMain(powerPointScript)
         case wordBundleID:
-            payload = LocalCommandHelpers.runAppleScript(wordScript)
+            payload = await LocalCommandHelpers.runAppleScriptOffMain(wordScript)
         default:
             payload = nil
         }
@@ -324,8 +325,7 @@ enum DocumentCopilot {
         if let requestedKind,
            let bundleID = bundleID(for: requestedKind),
            !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty {
-            // NSAppleScript is not thread-safe — run the descriptor probe on the main actor.
-            let descriptor = await MainActor.run { frontmostDocumentDescriptor(bundleID: bundleID) }
+            let descriptor = await frontmostDocumentDescriptor(bundleID: bundleID)
             if descriptor != nil {
                 return (
                     bundleID: bundleID,
@@ -584,8 +584,7 @@ enum DocumentCopilot {
         let bundleID = candidate.bundleID
         let kind = candidate.kind
 
-        // NSAppleScript is not thread-safe — run the descriptor probe on the main actor.
-        let descriptor = await MainActor.run { frontmostDocumentDescriptor(bundleID: bundleID) }
+        let descriptor = await frontmostDocumentDescriptor(bundleID: bundleID)
         guard let descriptor,
               let path = descriptor.path,
               let fileURL = sanitizedFileURL(path: path) else {
@@ -1019,8 +1018,9 @@ enum DocumentCopilot {
             currentDirectory: extracted
         )
 
-        try fm.removeItem(at: fileURL)
-        try fm.moveItem(at: rebuilt, to: fileURL)
+        // Atomic, rollback-safe swap — never leaves the user's document deleted
+        // with no replacement if the move fails.
+        _ = try fm.replaceItemAt(fileURL, withItemAt: rebuilt)
 
         return NativeWordCommentWriteResult(
             insertedCount: insertedCount,
@@ -1345,12 +1345,24 @@ enum DocumentCopilot {
         let pipe = Pipe()
         process.standardError = pipe
 
+        // Drain stderr concurrently so a full pipe buffer (zip/unzip can be
+        // chatty) can't deadlock the child against waitUntilExit().
+        let handle = pipe.fileHandleForReading
+        let drainQueue = DispatchQueue(label: "com.metamorphia.docprocess.stderr")
+        let group = DispatchGroup()
+        var stderrData = Data()
+        group.enter()
+        drainQueue.async {
+            stderrData = handle.readDataToEndOfFile()
+            group.leave()
+        }
+
         try process.run()
         process.waitUntilExit()
+        group.wait()
 
         guard process.terminationStatus == 0 else {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let stderr = String(data: data, encoding: .utf8) ?? ""
+            let stderr = String(data: stderrData, encoding: .utf8) ?? ""
             throw NSError(
                 domain: "DocumentCopilot",
                 code: Int(process.terminationStatus),

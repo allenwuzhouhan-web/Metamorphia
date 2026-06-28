@@ -532,13 +532,13 @@ class StatsManager: ObservableObject {
         diskWriteHistory = Array(repeating: 0.0, count: maxHistoryPoints)
         
         // Initialize baseline network/disk stats on the sampling queue, which
-        // owns this delta state.
-        let initialStats = getNetworkStats()
-        let initialDiskStats = getDiskStats()
-        samplingQueue.sync {
-            previousNetworkStats = initialStats
-            previousTimestamp = Date()
-            previousDiskStats = initialDiskStats
+        // owns this delta state. The getifaddrs walk and IOStorage registry
+        // iteration run on the sampling queue rather than the main thread.
+        samplingQueue.async { [weak self] in
+            guard let self else { return }
+            self.previousNetworkStats = self.getNetworkStats()
+            self.previousTimestamp = Date()
+            self.previousDiskStats = self.getDiskStats()
         }
 
         Defaults.publisher(.statsUpdateInterval, options: []).sink { [weak self] change in
@@ -608,27 +608,31 @@ class StatsManager: ObservableObject {
         
         print("StatsManager: Starting monitoring...")
 
-        // Reset baseline for accurate measurement on the sampling queue, which
-        // owns this delta state.
-        let initialStats = getNetworkStats()
-        let initialDiskStats = getDiskStats()
-        samplingQueue.sync {
-            previousNetworkStats = initialStats
-            previousDiskStats = initialDiskStats
-            previousTimestamp = Date()
-            networkTotalsAccumulator = .zero
-            diskTotalsAccumulator = .zero
-        }
-
         isMonitoring = true
         lastUpdated = Date()
         networkTotals = .zero
         diskTotals = .zero
 
-        scheduleMonitoringTimer()
+        // Reset baseline for accurate measurement on the sampling queue, which
+        // owns this delta state. The getifaddrs walk and IOStorage registry
+        // iteration run on the sampling queue rather than the main thread; once
+        // the baseline is in place we hop back to the main actor to start the
+        // monitoring timer and take the first sample.
+        samplingQueue.async { [weak self] in
+            guard let self else { return }
+            let initialStats = self.getNetworkStats()
+            let initialDiskStats = self.getDiskStats()
+            self.previousNetworkStats = initialStats
+            self.previousDiskStats = initialDiskStats
+            self.previousTimestamp = Date()
+            self.networkTotalsAccumulator = .zero
+            self.diskTotalsAccumulator = .zero
 
-        Task { @MainActor in
-            self.updateSystemStats()
+            Task { @MainActor [weak self] in
+                guard let self, self.isMonitoring else { return }
+                self.scheduleMonitoringTimer()
+                self.updateSystemStats()
+            }
         }
 
         print("StatsManager: Monitoring started")

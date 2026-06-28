@@ -3876,6 +3876,7 @@ struct Appearance: View {
     @Default(.enableLockScreenTimerWidget) private var enableLockScreenTimerWidget
     @Default(.externalDisplayStyle) private var externalDisplayStyle
     @State private var selectedListVisualizer: CustomVisualizer? = nil
+    @State private var hoveredListVisualizer: CustomVisualizer? = nil
 
     @State private var isIconImporterPresented = false
     @State private var isIconDropTarget = false
@@ -4121,9 +4122,21 @@ struct Appearance: View {
             Section {
                 List {
                     ForEach(customVisualizers, id: \.UUID) { visualizer in
+                        let isAnimating = hoveredListVisualizer == visualizer || selectedListVisualizer == visualizer
                         HStack {
-                            LottieView(state: LUStateData(type: .loadedFrom(visualizer.url), speed: visualizer.speed, loopMode: .loop))
-                                .frame(width: 30, height: 30, alignment: .center)
+                            // Pin to a static frame unless this row is hovered/selected so
+                            // the list doesn't run many infinite Lottie loops at once.
+                            LottieView(
+                                state: LUStateData(
+                                    type: .loadedFrom(visualizer.url),
+                                    speed: visualizer.speed,
+                                    loopMode: .loop,
+                                    isControlEnabled: !isAnimating
+                                ),
+                                value: isAnimating ? 0 : 0.5
+                            )
+                            .frame(width: 30, height: 30, alignment: .center)
+                            .id(isAnimating)
                             Text(visualizer.name)
                             Spacer(minLength: 0)
                             if selectedVisualizer == visualizer {
@@ -4147,6 +4160,13 @@ struct Appearance: View {
                                 return
                             }
                             selectedListVisualizer = visualizer
+                        }
+                        .onHover { hovering in
+                            if hovering {
+                                hoveredListVisualizer = visualizer
+                            } else if hoveredListVisualizer == visualizer {
+                                hoveredListVisualizer = nil
+                            }
                         }
                     }
                 }
@@ -4255,7 +4275,7 @@ struct Appearance: View {
                 Defaults.Toggle(key: .showMirror) {
                     Text("Enable Dynamic mirror")
                 }
-                .disabled(!checkVideoInput())
+                .disabled(!webcamManager.cameraAvailable)
                 .settingsHighlight(id: highlightID("Enable Dynamic mirror"))
                 Picker("Mirror shape", selection: $mirrorShape) {
                     Text("Circle")
@@ -4514,14 +4534,6 @@ struct Appearance: View {
             selectedAppIconID = nil
             applySelectedAppIcon()
         }
-    }
-
-    func checkVideoInput() -> Bool {
-        if let _ = AVCaptureDevice.default(for: .video) {
-            return true
-        }
-
-        return false
     }
 
     @ViewBuilder

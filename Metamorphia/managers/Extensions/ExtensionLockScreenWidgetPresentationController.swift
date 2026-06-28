@@ -121,6 +121,7 @@ final class ExtensionLockScreenWidgetPresentationController {
 private final class ExtensionLockScreenWidgetWindowPool {
     private struct WindowRecord {
         let window: NSWindow
+        let hosting: NSHostingView<ExtensionLockScreenWidgetView>
     }
 
     private var windows: [String: WindowRecord] = [:]
@@ -162,13 +163,18 @@ private final class ExtensionLockScreenWidgetWindowPool {
         guard let screen = currentScreen() else { return }
         let descriptor = payload.descriptor
         let isNewWindow = windows[payload.id] == nil
-        let window = ensureWindow(for: payload.id)
-        let hosting = NSHostingView(rootView: ExtensionLockScreenWidgetView(payload: payload))
+        let record = ensureWindow(for: payload)
+        let window = record.window
+        let hosting = record.hosting
+        if isNewWindow {
+            window.contentView = hosting
+        } else {
+            hosting.rootView = ExtensionLockScreenWidgetView(payload: payload)
+        }
         hosting.frame = NSRect(origin: .zero, size: descriptor.size)
         hosting.wantsLayer = true
         hosting.layer?.masksToBounds = true
         hosting.layer?.cornerRadius = descriptor.cornerRadius
-        window.contentView = hosting
         window.setFrame(frame(for: descriptor, on: screen), display: true)
         window.alphaValue = 1
         window.orderFrontRegardless()
@@ -179,9 +185,10 @@ private final class ExtensionLockScreenWidgetWindowPool {
         }
     }
 
-    private func ensureWindow(for id: String) -> NSWindow {
+    private func ensureWindow(for payload: ExtensionLockScreenWidgetPayload) -> WindowRecord {
+        let id = payload.id
         if let record = windows[id] {
-            return record.window
+            return record
         }
 
         let window = NSWindow(
@@ -203,9 +210,10 @@ private final class ExtensionLockScreenWidgetWindowPool {
         ScreenCaptureVisibilityManager.shared.register(window, scope: .entireInterface)
         SkyLightOperator.shared.delegateWindow(window)
 
-        let record = WindowRecord(window: window)
+        let hosting = NSHostingView(rootView: ExtensionLockScreenWidgetView(payload: payload))
+        let record = WindowRecord(window: window, hosting: hosting)
         windows[id] = record
-        return window
+        return record
     }
 
     private func hideWindow(withID id: String) {

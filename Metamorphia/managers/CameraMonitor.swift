@@ -332,15 +332,14 @@ class CameraMonitor: ObservableObject {
     
     /// Check current camera status (hybrid approach)
     func checkCameraStatus() {
-        // Try CMIO first, fallback to AVFoundation
+        // Try CMIO first, fallback to AVFoundation.
+        // Swift's || short-circuits, so the heavier AVFoundation DiscoverySession
+        // probe only runs when the cheap CMIO check reports the camera inactive.
         let isCMIOActive = checkCameraStatusCMIO()
-        let isAVActive = checkCameraStatusAVFoundation()
-        
-        // Use OR logic - either method detects usage
-        let isActive = isCMIOActive || isAVActive
-        
+        let isActive = isCMIOActive || checkCameraStatusAVFoundation()
+
         // Debug logging
-        print("CameraMonitor: 🔍 Checking... current=\(isCameraActive), CMIO=\(isCMIOActive), AV=\(isAVActive), final=\(isActive)")
+        print("CameraMonitor: 🔍 Checking... current=\(isCameraActive), CMIO=\(isCMIOActive), final=\(isActive)")
         
         // Update state if changed
         if isActive != isCameraActive {

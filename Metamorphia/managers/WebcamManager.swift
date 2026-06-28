@@ -27,36 +27,16 @@ import Defaults
 class WebcamManager: NSObject, ObservableObject {
     static let shared = WebcamManager()
     
-    @Published var previewLayer: AVCaptureVideoPreviewLayer? {
-        didSet {
-            objectWillChange.send()
-        }
-    }
-    
-    private var captureSession: AVCaptureSession?
-    @Published var isSessionRunning: Bool = false {
-        didSet {
-            objectWillChange.send()
-        }
-    }
-    
-    @Published var authorizationStatus: AVAuthorizationStatus = .notDetermined {
-        didSet {
-            objectWillChange.send()
-        }
-    }
-    
-    @Published var cameraAvailable: Bool = false {
-        didSet {
-            objectWillChange.send()
-        }
-    }
+    @Published var previewLayer: AVCaptureVideoPreviewLayer?
 
-    @Published var availableCameras: [AVCaptureDevice] = [] {
-        didSet {
-            objectWillChange.send()
-        }
-    }
+    private var captureSession: AVCaptureSession?
+    @Published var isSessionRunning: Bool = false
+
+    @Published var authorizationStatus: AVAuthorizationStatus = .notDetermined
+
+    @Published var cameraAvailable: Bool = false
+
+    @Published var availableCameras: [AVCaptureDevice] = []
 
     private let sessionQueue = DispatchQueue(label: "Metamorphia.WebcamManager.SessionQueue", qos: .userInitiated)
     
