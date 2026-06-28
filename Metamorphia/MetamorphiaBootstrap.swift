@@ -396,7 +396,8 @@ public enum MetamorphiaBootstrap {
             await ProposalLoop.shared.start(
                 stream: activityStream,
                 attentionScore: { @MainActor in AttentionModel.shared.currentScore },
-                budgetTier: { await PerceptionBudget.shared.current.rawValue }
+                budgetTier: { await PerceptionBudget.shared.current.rawValue },
+                focusActive: { @MainActor in DoNotDisturbManager.shared.focusSuppressionActive }
             )
         }
 
@@ -431,6 +432,7 @@ public enum MetamorphiaBootstrap {
             RetraceSurface.shared.interestGraph = Self.interestGraph
             RetraceSurface.shared.activityStream = activityStream
             RetraceSurface.shared.start()
+            SpotlightIndexer.shared.start()
             RetraceSessionBridge.shared.start(stream: activityStream)
             if Defaults[.retraceIngestionEnabled] &&
                Defaults[.retraceScreenEnabled] &&
@@ -569,7 +571,11 @@ public enum MetamorphiaBootstrap {
             displayStateSink: nil,    // wired via viewModel below
             progressSink: nil,
             treeSink: nil,
-            costTracker: tracker      // powers the per-task cost ceiling breaker
+            costTracker: tracker,     // powers the per-task cost ceiling breaker
+            // M9: inject a FileConversationStore so setRunSessionId()/
+            // effectiveSessionId actually persist phone-originated threads.
+            // Without this, the per-run override is plumbing with no storage.
+            conversationStore: FileConversationStore()
         )
         Self.loop = loop
 

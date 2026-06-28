@@ -208,6 +208,12 @@ public final class AICommandViewModel: ObservableObject {
     /// the minimized view's pulse dot color (blue pulsing → solid green).
     @Published public var hasUnseenCompletion: Bool = false
 
+    /// Brief glanceable summary of the last completed run ("Done · 3 edits"),
+    /// shown as the Pulse result chip for ~2s after a turn finishes. Nil while
+    /// idle/running. Computed from `AgentLoop.Outcome.toolsUsed`; cleared at the
+    /// start of the next submit.
+    @Published public private(set) var lastResultSummary: String?
+
     /// Files the user has dragged onto the command bar, pending injection into
     /// the next submitted prompt. Cleared after each submission. Not persisted.
     @Published public private(set) var attachedFiles: [CommandBarAttachedFile] = []
@@ -232,10 +238,21 @@ public final class AICommandViewModel: ObservableObject {
     /// machine path.
     private var streamingBuffer: String = ""
 
+    /// M9: non-nil only while a phone-originated turn streams. Drives the
+    /// throttled interim TurnResult writes in the progress sink below.
+    private var remoteStreamSessionID: String?
+    private var remoteStreamLastWrite: Date = .distantPast
+    /// Throttle floor for interim CloudKit writes — ~1/sec to avoid hammering.
+    private let remoteStreamThrottle: TimeInterval = 1.0
+
     /// Guards against auto-exporting the same research turn twice — the
     /// terminal `.result` state can be re-entered (e.g. rich-content
     /// post-processing).
     private var lastAutoExportedTurnID: UUID?
+
+    /// Token used to cancel a stale `lastResultSummary` clear task when a new
+    /// submit arrives before the 2s linger period expires.
+    private var lingerToken: UUID?
 
     /// Reserved id the view model uses for the Oracle root node the agent
     /// loop opens via `treeStarted(.oracle)`.
@@ -407,7 +424,9 @@ public final class AICommandViewModel: ObservableObject {
     /// are stripped from the user-visible prompt before it reaches the LLM.
     /// The turn's displayed prompt preserves the original (slashes included)
     /// so the conversation history reflects what the user actually typed.
-    public func submit(prompt: String, systemPrompt: String) async {
+    /// `sessionID` — when non-nil (phone-originated turn), arms throttled
+    /// interim TurnResult writes so the iPhone sees partial text live.
+    public func submit(prompt: String, systemPrompt: String, sessionID: String? = nil) async {
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
         if ConversationContinuationService.parseWeChatDirectMessageRequest(prompt) != nil {
@@ -524,6 +543,7 @@ public final class AICommandViewModel: ObservableObject {
         lastExecutingToolName = ""
         lastExecutingStep = 0
         lastExecutingTotal = 0
+        lastResultSummary = nil
         // New turn — if the user had compacted the bar reading the previous
         // reply, bring it back to full size so they see the fresh stream.
         if isResponseCompacted {
@@ -600,12 +620,27 @@ public final class AICommandViewModel: ObservableObject {
 
         let runTrace = AgentTrace(goal: commandWithAttachments)
 
+        // M9: when this turn originates from the phone, bind the loop's run
+        // session so ConversationStore persists under the phone's thread id,
+        // and arm throttled TurnResult writebacks driven by the progress sink.
+        // FileConversationStore is injected at MetamorphiaBootstrap:~578.
+        if let sessionID {
+            await loop.setRunSessionId(sessionID)
+            remoteStreamSessionID = sessionID
+            remoteStreamLastWrite = .distantPast
+        }
+
         let outcome = await loop.submit(
             command: commandWithAttachments,
             systemPrompt: primedPrompt,
             previousMessages: priorMessages,
             trace: runTrace
         )
+
+        if sessionID != nil {
+            await loop.setRunSessionId(nil)
+            remoteStreamSessionID = nil
+        }
 
         if !outcome.wasCancelled, let scorer = intentScorer {
             scorer.recordOutcome(query: agentPrompt, toolsUsed: outcome.toolsUsed)
@@ -644,6 +679,22 @@ public final class AICommandViewModel: ObservableObject {
         agentTree = nil
         currentlyRunningNodeId = nil
         streamingBuffer = ""
+
+        // Pulse result chip — set a brief glanceable summary so the Pulse
+        // lingers with a "Done" chip for ~2s after the run finishes.
+        if !outcome.wasCancelled && errorMessage == nil {
+            let edits = outcome.toolsUsed.filter {
+                $0 == "edit_file" || $0 == "write_file"
+            }.count
+            lastResultSummary = edits > 0 ? "Done · \(edits) edit\(edits == 1 ? "" : "s")" : "Done"
+            let turnToken = UUID()
+            lingerToken = turnToken
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                guard let self, self.lingerToken == turnToken else { return }
+                self.lastResultSummary = nil
+            }
+        }
 
         // Chain observer — surface the "save as skill" banner when this run
         // crossed the "long workflow" threshold. Runs only on successful
@@ -1511,6 +1562,25 @@ extension AICommandViewModel: AgentProgressSink {
                 default:
                     self.streamingBuffer += chunk
                     self.inputBarState = .streaming(partialText: self.streamingBuffer)
+                    // M9: throttled interim push so the phone sees live partial text.
+                    // Interim writes use status "streaming"; the final "complete" write
+                    // is emitted by RemoteCommandListener.perform after the loop returns.
+                    // NOTE: interim writes create one CKRecord per ~1s tick — a future
+                    // sweep should prune status:"streaming" rows after the "complete"
+                    // write lands, or switch to overwriting a single record keyed by
+                    // CKRecord.ID(recordName: sessionID).
+                    if let sid = self.remoteStreamSessionID {
+                        let now = Date()
+                        if now.timeIntervalSince(self.remoteStreamLastWrite) >= self.remoteStreamThrottle {
+                            self.remoteStreamLastWrite = now
+                            let snapshot = self.streamingBuffer
+                            Task { @MainActor in
+                                await RemoteCommandListener.shared.writeInterimTurnResult(
+                                    sessionID: sid, text: snapshot
+                                )
+                            }
+                        }
+                    }
                 }
 
             case .completed, .error, .cancelled:

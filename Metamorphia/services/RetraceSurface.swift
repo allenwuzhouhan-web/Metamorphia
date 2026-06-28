@@ -65,6 +65,15 @@ public final class RetraceSurface: ObservableObject {
         )
         self.ingest = ingest
 
+        // Wire Spotlight incremental indexing. The callback is @Sendable and
+        // runs on the RetraceIngest actor; SpotlightIndexer's method guards
+        // on the opt-in flag so this is a cheap no-op when indexing is off.
+        Task { await ingest.setOnIngest { id, title, snippet in
+            Task { @MainActor in
+                SpotlightIndexer.shared.indexRetrace(id: id, title: title, snippet: snippet)
+            }
+        }}
+
         self.timeResolver = TimeResolver(anchorLookup: anchorLookup)
 
         self.queryRank = QueryRank(

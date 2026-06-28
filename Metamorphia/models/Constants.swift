@@ -1152,7 +1152,15 @@ extension Defaults.Keys {
     static let showDoNotDisturbIndicator = Key<Bool>("showDoNotDisturbIndicator", default: true)
     static let showDoNotDisturbLabel = Key<Bool>("showDoNotDisturbLabel", default: true)
     static let focusIndicatorNonPersistent = Key<Bool>("focusIndicatorNonPersistent", default: false)
-    
+    /// Durable focus signal written by the MetamorphiaFocusFilter
+    /// SetFocusFilterIntent. When true, ambient proposals are suppressed.
+    static let focusFilterActive = Key<Bool>("focusFilterActive", default: false)
+
+    // MARK: Spotlight Indexing
+    /// Opt-in: index Retrace + shelf items (titles/snippets only) into
+    /// CoreSpotlight. Off by default for privacy.
+    static let enableSpotlightIndexing = Key<Bool>("enableSpotlightIndexing", default: false)
+
     // MARK: Privacy Indicators (Camera & Microphone Detection)
     static let enableCameraDetection = Key<Bool>("enableCameraDetection", default: true)
     static let enableMicrophoneDetection = Key<Bool>("enableMicrophoneDetection", default: true)

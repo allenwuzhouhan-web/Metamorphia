@@ -85,6 +85,23 @@ public actor AgentLoop {
     private let conversationStore: ConversationStore?
     private let sessionId: String?
 
+    /// M9: per-run override of `sessionId`. When set (by `setRunSessionId`),
+    /// the loop persists the finished thread under THIS id instead of the
+    /// constructor default — letting one shared loop serve both the local
+    /// notch thread (nil → constructor id) and a remote phone thread.
+    /// Takes effect when the loop was constructed with a `conversationStore`
+    /// — MetamorphiaBootstrap injects `FileConversationStore()` at line ~578,
+    /// so phone-originated runs persist and can be resumed across turns.
+    private var runSessionIdOverride: String?
+
+    /// Set a per-run session id override. Called by MetamorphiaIntentEngine /
+    /// AICommandViewModel before and after each phone-originated run.
+    public func setRunSessionId(_ id: String?) { self.runSessionIdOverride = id }
+
+    /// Effective session id for persistence: per-run override wins over the
+    /// constructor default.
+    private var effectiveSessionId: String? { runSessionIdOverride ?? sessionId }
+
     /// Strong retain so auto-submissions don't lose the in-flight Task.
     private var currentTask: Task<Outcome, Never>?
 
@@ -185,11 +202,20 @@ public actor AgentLoop {
 
         // Persist the completed thread so sessions can resume across launches.
         // Failures are swallowed — a save error must never break the caller's run.
-        if let store = conversationStore, let id = sessionId, !outcome.wasCancelled {
+        if let store = conversationStore, let id = effectiveSessionId, !outcome.wasCancelled {
             try? await store.save(sessionId: id, messages: outcome.messages)
         }
 
         return outcome
+    }
+
+    /// Load persisted messages for the given session from the injected
+    /// `ConversationStore`. Returns an empty array when no store is configured
+    /// or no prior session exists. Used by callers that want to hydrate
+    /// `previousMessages` before submitting a continuation turn.
+    public func loadMessages(sessionId: String) async -> [ChatMessage] {
+        guard let store = conversationStore else { return [] }
+        return (try? await store.load(sessionId: sessionId)) ?? []
     }
 
     /// Cancel any in-flight run. The current `submit(...)` will return an

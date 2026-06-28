@@ -52,6 +52,9 @@ struct AgentPresenceLiveActivity: View {
             if agentViewModel.isProcessing {
                 indicator
                     .transition(.opacity)
+            } else if let summary = agentViewModel.lastResultSummary {
+                resultChip(summary)
+                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
             }
         }
         .contentShape(Rectangle())
@@ -59,16 +62,72 @@ struct AgentPresenceLiveActivity: View {
             CommandBarCoordinator.shared.toggle()
         }
         .animation(.smooth(duration: 0.45), value: agentViewModel.inputBarState)
+        .animation(.smooth(duration: 0.45), value: agentViewModel.lastResultSummary)
     }
 
     private var indicator: some View {
-        SiriOrbView(
-            isProcessing: posture.isBreathing,
-            hasError: posture == .flinch,
-            diameter: 18
-        )
-        .frame(width: 20, height: 20)
+        HStack(spacing: 5) {
+            if let symbol = toolSymbol {
+                Image(systemName: symbol)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .contentTransition(.symbolEffect)
+                    .transition(.opacity)
+            }
+
+            SiriOrbView(
+                isProcessing: posture.isBreathing,
+                hasError: posture == .flinch,
+                diameter: 18
+            )
+            .frame(width: 20, height: 20)
+            .overlay { progressArc }
+        }
         .padding(.trailing, 8)
+    }
+
+    /// Thin trailing progress arc hugging the orb. Determinate when `total > 0`
+    /// (Circle().trim driven by step/total); an indeterminate breathing arc
+    /// otherwise. Hidden unless we're in the executing posture.
+    @ViewBuilder
+    private var progressArc: some View {
+        if case .executing(_, let step, let total) = agentViewModel.inputBarState {
+            if total > 0 {
+                Circle()
+                    .trim(from: 0, to: min(1, CGFloat(step) / CGFloat(total)))
+                    .stroke(.white.opacity(0.7),
+                            style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .frame(width: 22, height: 22)
+                    .animation(.smooth(duration: 0.4), value: step)
+            } else {
+                IndeterminateArc()
+                    .frame(width: 22, height: 22)
+            }
+        }
+    }
+
+    /// Brief glanceable chip shown on terminal success (`lastResultSummary`).
+    private func resultChip(_ summary: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.green)
+            Text(summary)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.white.opacity(0.9))
+                .lineLimit(1)
+        }
+        .padding(.trailing, 8)
+    }
+
+    /// The leading symbol for the currently-executing tool, via the catalog.
+    /// Nil unless executing so the symbol only appears when a tool is running.
+    private var toolSymbol: String? {
+        if case .executing(let toolName, _, _) = agentViewModel.inputBarState {
+            return AgentToolSymbolCatalog.symbol(for: toolName)
+        }
+        return nil
     }
 
     /// SUPERSET switch — maps the current input-bar state to a posture.
@@ -89,6 +148,21 @@ struct AgentPresenceLiveActivity: View {
         case .ready, .voiceListening, .researchChoice, .browserChoice,
              .thoughtRecall, .newsBriefing, .coworkingSuggestion, .healthCard:
             return .dormant
+        }
+    }
+}
+
+/// Indeterminate breathing arc — used when total step count is unknown
+/// (`total == 0`). A short arc that rotates continuously.
+private struct IndeterminateArc: View {
+    var body: some View {
+        TimelineView(.animation) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            Circle()
+                .trim(from: 0, to: 0.3)
+                .stroke(.white.opacity(0.6),
+                        style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                .rotationEffect(.degrees(t.truncatingRemainder(dividingBy: 1.2) / 1.2 * 360))
         }
     }
 }

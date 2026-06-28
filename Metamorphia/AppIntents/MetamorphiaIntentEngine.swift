@@ -26,9 +26,13 @@ enum MetamorphiaIntentEngine {
 
     /// Fire an agent run and return the final text. If `showNotch` is true,
     /// the command bar is summoned so the user sees the turn stream live.
+    /// `sessionID` — when non-nil, threads the phone's CloudKit session id
+    /// into the run so interim + final TurnResult writes correlate to one
+    /// thread. Nil for local/AppIntent-originated turns.
     static func run(
         prompt: String,
         systemPrompt: String = defaultSystemPrompt,
+        sessionID: String? = nil,
         showNotch: Bool = true
     ) async -> String {
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -40,12 +44,31 @@ enum MetamorphiaIntentEngine {
 
         if showNotch, let vm, !vm.isProcessing {
             CommandBarCoordinator.shared.summon()
-            await vm.submit(prompt: prompt, systemPrompt: systemPrompt)
+            await vm.submit(prompt: prompt, systemPrompt: systemPrompt, sessionID: sessionID)
             return vm.conversation.last?.result ?? ""
         }
 
         if let loop = MetamorphiaBootstrap.loop {
-            let outcome = await loop.submit(command: prompt, systemPrompt: systemPrompt)
+            // M9: bind this run's thread to the phone's sessionID so the agent
+            // loop persists it under ConversationStore(sessionId:). Best-effort:
+            // the singleton loop's default sessionId is nil, so we set the
+            // per-run override before submit and clear it after.
+            // FileConversationStore is injected at MetamorphiaBootstrap:~578.
+            await loop.setRunSessionId(sessionID)
+            // Load the session's persisted history so phone turns continue the
+            // same thread rather than starting from scratch each time.
+            let previousMessages: [ChatMessage]
+            if let sid = sessionID {
+                previousMessages = await loop.loadMessages(sessionId: sid)
+            } else {
+                previousMessages = []
+            }
+            let outcome = await loop.submit(
+                command: prompt,
+                systemPrompt: systemPrompt,
+                previousMessages: previousMessages
+            )
+            await loop.setRunSessionId(nil)
             return outcome.text
         }
 #endif

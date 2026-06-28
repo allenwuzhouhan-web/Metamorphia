@@ -841,7 +841,7 @@ struct ContentView: View {
                       } else if !coordinator.expandingView.show && vm.notchState == .closed && calendarLens.upcomingBrief != nil && !doNotDisturbManager.isDoNotDisturbActive && !vm.hideOnClosed {
                           // Continuum Phase 7: meeting pre-brief flash.
                           MeetingBriefLiveActivity()
-                      } else if !coordinator.expandingView.show && vm.notchState == .closed && (CommandBarCoordinator.shared.viewModel?.isProcessing ?? false) && !vm.hideOnClosed {
+                      } else if !coordinator.expandingView.show && vm.notchState == .closed && ((CommandBarCoordinator.shared.viewModel?.isProcessing ?? false) || (CommandBarCoordinator.shared.viewModel?.lastResultSummary != nil)) && !vm.hideOnClosed {
                           // The Pulse: transient agent presence. Renders ONLY while the
                           // agent is working and is mutually exclusive with the idle
                           // face below (this branch wins, suppressing the face). When

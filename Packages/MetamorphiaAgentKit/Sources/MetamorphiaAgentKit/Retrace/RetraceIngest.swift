@@ -52,6 +52,14 @@ public actor RetraceIngest {
 
     private let extractor: EntityExtractor?
 
+    /// Optional callback fired after each successful ingest (deduplicated items
+    /// do NOT trigger this). Wired by `RetraceSurface` to
+    /// `SpotlightIndexer.shared.indexRetrace` so the Spotlight index stays
+    /// incrementally up to date without the ingest actor depending on AppKit.
+    /// The tuple carries `(uniqueID, title, snippet)` where snippet is the
+    /// first 180 characters of the normalized body.
+    public var onIngest: (@Sendable (_ id: String, _ title: String, _ snippet: String) -> Void)?
+
     public init(
         index: RetraceIndex,
         aliasStore: EntityAliasStore?,
@@ -76,6 +84,12 @@ public actor RetraceIngest {
         } else {
             self.extractor = nil
         }
+    }
+
+    /// Assign the incremental-index callback from the app target (must be
+    /// called from an async context to respect actor isolation).
+    public func setOnIngest(_ callback: @escaping @Sendable (_ id: String, _ title: String, _ snippet: String) -> Void) {
+        self.onIngest = callback
     }
 
     // MARK: - Draft
@@ -153,6 +167,13 @@ public actor RetraceIngest {
         )
 
         guard let rowid = index.insert(item) else { return nil }
+
+        // Notify incremental observers (e.g. SpotlightIndexer) of the new item.
+        if let onIngest {
+            let title = draft.title ?? ""
+            let snippet = String(normalized.prefix(180))
+            onIngest(item.id.uuidString, title, snippet)
+        }
 
         // Entities → index link table + interest graph potentiation.
         if let extractor = extractor {

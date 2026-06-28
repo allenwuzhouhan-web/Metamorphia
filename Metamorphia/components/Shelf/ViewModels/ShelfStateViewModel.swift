@@ -65,6 +65,10 @@ final class ShelfStateViewModel: ObservableObject {
         if !addedIDs.isEmpty {
             ExtensionRPCServer.shared.notifyShelfItemsChanged(itemIDs: addedIDs, action: "added")
         }
+        // Spotlight incremental index — only fires when the opt-in is on.
+        for it in newItems where addedIDs.contains(it.id.uuidString) {
+            SpotlightIndexer.shared.indexShelf(id: it.id.uuidString, title: it.displayName)
+        }
     }
 
     func remove(_ item: ShelfItem) {
@@ -73,6 +77,8 @@ final class ShelfStateViewModel: ObservableObject {
             items.removeAll { $0.id == item.id }
         }
         ExtensionRPCServer.shared.notifyShelfItemsChanged(itemIDs: [item.id.uuidString], action: "removed")
+        // Spotlight removal.
+        SpotlightIndexer.shared.removeShelf(id: item.id.uuidString)
     }
 
     func updateBookmark(for item: ShelfItem, bookmark: Data) {

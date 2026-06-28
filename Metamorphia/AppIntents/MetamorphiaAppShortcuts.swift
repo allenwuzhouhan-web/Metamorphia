@@ -71,5 +71,32 @@ struct MetamorphiaAppShortcuts: AppShortcutsProvider {
             shortTitle: "Now Playing",
             systemImageName: "music.note"
         )
+        AppShortcut(
+            intent: WebSearchIntent(),
+            phrases: [
+                "Search the web with \(.applicationName)",
+                "\(.applicationName) search the web"
+            ],
+            shortTitle: "Web Search",
+            systemImageName: "magnifyingglass"
+        )
+        AppShortcut(
+            intent: RecallSceneIntent(),
+            phrases: [
+                "Ask \(.applicationName) what I was doing",
+                "\(.applicationName) recall my activity"
+            ],
+            shortTitle: "Recall Activity",
+            systemImageName: "clock.arrow.circlepath"
+        )
+        AppShortcut(
+            intent: SystemStatsIntent(),
+            phrases: [
+                "Get \(.applicationName) system stats",
+                "\(.applicationName) system stats"
+            ],
+            shortTitle: "System Stats",
+            systemImageName: "gauge.with.dots.needle.bottom.50percent"
+        )
     }
 }
