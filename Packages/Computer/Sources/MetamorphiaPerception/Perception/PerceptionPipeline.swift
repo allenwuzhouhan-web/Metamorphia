@@ -215,7 +215,11 @@ public final class PerceptionPipeline: @unchecked Sendable {
             // behavior byte-for-byte.
             if let filter = appFilter {
                 let targetApp = NSWorkspace.shared.runningApplications.first {
-                    $0.localizedName?.lowercased() == filter.lowercased()
+                    guard let name = $0.localizedName?.lowercased() else { return false }
+                    let normalizedFilter = filter.lowercased()
+                    return name == normalizedFilter ||
+                        name.contains(normalizedFilter) ||
+                        normalizedFilter.contains(name)
                 }
                 guard let app = targetApp else { return nil }
                 return AXReader.readApp(
@@ -225,13 +229,22 @@ public final class PerceptionPipeline: @unchecked Sendable {
                     viewport: nil
                 )
             }
+            if frontAppSnapshot?.bundleIdentifier == Bundle.main.bundleIdentifier {
+                return nil
+            }
             return AXReader.readFrontmostApp(viewport: nil)
         }
 
         async let windowsTask: PhaseAResult<[WindowInfo]> = Self.runPhase {
             let all = WindowEnumerator.allWindows()
             if let filter = appFilter {
-                return all.filter { $0.appName.lowercased() == filter.lowercased() }
+                let normalizedFilter = filter.lowercased()
+                return all.filter {
+                    let name = $0.appName.lowercased()
+                    return name == normalizedFilter ||
+                        name.contains(normalizedFilter) ||
+                        normalizedFilter.contains(name)
+                }
             }
             return all
         }
@@ -599,6 +612,9 @@ public final class PerceptionPipeline: @unchecked Sendable {
 
         async let axTask: PhaseAResult<AXReader.AXReadResult?> = Self.runPhase {
             guard lanes.contains(.axTree) || lanes.contains(.focus) else { return nil }
+            if frontAppSnapshot?.bundleIdentifier == Bundle.main.bundleIdentifier {
+                return nil
+            }
             return AXReader.readFrontmostApp(viewport: nil)
         }
 

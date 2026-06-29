@@ -2004,6 +2004,7 @@ public final class AICommandViewModel: ObservableObject {
         }
     }
 
+
     public func handlePowerPointFinishAction(turnID: UUID, action: PowerPointFinishAction) async {
         guard let turn = conversation.first(where: { $0.id == turnID }) else { return }
         guard case .powerPointFinish(let finish)? = turn.richContent else { return }
