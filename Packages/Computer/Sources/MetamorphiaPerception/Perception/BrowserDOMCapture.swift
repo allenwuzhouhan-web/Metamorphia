@@ -80,6 +80,17 @@ public actor BrowserDOMFetcher {
     private var cachedFingerprint: Fingerprint?
     private var cachedCapture: BrowserDOMCapture?
 
+    /// Separate fingerprint gate for `fetchInteractiveNodes`. The interactive
+    /// enumeration JS is a full-document `querySelectorAll` + per-node
+    /// `getBoundingClientRect` round-trip; on a static tab nothing in it
+    /// changes between perception ticks, so we cache the last `DOMEnumeration`
+    /// keyed on the same `(bundleID, url, title)` fingerprint and skip the
+    /// enumeration entirely on a hit. Kept separate from `cachedCapture` so a
+    /// caller that wants only the HTML capture doesn't pay for an enumeration
+    /// and vice versa.
+    private var cachedEnumFingerprint: Fingerprint?
+    private var cachedEnumeration: DOMEnumeration?
+
     /// Monotonic per-call CDP request id. Actor isolation makes the increment
     /// race-free, so parallel calls to the four Phase-C dispatch methods can
     /// run without stepping on each other's response matching. Never reset —
@@ -96,6 +107,22 @@ public actor BrowserDOMFetcher {
     /// routes responses by id, so handshake cost amortizes and we never
     /// lose a reply to unrelated interleaved events.
     private var cdpSockets: [URL: CDPSocket] = [:]
+
+    /// Last-use timestamp per pooled socket, used to evict idle/stale entries
+    /// and to pick the LRU victim when the pool is at capacity. Kept in lockstep
+    /// with `cdpSockets` — every insert/remove updates both.
+    private var cdpSocketLastUse: [URL: Date] = [:]
+
+    /// Idle entries older than this are torn down on the next `socketForWS`
+    /// call. A tab the user stopped interacting with goes quiet within seconds,
+    /// so 30 s comfortably covers an active tab between dispatches while still
+    /// reclaiming the socket/URLSession/receive-loop of an abandoned tab.
+    private static let cdpSocketIdleTimeout: TimeInterval = 30
+
+    /// Hard cap on live pooled sockets. The user only has one frontmost tab at
+    /// a time; a few slots absorb rapid tab toggling without letting one socket
+    /// per visited tab accumulate over a browsing session.
+    private static let cdpSocketPoolLimit = 6
 
     // MARK: - Public API
 
@@ -129,8 +156,11 @@ public actor BrowserDOMFetcher {
     public func invalidateCache() {
         cachedFingerprint = nil
         cachedCapture = nil
+        cachedEnumFingerprint = nil
+        cachedEnumeration = nil
         let toTeardown = Array(cdpSockets.values)
         cdpSockets.removeAll()
+        cdpSocketLastUse.removeAll()
         Task { for s in toTeardown { await s.teardown() } }
     }
 
@@ -204,11 +234,26 @@ public actor BrowserDOMFetcher {
     /// Returns the list with stable selectors (id / data-testid / aria-label
     /// / path fallback) and viewport-relative rects. `BrowserDOMJoiner` uses
     /// this to annotate AX `ScreenElement`s with `domSelector`/`domNodeId`.
+    ///
+    /// Gated by a `(bundleID, url, title)` fingerprint cache: on an unchanged
+    /// tab the previous `DOMEnumeration` is returned after a cheap URL/title
+    /// probe, so the full-document enumeration JS doesn't fire every
+    /// perception tick.
     public func fetchInteractiveNodes(
         focusedApp: AppInfo
     ) async -> DOMEnumeration? {
         guard let bundleID = focusedApp.bundleID,
               Self.isBrowserBundle(bundleID) else { return nil }
+
+        // Fingerprint gate: the enumeration JS is a full-document scan, so on
+        // a static tab (same bundle/url/title) we return the cached result
+        // without paying for another AppleScript / CDP round-trip. The probe
+        // that resolves the fingerprint is far cheaper than the enumeration.
+        let fp = await currentFingerprint(bundleID: bundleID)
+        if let fp, fp == cachedEnumFingerprint, let cached = cachedEnumeration {
+            return cached
+        }
+
         let js = Self.interactiveEnumerationJS
         let result: String?
         if Self.safariBundleIDs.contains(bundleID) {
@@ -249,10 +294,62 @@ public actor BrowserDOMFetcher {
                 isEditable: (entry["isEditable"] as? Bool) ?? false
             )
         }
-        return DOMEnumeration(
+        let enumeration = DOMEnumeration(
             nodes: nodes,
             viewportSize: CGSize(width: innerWidth, height: innerHeight),
             scaleFactor: CGFloat(scale)
+        )
+        // Store under the fingerprint computed above so the next tick on an
+        // unchanged tab is a cache hit. Skip storing when the probe couldn't
+        // resolve a fingerprint (nil) — without one we can't detect staleness,
+        // so we'd rather re-enumerate than serve a result we can't invalidate.
+        if let fp {
+            cachedEnumFingerprint = fp
+            cachedEnumeration = enumeration
+        }
+        return enumeration
+    }
+
+    /// Cheap `(bundleID, url, title)` probe used to gate `fetchInteractiveNodes`.
+    /// Safari: the same URL+title AppleScript probe `fetchSafari` already pays
+    /// for. Chrome-family: the active page target from `cdpListTargets` (an HTTP
+    /// GET, no WebSocket). Returns `nil` if the probe can't resolve a tab, in
+    /// which case the caller re-enumerates rather than trusting a stale cache.
+    private func currentFingerprint(bundleID: String) async -> Fingerprint? {
+        if Self.safariBundleIDs.contains(bundleID) {
+            #if canImport(AppKit)
+            let probe = await runAppleScript("""
+                tell application "Safari"
+                    if (count of windows) is 0 then return ""
+                    try
+                        set theTab to current tab of front window
+                        return (URL of theTab) & "|" & (name of theTab)
+                    on error
+                        return ""
+                    end try
+                end tell
+                """)
+            guard let probe = probe, !probe.isEmpty else { return nil }
+            let parts = probe.components(separatedBy: "|")
+            guard parts.count >= 2 else { return nil }
+            return Fingerprint(
+                bundleID: bundleID,
+                url: parts[0],
+                title: parts.dropFirst().joined(separator: "|")
+            )
+            #else
+            return nil
+            #endif
+        }
+        guard let targets = await cdpListTargets() else { return nil }
+        guard let target = targets.first(where: {
+            ($0["type"] as? String) == "page" &&
+            !(($0["url"] as? String) ?? "").hasPrefix("chrome-extension://")
+        }) else { return nil }
+        return Fingerprint(
+            bundleID: bundleID,
+            url: (target["url"] as? String) ?? "",
+            title: (target["title"] as? String) ?? ""
         )
     }
 
@@ -529,19 +626,75 @@ public actor BrowserDOMFetcher {
             // Transport went south — drop the cached entry so the next
             // caller re-establishes cleanly.
             cdpSockets.removeValue(forKey: wsURL)
+            cdpSocketLastUse.removeValue(forKey: wsURL)
             await socket.teardown()
         }
         return response
     }
 
     private func socketForWS(_ wsURL: URL) -> CDPSocket {
+        let now = Date()
+        pruneSockets(now: now, keeping: wsURL)
         if let existing = cdpSockets[wsURL], !existing.isBroken {
+            cdpSocketLastUse[wsURL] = now
             return existing
+        }
+        // The entry may exist but be broken — drop it before re-creating.
+        if let stale = cdpSockets.removeValue(forKey: wsURL) {
+            cdpSocketLastUse.removeValue(forKey: wsURL)
+            Task { await stale.teardown() }
         }
         let socket = CDPSocket(wsURL: wsURL)
         cdpSockets[wsURL] = socket
+        cdpSocketLastUse[wsURL] = now
         socket.start()
         return socket
+    }
+
+    /// Bound the pooled-socket count and reclaim stale ones. Evicts (a) any
+    /// socket whose transport is broken, (b) any socket idle longer than
+    /// `cdpSocketIdleTimeout`, and (c) the least-recently-used socket(s) until
+    /// the pool fits under `cdpSocketPoolLimit` once `wsURL` is accounted for.
+    /// `wsURL` is never evicted, so the caller's about-to-be-used entry always
+    /// survives. Every evicted socket is `teardown()`-ed (in a detached Task,
+    /// since this runs on the synchronous get-or-create path) so its
+    /// URLSession and receive-loop Task are actually released — `removeValue`
+    /// alone would leak them.
+    private func pruneSockets(now: Date, keeping wsURL: URL) {
+        var victims: [URL] = []
+        for (key, socket) in cdpSockets where key != wsURL {
+            if socket.isBroken {
+                victims.append(key)
+            } else if let last = cdpSocketLastUse[key],
+                      now.timeIntervalSince(last) > Self.cdpSocketIdleTimeout {
+                victims.append(key)
+            }
+        }
+
+        // LRU-evict survivors until the pool fits. After this call exactly one
+        // entry for `wsURL` is present (kept or freshly inserted), so the other
+        // sockets must number at most `poolLimit - 1`.
+        let limit = max(Self.cdpSocketPoolLimit - 1, 0)
+        var survivorCount = cdpSockets.keys.filter { $0 != wsURL && !victims.contains($0) }.count
+        if survivorCount > limit {
+            let lruOrder = cdpSockets.keys
+                .filter { $0 != wsURL && !victims.contains($0) }
+                .sorted { (cdpSocketLastUse[$0] ?? .distantPast) < (cdpSocketLastUse[$1] ?? .distantPast) }
+            for key in lruOrder where survivorCount > limit {
+                victims.append(key)
+                survivorCount -= 1
+            }
+        }
+
+        guard !victims.isEmpty else { return }
+        var toTeardown: [CDPSocket] = []
+        for key in victims {
+            if let socket = cdpSockets.removeValue(forKey: key) {
+                toTeardown.append(socket)
+            }
+            cdpSocketLastUse.removeValue(forKey: key)
+        }
+        Task { for s in toTeardown { await s.teardown() } }
     }
 
     // MARK: - AppleScript helper (Safari path)

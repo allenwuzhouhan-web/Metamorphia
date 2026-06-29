@@ -33,11 +33,13 @@ class DownloadManager {
     private let coordinator = MetamorphiaViewCoordinator.shared
     private var source: DispatchSourceFileSystemObject?
     private let queue = DispatchQueue(label: "com.dynamicisland.downloads.monitor", qos: .utility)
+    private var pendingScan: DispatchWorkItem?
     private var completionTimer: Timer?
     private var hasPerformedInitialScan: Bool = false
     private var initialCrDownloadFiles: Set<String> = []
     private var previousAllFiles: Set<String> = []
     private var ignoredFiles: Set<String> = []
+    private var cancellables = Set<AnyCancellable>()
     
     private var downloadsDirectory: URL? {
         FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
@@ -92,12 +94,22 @@ class DownloadManager {
         
         let src = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd,
-            eventMask: [.write, .rename, .delete, .attrib],
+            eventMask: [.write, .rename, .delete],
             queue: queue
         )
-        
+
         src.setEventHandler { [weak self] in
-            self?.scanDownloadsDirectory()
+            guard let self else { return }
+            // Coalesce a burst of file-system events into a single scan. During an
+            // active download the directory fires events on essentially every chunk
+            // flush; debouncing avoids re-enumerating the whole Downloads folder at a
+            // high frequency. Runs on `queue`, so `pendingScan` access is serialized.
+            self.pendingScan?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                self?.scanDownloadsDirectory()
+            }
+            self.pendingScan = work
+            self.queue.asyncAfter(deadline: .now() + 0.3, execute: work)
         }
         
         src.setCancelHandler {
@@ -113,13 +125,16 @@ class DownloadManager {
     private func stopMonitoring() {
         source?.cancel()
         source = nil
-        
+
+        pendingScan?.cancel()
+        pendingScan = nil
+
         hasPerformedInitialScan = false
         initialCrDownloadFiles.removeAll()
         ignoredFiles.removeAll()
         isDownloading = false
     }
-    
+
     private func scanDownloadsDirectory() {
         guard let downloadsDirectory else { return }
         

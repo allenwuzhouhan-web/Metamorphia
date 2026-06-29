@@ -29,6 +29,16 @@ class RealTimeAudioSpectrum: NSView {
     private var barLayers: [CAShapeLayer] = []
     private var isPlaying: Bool = true
     private var animationTimer: Timer?
+
+    // Idle-pause: when the audio is silent for a while, drop the timer to a low
+    // polling rate so we stop doing a 30fps main-thread wakeup over nothing, then
+    // ramp back up to full frame rate as soon as activity returns.
+    private let activeInterval: TimeInterval = 1.0 / 30.0
+    private let idleInterval: TimeInterval = 1.0 / 2.0
+    private let silenceEpsilon: Float = 0.01
+    private let idleFrameThreshold = 30
+    private var silentFrameCount = 0
+    private var isIdle = false
     
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -82,37 +92,66 @@ class RealTimeAudioSpectrum: NSView {
 
     private func startAnimating() {
         guard animationTimer == nil else { return }
-        // Use a timer at ~30fps for smooth animation
-        animationTimer = Timer.scheduledTimer(withTimeInterval: 1.0/30.0, repeats: true) { [weak self] _ in
+        silentFrameCount = 0
+        isIdle = false
+        scheduleTimer(interval: activeInterval)
+    }
+
+    private func scheduleTimer(interval: TimeInterval) {
+        animationTimer?.invalidate()
+        animationTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.updateBarsFromAudio()
         }
     }
-    
+
     private func stopAnimating() {
         animationTimer?.invalidate()
         animationTimer = nil
+        silentFrameCount = 0
+        isIdle = false
         resetBars()
     }
     
+    #if DEBUG
     private var debugLogCounter = 0
-    
+    #endif
+
     private func updateBarsFromAudio() {
         guard isPlaying else {
             resetBars()
             return
         }
-        
+
         // Get real-time magnitudes from AudioTap
         let magnitudes = AudioTap.shared.getSmoothedMagnitudes()
-        
+
+        // Idle-pause: throttle to a low polling rate while every lane is silent,
+        // and ramp straight back to full frame rate the moment activity returns.
+        let isSilent = magnitudes.max() < silenceEpsilon
+        if isSilent {
+            if !isIdle {
+                silentFrameCount += 1
+                if silentFrameCount >= idleFrameThreshold {
+                    isIdle = true
+                    scheduleTimer(interval: idleInterval)
+                }
+            }
+        } else {
+            silentFrameCount = 0
+            if isIdle {
+                isIdle = false
+                scheduleTimer(interval: activeInterval)
+            }
+        }
+
         // Debug: log magnitudes periodically
+        #if DEBUG
         debugLogCounter += 1
-#if DEBUG
         if debugLogCounter % 60 == 0 { // Every 2 seconds at 30fps
             print("📊 [Spectrum] Magnitudes: [\(magnitudes.x), \(magnitudes.y), \(magnitudes.z), \(magnitudes.w)]")
         }
-#endif
-        
+        #endif
+
         // Update each bar with its corresponding band magnitude
         for (index, barLayer) in barLayers.enumerated() {
             let magnitude = magnitudes[index]

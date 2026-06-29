@@ -5,6 +5,17 @@ public enum SafetyScanner {
 
     /// Run all safety checks on a set of elements and produce a SafetyReport.
     public static func scan(elements: [ScreenElement], appBundleID: String?, windowTitle: String) -> SafetyReport {
+        scanWithSensitiveResults(elements: elements, appBundleID: appBundleID, windowTitle: windowTitle).report
+    }
+
+    /// Same as `scan`, but also surfaces the sensitive-field results computed
+    /// during the pass so callers that need to redact values can reuse them
+    /// instead of running a second full `SensitiveFieldDetector.scan`.
+    public static func scanWithSensitiveResults(
+        elements: [ScreenElement],
+        appBundleID: String?,
+        windowTitle: String
+    ) -> (report: SafetyReport, sensitiveResults: [SensitiveFieldDetector.SensitiveResult]) {
         // Danger detection
         let dangerContext = DangerDetector.ScanContext(
             appBundleID: appBundleID,
@@ -19,11 +30,12 @@ public enum SafetyScanner {
         let sensitiveResults = SensitiveFieldDetector.scan(elements: elements)
         let sensitiveRefs = sensitiveResults.map { $0.ref }
 
-        return SafetyReport(
+        let report = SafetyReport(
             dangers: dangerRefs,
             sensitive: sensitiveRefs,
             driftDetected: false // Phase 3 will add drift detection
         )
+        return (report, sensitiveResults)
     }
 
     /// Redact sensitive values in elements based on scan results.

@@ -71,7 +71,7 @@ class ScreenRecordingManager: ObservableObject {
     private var debounceIdleTask: Task<Void, Never>?
     /// The private CGS notify-proc has no unregister API, so register it at most once
     /// for the app lifetime and re-use it across start/stop cycles.
-    private var hasRegisteredPrivateAPINotifications = false
+    private var hasRegisteredCallbacks = false
     
     // MARK: - Configuration
     private let debounceDelay: TimeInterval = 0.2 // Debounce rapid changes
@@ -149,10 +149,11 @@ class ScreenRecordingManager: ObservableObject {
     
     /// Setup private API notifications for screen capture events
     private func setupPrivateAPINotifications() {
-        // There is no CGSUnregisterNotifyProc API, so registering on every start would
-        // stack duplicate callbacks. Register exactly once for the app lifetime; the
-        // callback short-circuits when monitoring is off via checkRecordingStatus().
-        guard !hasRegisteredPrivateAPINotifications else { return }
+        // The global CGS registration cannot be undone (there is no
+        // CGSUnregisterNotifyProc), so register exactly once for the process
+        // lifetime. Repeated start/stop cycles would otherwise accumulate
+        // duplicate callbacks that all fire on every screen-capture event.
+        guard !hasRegisteredCallbacks else { return }
 
         // Pass self as context to the global callback function
         let context = Unmanaged.passUnretained(self).toOpaque()
@@ -165,7 +166,7 @@ class ScreenRecordingManager: ObservableObject {
         let registered2 = CGSRegisterNotifyProc(screenCaptureEventCallback, 1503, context)
 
         if registered1 && registered2 {
-            hasRegisteredPrivateAPINotifications = true
+            hasRegisteredCallbacks = true
 #if DEBUG
             print("ScreenRecordingManager: ✅ Private API notifications registered")
 #endif

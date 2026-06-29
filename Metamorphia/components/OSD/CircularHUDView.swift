@@ -121,12 +121,15 @@ struct CircularHUDView: View {
     
     private var symbolName: String {
         if !icon.isEmpty { return icon }
-        
+
         switch type {
         case .volume:
-            // Check if headphones/AirPods are connected
-            let deviceInfo = getAudioDeviceInfo()
-            
+            // Check if headphones/AirPods are connected.
+            // Read from the shared cache so the view body never blocks on a
+            // CoreAudio HAL round-trip; the cache refreshes only when the
+            // default output device actually changes.
+            let deviceInfo = AudioOutputDeviceCache.shared.current
+
             if deviceInfo.isAirPods {
                 // Use AirPods icon when AirPods are connected
                 if value < 0.01 { return "headphones.slash" }
@@ -151,13 +154,75 @@ struct CircularHUDView: View {
         }
     }
     
-    private struct AudioDeviceInfo {
+    struct AudioDeviceInfo {
         let isAirPods: Bool
         let isHeadphones: Bool
     }
-    
-    private func getAudioDeviceInfo() -> AudioDeviceInfo {
-        #if os(macOS)
+}
+
+/// Caches the connected-output-device glyph hints (AirPods / headphones) so the
+/// HUD view body never performs a blocking CoreAudio HAL query on render. The
+/// cache is resolved lazily and only refreshed when the system's default output
+/// device actually changes, via a CoreAudio property listener.
+private final class AudioOutputDeviceCache {
+    static let shared = AudioOutputDeviceCache()
+
+    private let lock = NSLock()
+    private var cached: CircularHUDView.AudioDeviceInfo?
+    private var isListening = false
+
+    var current: CircularHUDView.AudioDeviceInfo {
+        startListeningIfNeeded()
+
+        lock.lock()
+        if let cached = cached {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let resolved = Self.resolveCurrentDevice()
+        lock.lock()
+        cached = resolved
+        lock.unlock()
+        return resolved
+    }
+
+    private func invalidate() {
+        lock.lock()
+        cached = nil
+        lock.unlock()
+    }
+
+    private func startListeningIfNeeded() {
+        lock.lock()
+        guard !isListening else {
+            lock.unlock()
+            return
+        }
+        isListening = true
+        lock.unlock()
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        AudioObjectAddPropertyListener(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            { _, _, _, clientData in
+                guard let clientData = clientData else { return noErr }
+                let cache = Unmanaged<AudioOutputDeviceCache>.fromOpaque(clientData).takeUnretainedValue()
+                cache.invalidate()
+                return noErr
+            },
+            context
+        )
+    }
+
+    private static func resolveCurrentDevice() -> CircularHUDView.AudioDeviceInfo {
         // Get default output device
         var deviceID = AudioDeviceID()
         var size = UInt32(MemoryLayout.size(ofValue: deviceID))
@@ -166,11 +231,11 @@ struct CircularHUDView: View {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        
+
         guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID) == noErr else {
-            return AudioDeviceInfo(isAirPods: false, isHeadphones: false)
+            return CircularHUDView.AudioDeviceInfo(isAirPods: false, isHeadphones: false)
         }
-        
+
         // Get device name
         var deviceName: CFString = "" as CFString
         var nameSize = UInt32(MemoryLayout<CFString>.size)
@@ -179,26 +244,23 @@ struct CircularHUDView: View {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        
+
         guard AudioObjectGetPropertyData(deviceID, &nameAddress, 0, nil, &nameSize, &deviceName) == noErr else {
-            return AudioDeviceInfo(isAirPods: false, isHeadphones: false)
+            return CircularHUDView.AudioDeviceInfo(isAirPods: false, isHeadphones: false)
         }
-        
+
         let name = (deviceName as String).lowercased()
-        
+
         // Check for AirPods specifically
         let isAirPods = name.contains("airpod")
-        
+
         // Check for other headphones
-        let isHeadphones = name.contains("headphone") || 
+        let isHeadphones = name.contains("headphone") ||
                           name.contains("ear") ||
                           name.contains("buds") ||
                           name.contains("beats")
-        
-        return AudioDeviceInfo(isAirPods: isAirPods, isHeadphones: !isAirPods && isHeadphones)
-        #else
-        return AudioDeviceInfo(isAirPods: false, isHeadphones: false)
-        #endif
+
+        return CircularHUDView.AudioDeviceInfo(isAirPods: isAirPods, isHeadphones: !isAirPods && isHeadphones)
     }
 }
 #endif

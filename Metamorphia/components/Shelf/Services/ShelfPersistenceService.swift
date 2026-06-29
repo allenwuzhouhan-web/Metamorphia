@@ -33,6 +33,13 @@ final class ShelfPersistenceService {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
+    // Serial queue that coalesces rapid mutations and performs encode + atomic
+    // write off the main thread. State is only touched on this queue.
+    private let writeQueue = DispatchQueue(label: "com.metamorphia.shelf.persistence", qos: .utility)
+    private var pendingWrite: DispatchWorkItem?
+    private var latestSnapshot: [ShelfItem]?
+    private let writeDelay: DispatchTimeInterval = .milliseconds(300)
+
     private init() {
         let fm = FileManager.default
         let support = try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
@@ -86,6 +93,25 @@ final class ShelfPersistenceService {
     }
 
     func save(_ items: [ShelfItem]) {
+        // Coalesce rapid mutations: keep only the most recent snapshot and
+        // perform the encode + atomic write off the main thread. Cancel any
+        // queued write and reschedule so a burst of changes results in a single
+        // write of the last-known state (last-write-wins).
+        writeQueue.async { [weak self] in
+            guard let self else { return }
+            self.latestSnapshot = items
+            self.pendingWrite?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, let snapshot = self.latestSnapshot else { return }
+                self.latestSnapshot = nil
+                self.writeNow(snapshot)
+            }
+            self.pendingWrite = work
+            self.writeQueue.asyncAfter(deadline: .now() + self.writeDelay, execute: work)
+        }
+    }
+
+    private func writeNow(_ items: [ShelfItem]) {
         do {
             let data = try encoder.encode(items)
             try data.write(to: fileURL, options: Data.WritingOptions.atomic)

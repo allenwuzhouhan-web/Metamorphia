@@ -19,6 +19,7 @@
 import AppKit
 import Combine
 import Defaults
+import ImageIO
 import SwiftUI
 
 @MainActor
@@ -551,8 +552,10 @@ struct WallpaperView: View {
     }
 
     func loadWallpaper() {
+        let maxPixelSize = previewMaxPixelSize()
+
         if let url = Bundle.main.url(forResource: "desktop", withExtension: "jpeg"),
-           let image = NSImage(contentsOf: url),
+           let image = downsampledImage(at: url, maxPixelSize: maxPixelSize),
            image.size.width > 0,
            image.size.height > 0 {
             self.wallpaperImage = image
@@ -568,11 +571,32 @@ struct WallpaperView: View {
 
         if let screen = NSScreen.main,
            let url = NSWorkspace.shared.desktopImageURL(for: screen),
-           let image = NSImage(contentsOf: url),
+           let image = downsampledImage(at: url, maxPixelSize: maxPixelSize),
            image.size.width > 0,
            image.size.height > 0 {
             self.wallpaperImage = image
             return
         }
+    }
+
+    private func previewMaxPixelSize() -> Int {
+        guard let screen = NSScreen.main else { return 2048 }
+        let frame = screen.frame
+        let longestEdge = max(frame.width, frame.height) * screen.backingScaleFactor
+        return max(1, Int(longestEdge.rounded()))
+    }
+
+    private func downsampledImage(at url: URL, maxPixelSize: Int) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
 }

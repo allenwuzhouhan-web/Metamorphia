@@ -73,7 +73,10 @@ class FullscreenMediaDetector: ObservableObject {
         let screenNames = await MainActor.run { NSScreen.screens.map { $0.localizedName } }
 
         guard Defaults[.enableFullscreenMediaDetection] else {
-            let reset = Dictionary(uniqueKeysWithValues: screenNames.map { ($0, false) })
+            // Two identical external monitors report the same localizedName, so
+            // collapse duplicate keys instead of trapping (matches the subscript
+            // assignment used by the enabled branch below).
+            let reset = Dictionary(screenNames.map { ($0, false) }, uniquingKeysWith: { current, _ in current })
             await MainActor.run {
                 if reset != self.fullscreenStatus {
                     self.fullscreenStatus = reset

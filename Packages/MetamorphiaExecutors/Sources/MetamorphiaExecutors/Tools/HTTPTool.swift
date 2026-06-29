@@ -32,7 +32,7 @@ public struct HTTPRequestTool: ToolDefinition {
         let urlString = try requiredString("url", from: args)
         let url: URL
         do {
-            url = try URLSafetyValidator.validate(urlString)
+            url = try await URLSafetyValidator.validate(urlString)
         } catch let error as URLSafetyValidator.ValidationError {
             return "Error: \(error.localizedDescription)"
         } catch {
@@ -69,6 +69,7 @@ public struct HTTPRequestTool: ToolDefinition {
             delegate: followRedirects ? nil : NoRedirectDelegate(),
             delegateQueue: nil
         )
+        defer { session.finishTasksAndInvalidate() }
 
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {

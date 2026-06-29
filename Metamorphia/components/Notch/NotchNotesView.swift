@@ -18,6 +18,63 @@
 
 import SwiftUI
 import Defaults
+import AppKit
+import ImageIO
+
+/// Decodes note/clipboard PNG attachments into small, downsampled thumbnails once and
+/// keeps them in a bounded in-memory cache. Rows read from this instead of re-reading the
+/// full-resolution PNG off disk and re-decoding it on every SwiftUI body pass.
+enum NoteImageThumbnails {
+    private static let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 128
+        return cache
+    }()
+
+    /// Returns a cached thumbnail for the file if one has already been decoded, otherwise nil.
+    static func cachedThumbnail(fileName: String, maxPixelSize: Int) -> NSImage? {
+        cache.object(forKey: key(fileName: fileName, maxPixelSize: maxPixelSize))
+    }
+
+    /// Decodes (off the main thread) and caches a downsampled thumbnail for the file at `fileURL`.
+    /// `pointSize` is the displayed size in points; the decode is sized to the backing scale.
+    static func thumbnail(fileURL: URL, fileName: String, pointSize: CGFloat) async -> NSImage? {
+        let scale = await MainActor.run { NSScreen.main?.backingScaleFactor ?? 2.0 }
+        let maxPixelSize = Int((pointSize * scale).rounded())
+
+        if let cached = cachedThumbnail(fileName: fileName, maxPixelSize: maxPixelSize) {
+            return cached
+        }
+
+        let cacheKey = key(fileName: fileName, maxPixelSize: maxPixelSize)
+        let decoded = await Task.detached(priority: .userInitiated) { () -> NSImage? in
+            NoteImageThumbnails.decodeThumbnail(at: fileURL, maxPixelSize: maxPixelSize)
+        }.value
+
+        if let decoded {
+            cache.setObject(decoded, forKey: cacheKey)
+        }
+        return decoded
+    }
+
+    private static func key(fileName: String, maxPixelSize: Int) -> NSString {
+        "\(fileName)_\(maxPixelSize)" as NSString
+    }
+
+    private static func decodeThumbnail(at fileURL: URL, maxPixelSize: Int) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    }
+}
 
 struct NotchNotesView: View {
     @EnvironmentObject var vm: MetamorphiaViewModel
@@ -526,10 +583,11 @@ struct NotchClipboardItemRow: View {
     let item: ClipboardItem
     let isHovered: Bool
     let justCopied: Bool
-    
+    @State private var thumbnail: NSImage?
+
     var body: some View {
         HStack(spacing: 12) {
-            if item.type == .image, let data = item.getImageData(), let nsImage = NSImage(data: data) {
+            if item.type == .image, let nsImage = thumbnail {
                  Image(nsImage: nsImage)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -563,8 +621,27 @@ struct NotchClipboardItemRow: View {
         .padding(10)
         .background(Color(nsColor: .controlBackgroundColor).opacity(isHovered ? 0.3 : 0.15))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .task(id: item.imageFileName) {
+            await loadThumbnail()
+        }
     }
-    
+
+    private func loadThumbnail() async {
+        guard item.type == .image, let fileName = item.imageFileName else {
+            thumbnail = nil
+            return
+        }
+        // Serve an already-decoded thumbnail synchronously when available so the row never flashes empty.
+        if let cached = NoteImageThumbnails.cachedThumbnail(fileName: fileName, maxPixelSize: Self.maxPixelSize) {
+            thumbnail = cached
+            return
+        }
+        let fileURL = ClipboardManager.clipboardDataDirectory.appendingPathComponent(fileName)
+        thumbnail = await NoteImageThumbnails.thumbnail(fileURL: fileURL, fileName: fileName, pointSize: 32)
+    }
+
+    private static let maxPixelSize = Int((32 * (NSScreen.main?.backingScaleFactor ?? 2.0)).rounded())
+
     private func timeAgoString(from date: Date) -> String {
         let interval = Date().timeIntervalSince(date)
         if interval < 60 { return String(localized: "Just now") }
@@ -832,6 +909,7 @@ struct NoteRow: View {
     let isCompact: Bool
     @State private var isHovered = false
     @State private var isCopied = false
+    @State private var thumbnail: NSImage?
     @Default(.enableNotePinning) var enableNotePinning
     
     var body: some View {
@@ -900,16 +978,22 @@ struct NoteRow: View {
                             let pasteboard = NSPasteboard.general
                             pasteboard.clearContents()
                             pasteboard.setString(note.content, forType: .string)
-                            
-                            // Also copy image data if present
-                            if let imageData = note.getImageData(), let tiffData = NSImage(data: imageData)?.tiffRepresentation {
-                                pasteboard.setData(tiffData, forType: .tiff)
+
+                            // Also copy image data if present. Read + decode off the main thread so a
+                            // large note image doesn't allocate a full uncompressed TIFF buffer on the UI.
+                            let noteForCopy = note
+                            Task.detached(priority: .userInitiated) {
+                                guard let imageData = noteForCopy.getImageData(),
+                                      let tiffData = NSImage(data: imageData)?.tiffRepresentation else { return }
+                                await MainActor.run {
+                                    pasteboard.setData(tiffData, forType: .tiff)
+                                }
                             }
-                            
+
                             withAnimation {
                                 isCopied = true
                             }
-                            
+
                             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                                 withAnimation {
                                     isCopied = false
@@ -954,7 +1038,7 @@ struct NoteRow: View {
                         .foregroundStyle(.secondary.opacity(0.6))
                 }
                 
-                if let imageData = note.getImageData(), let nsImage = NSImage(data: imageData) {
+                if let nsImage = thumbnail {
                     Image(nsImage: nsImage)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
@@ -972,8 +1056,27 @@ struct NoteRow: View {
                 isHovered = hovering
             }
         }
+        .task(id: note.imageFileName) {
+            await loadThumbnail()
+        }
     }
-    
+
+    private func loadThumbnail() async {
+        guard let fileName = note.imageFileName else {
+            thumbnail = nil
+            return
+        }
+        // Decode at the larger displayed size (50pt) so the thumbnail stays crisp in both grid modes.
+        if let cached = NoteImageThumbnails.cachedThumbnail(fileName: fileName, maxPixelSize: Self.maxPixelSize) {
+            thumbnail = cached
+            return
+        }
+        let fileURL = NoteItem.noteImageDataDirectory.appendingPathComponent(fileName)
+        thumbnail = await NoteImageThumbnails.thumbnail(fileURL: fileURL, fileName: fileName, pointSize: 50)
+    }
+
+    private static let maxPixelSize = Int((50 * (NSScreen.main?.backingScaleFactor ?? 2.0)).rounded())
+
     private func timeAgoString(from date: Date) -> String {
         let interval = Date().timeIntervalSince(date)
         if interval < 60 { return String(localized: "Just now") }
@@ -1003,7 +1106,8 @@ struct NoteEditorView: View {
     }
 
     @FocusState private var isContentFocused: Bool
-    
+    @State private var previewImage: NSImage?
+
     var body: some View {
         VStack(spacing: 0) {
             // Toolbar
@@ -1094,7 +1198,7 @@ struct NoteEditorView: View {
                     .background(Color.white.opacity(0.05))
                 
                 // Image Overlay in Bottom Right
-                if let data = imageData, let nsImage = NSImage(data: data) {
+                if let nsImage = previewImage {
                     VStack {
                         Spacer()
                         HStack {
@@ -1151,6 +1255,11 @@ struct NoteEditorView: View {
             if isNew {
                 isContentFocused = true
             }
+        }
+        .onChange(of: imageData, initial: true) { _, newData in
+            // Decode the attached image once when it changes instead of on every
+            // body recompute (the TextEditor binding makes body run on each keystroke).
+            previewImage = newData.flatMap { NSImage(data: $0) }
         }
     }
 }

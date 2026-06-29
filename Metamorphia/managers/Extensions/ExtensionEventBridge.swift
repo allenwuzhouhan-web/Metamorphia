@@ -131,7 +131,7 @@ final class ExtensionEventBridge {
 
     private func observe<T: Codable>(channel: Channel,
                                      handler: @escaping ([T], Int32) -> Void) -> NSObjectProtocol {
-        notificationCenter.addObserver(forName: channel.notificationName, object: nil, queue: .main) { [weak self] notification in
+        let token = notificationCenter.addObserver(forName: channel.notificationName, object: nil, queue: .main) { [weak self] notification in
             guard let self else { return }
             let sourcePID = (notification.userInfo?[UserInfoKey.sourcePID] as? NSNumber)?.int32Value ?? 0
             guard sourcePID != self.processIdentifier else { return }
@@ -145,6 +145,7 @@ final class ExtensionEventBridge {
             let snapshot: [T] = self.loadSnapshot(channel: channel)
             handler(snapshot, sourcePID)
         }
+        return token
     }
 
     // MARK: - Helpers

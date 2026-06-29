@@ -494,20 +494,57 @@ enum SmartCalculator {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !sanitized.isEmpty else { return nil }
+        // Reject dangling/double operators and bare number runs ("5-", "2++", "5 5")
+        // as a fast path; the ObjC trap below is the load-bearing safety net.
+        guard isWellFormedExpression(sanitized) else { return nil }
 
-        // Try NSExpression
-        let expr: NSExpression
-        do {
-            expr = try NSExpression(format: sanitized)
-        } catch {
-            return nil
+        // NSExpression(format:) is NOT a Swift-throwing API — it raises an
+        // uncatchable ObjC NSInvalidArgumentException on malformed input, so the
+        // build + evaluation must run inside an Objective-C @try/@catch trap.
+        // ExceptionTrap.trying(_:error:) imports into Swift as a throwing call.
+        let value = try? ExceptionTrap.trying {
+            NSExpression(format: sanitized).expressionValue(with: nil, context: nil)
         }
 
-        guard let result = expr.expressionValue(with: nil, context: nil) as? NSNumber else {
+        guard let result = value as? NSNumber else {
             return nil
         }
 
         return formatNumber(result.doubleValue)
+    }
+
+    /// Cheap structural guard so the common malformed inputs never reach
+    /// NSExpression (avoids the cost of raising/catching an ObjC exception).
+    private static func isWellFormedExpression(_ s: String) -> Bool {
+        let ops: Set<Character> = ["+", "-", "*", "/"]
+        let tokens = s.split(whereSeparator: { $0 == " " }).map(String.init)
+        // Two adjacent numeric tokens with no operator between them ("5 5").
+        if tokens.count >= 2 {
+            func isNumeric(_ t: String) -> Bool { Double(t) != nil }
+            for i in 0..<(tokens.count - 1) where isNumeric(tokens[i]) && isNumeric(tokens[i + 1]) {
+                return false
+            }
+        }
+        let compact = Array(s.replacingOccurrences(of: " ", with: ""))
+        guard let first = compact.first, let last = compact.last else { return false }
+        // Leading/trailing binary operator ("+5", "5-").
+        if ops.contains(first) && first != "-" { return false }
+        if ops.contains(last) { return false }
+        // Balanced parentheses and no empty "()".
+        var depth = 0
+        for (i, c) in compact.enumerated() {
+            if c == "(" { depth += 1 }
+            if c == ")" {
+                depth -= 1
+                if depth < 0 { return false }
+                if i > 0 && compact[i - 1] == "(" { return false }
+            }
+            // Two binary operators in a row ("2++", "5*/2"); allow a unary minus.
+            if i > 0 && ops.contains(c) && ops.contains(compact[i - 1]) && c != "-" { return false }
+        }
+        if depth != 0 { return false }
+        // A lone "%" with no operand pattern NSExpression can parse.
+        return true
     }
 
     // MARK: - Helpers

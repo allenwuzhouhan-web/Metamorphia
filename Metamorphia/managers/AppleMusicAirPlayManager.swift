@@ -98,15 +98,17 @@ final class AppleMusicAirPlayManager: ObservableObject {
         guard let result = try? await AppleScriptHelper.execute(script) else { return }
 
         var fetched: [AirPlayDevice] = []
-        for i in 1...result.numberOfItems {
-            guard let item = result.atIndex(i) else { continue }
-            let name = item.atIndex(1)?.stringValue ?? "Unknown"
-            let kind = item.atIndex(2)?.stringValue ?? "AirPlay device"
-            let selected = item.atIndex(3)?.booleanValue ?? false
-            let addr = item.atIndex(4)?.stringValue ?? ""
-            let volume = Int(item.atIndex(5)?.int32Value ?? 50)
-            let id = addr.isEmpty ? name : addr
-            fetched.append(AirPlayDevice(id: id, name: name, kind: kind, isSelected: selected, volume: volume))
+        if result.numberOfItems >= 1 {
+            for i in 1...result.numberOfItems {
+                guard let item = result.atIndex(i) else { continue }
+                let name = item.atIndex(1)?.stringValue ?? "Unknown"
+                let kind = item.atIndex(2)?.stringValue ?? "AirPlay device"
+                let selected = item.atIndex(3)?.booleanValue ?? false
+                let addr = item.atIndex(4)?.stringValue ?? ""
+                let volume = Int(item.atIndex(5)?.int32Value ?? 50)
+                let id = addr.isEmpty ? name : addr
+                fetched.append(AirPlayDevice(id: id, name: name, kind: kind, isSelected: selected, volume: volume))
+            }
         }
         devices = fetched
         for device in fetched {

@@ -38,6 +38,7 @@ final class VerticalHUDWindowManager {
     
     private init() {
         setupPositionObserver()
+        setupScreenObserver()
     }
     
     // Helper Struct
@@ -67,7 +68,27 @@ final class VerticalHUDWindowManager {
             }
         }.store(in: &cancellables)
     }
-    
+
+    private func setupScreenObserver() {
+        NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                Task { @MainActor in
+                    self.pruneDisconnectedScreens()
+                }
+            }.store(in: &cancellables)
+    }
+
+    private func pruneDisconnectedScreens() {
+        guard !windows.isEmpty else { return }
+
+        let activeScreens = NSScreen.screens
+        for (screen, window) in windows where !activeScreens.contains(screen) {
+            window.nsWindow.orderOut(nil)
+            windows.removeValue(forKey: screen)
+        }
+    }
+
     private func updateWindowLayout() {
         guard !windows.isEmpty else { return }
         

@@ -30,7 +30,7 @@ struct ExcelDataTable: Sendable, Hashable {
     }
 }
 
-struct ExcelAnalysisRoute {
+struct ExcelAnalysisRoute: Sendable {
     let filePath: String?
     let commandContextBlock: String
     let systemPromptSuffix: String
@@ -46,7 +46,13 @@ enum ExcelAnalysisPreparation {
 enum ExcelCopilot {
     private static let excelBundleID = "com.microsoft.Excel"
     private static let automationTimeoutSeconds: TimeInterval = 10
-    private static let maxCaptureRows = 2_000
+    // The Apple Event read runs synchronously on the main thread (NSAppleScript is
+    // not thread-safe, so AppleScriptHelper forces executeAndReturnError onto the
+    // main actor). The 10s timeout bounds when the continuation resumes, NOT how
+    // long the main run loop stays occupied — the watchdog cannot abort a running
+    // NSAppleScript call. The only reliable mitigation is keeping each read small,
+    // so cap the transfer to this many rows of the used range.
+    private static let maxCaptureRows = 500
 
     private static var isExcelFrontmost: Bool {
         NSWorkspace.shared.frontmostApplication?.bundleIdentifier == excelBundleID
@@ -154,7 +160,16 @@ enum ExcelCopilot {
             try
                 set addr to (get address of rng) as text
             end try
-            set vals to value of rng
+            -- Bound the Apple Event transfer itself: read at most _maxRows rows of the
+            -- range rather than the entire used range. This caps the synchronous
+            -- main-thread read (the per-row loop below is only a secondary guard).
+            set readRng to rng
+            try
+                if (count of rows of rng) > _maxRows then
+                    set readRng to (resize rng row count _maxRows)
+                end if
+            end try
+            set vals to value of readRng
             set rowTexts to {}
             set _r to 0
             repeat with rowList in vals

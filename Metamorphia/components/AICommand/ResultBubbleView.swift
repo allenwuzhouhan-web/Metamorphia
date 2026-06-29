@@ -33,6 +33,7 @@ struct ResultBubbleView: View {
     @State private var showTraceSheet = false
     @State private var isExporting = false
     @State private var showExportedCheck = false
+    @State private var typewriterTimer: Timer?
 
     /// Shared so repeated open/close of the bubble doesn't leak voices.
     private static let synthesizer = NSSpeechSynthesizer()
@@ -244,6 +245,8 @@ struct ResultBubbleView: View {
         }
         .onDisappear {
             stopSpeech()
+            typewriterTimer?.invalidate()
+            typewriterTimer = nil
         }
         // No auto-dismiss. Previously responses under 30 chars evaporated
         // after 8 s, which stole the reply before the user could read it.
@@ -290,6 +293,10 @@ struct ResultBubbleView: View {
     }
 
     private func startTypewriter(_ message: String) {
+        // Cancel any timer still running from a prior .onAppear so two
+        // timers can't append to `typewriterText` concurrently and garble
+        // the output.
+        typewriterTimer?.invalidate()
         typewriterText = ""
         let chars = Array(message)
         guard !chars.isEmpty else { return }
@@ -297,18 +304,17 @@ struct ResultBubbleView: View {
         let interval = max(0.01, totalDuration / Double(chars.count))
         var index = 0
 
-        // Using a plain dispatch timer keyed off the view's lifetime.
-        // The closure captures a weak-ish reference to the view state via
-        // the `typewriterText` @State projection; invalidating on view
-        // disappearance is handled by the guard + `Task.isCancelled`
-        // pattern — we don't need an explicit teardown because the timer
-        // self-terminates at `index >= chars.count`.
-        Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { timer in
+        // Keyed off the view's lifetime: the reference is stored in
+        // `typewriterTimer` and torn down in .onDisappear, so the timer
+        // stops if the bubble is dismissed before it self-terminates at
+        // `index >= chars.count`.
+        typewriterTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { timer in
             if index < chars.count {
                 typewriterText.append(chars[index])
                 index += 1
             } else {
                 timer.invalidate()
+                typewriterTimer = nil
             }
         }
     }

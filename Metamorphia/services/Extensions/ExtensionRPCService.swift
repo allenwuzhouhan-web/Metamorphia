@@ -56,7 +56,7 @@ final class ExtensionRPCService {
 
     // MARK: - Method Routing
 
-    func handleRequest(_ request: RPCRequest) -> Data {
+    func handleRequest(_ request: RPCRequest) async -> Data {
         let result: Codable
 
         switch request.method {
@@ -101,7 +101,7 @@ final class ExtensionRPCService {
             result = handleGetShelfItems(params: request.params, id: request.id)
 
         case "metamorphia.getShelfItemData":
-            result = handleGetShelfItemData(params: request.params, id: request.id)
+            result = await handleGetShelfItemData(params: request.params, id: request.id)
 
         case "metamorphia.showFilePicker":
             result = handleShowFilePicker(params: request.params, id: request.id)
@@ -462,7 +462,12 @@ final class ExtensionRPCService {
         return RPCSuccessResponse(result: ["items": .array(result)], id: id)
     }
 
-    private func handleGetShelfItemData(params: RPCParams?, id: String) -> Codable {
+    // Largest shelf file we will read+base64-encode for an extension over the
+    // JSON-over-websocket transport. The encoded payload is ~1.33x this, and the
+    // raw data plus its base64 string are held simultaneously during encoding.
+    private static let maxShelfItemDataBytes = 64 * 1024 * 1024
+
+    private func handleGetShelfItemData(params: RPCParams?, id: String) async -> Codable {
         if let err = checkFileSharingAuthorization(id: id) { return err }
 
         guard let itemID = params?["itemID"]?.stringValue,
@@ -479,11 +484,25 @@ final class ExtensionRPCService {
             guard let url = Bookmark(data: bookmark).resolveURL() else {
                 return errorResponse(code: RPCErrorCode.internalError, message: "Cannot resolve file bookmark", id: id)
             }
-            guard let fileData = url.accessSecurityScopedResource(accessor: { try? Data(contentsOf: $0) }) else {
-                return errorResponse(code: RPCErrorCode.internalError, message: "Cannot read file data", id: id)
+            // Read and base64-encode off the main actor, bounding the size so a
+            // large shelf file cannot stall the main thread or spike memory.
+            let base64: String? = await url.accessSecurityScopedResource { scopedURL in
+                await Task.detached { () -> String? in
+                    if let size = (try? scopedURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
+                       size > Self.maxShelfItemDataBytes {
+                        return nil
+                    }
+                    guard let data = try? Data(contentsOf: scopedURL),
+                          data.count <= Self.maxShelfItemDataBytes else {
+                        return nil
+                    }
+                    return data.base64EncodedString()
+                }.value
             }
-            let base64 = fileData.base64EncodedString()
-            logDiagnostics("RPC: getShelfItemData returned \(fileData.count) bytes for \(bundleIdentifier)")
+            guard let base64 else {
+                return errorResponse(code: RPCErrorCode.internalError, message: "Cannot read file data or file too large", id: id)
+            }
+            logDiagnostics("RPC: getShelfItemData returned \(base64.count) base64 chars for \(bundleIdentifier)")
             return RPCSuccessResponse(result: [
                 "data": .string(base64),
                 "fileName": .string(url.lastPathComponent),

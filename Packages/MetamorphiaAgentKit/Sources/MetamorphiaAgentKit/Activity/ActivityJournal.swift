@@ -66,9 +66,6 @@ public final class ActivityJournal: @unchecked Sendable {
     /// modification timestamps.
     internal private(set) var flushCount: Int = 0
 
-    /// Events loaded from existing disk files at startup.
-    private var replayBuffer: [ActivityEvent] = []
-
     /// Base directory for all journal files.
     private let baseDirectory: URL
 
@@ -209,11 +206,12 @@ public final class ActivityJournal: @unchecked Sendable {
         return flushCount
     }
 
-    /// Returns all events loaded from disk during `start(stream:persistence:gate:)`.
+    /// Returns all events currently persisted across the retained day files.
     ///
-    /// For test verification only.
+    /// For test verification only. Reads (and decrypts) on demand so the
+    /// fully-decoded set is released after the call rather than held resident.
     public func replayedEvents() -> [ActivityEvent] {
-        queue.sync { self.replayBuffer }
+        queue.sync { allExistingDayFiles().flatMap { readEvents(dateKey: $0) } }
     }
 
     // MARK: - Private: Scheduling
@@ -357,9 +355,11 @@ public final class ActivityJournal: @unchecked Sendable {
         discardOrphanedTmps()
         // Prune old files.
         pruneOldFiles()
-        // Load all remaining day files into the replay buffer.
-        let loaded = allExistingDayFiles().flatMap { readEvents(dateKey: $0) }
-        queue.sync { self.replayBuffer = loaded }
+        // Day files are intentionally not decoded into memory here: the only
+        // consumer is the test-only `replayedEvents()` hook, which reads them on
+        // demand. Materialising up to `retentionDays` of decoded events into a
+        // long-lived buffer would leave that decode resident for the whole
+        // process lifetime for no production benefit.
     }
 
     private func discardOrphanedTmps() {

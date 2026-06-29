@@ -22,6 +22,60 @@ import AtollExtensionKit
 import Lottie
 import LottieUI
 import CryptoKit
+import ImageIO
+
+// MARK: - Icon Image Decoding
+
+/// Decodes `.image(data, ...)` icon payloads into small, downsampled `NSImage`s once and keeps
+/// them in a bounded in-memory cache. The extension icon views look up here instead of calling
+/// `NSImage(data:)` inside their SwiftUI `body`, which would re-decode a full-resolution bitmap on
+/// every recompute (these icons live in Live Activity views that redraw on timer/state ticks).
+enum ExtensionIconImageCache {
+    private static let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 64
+        return cache
+    }()
+
+    /// Returns a downsampled image for `data` sized to roughly `pointSize` points, caching the
+    /// decoded result keyed by the payload contents and pixel size. The decode runs at most once
+    /// per distinct (payload, size); subsequent calls hit the cache.
+    static func image(for data: Data, pointSize: CGFloat) -> NSImage? {
+        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        let maxPixelSize = max(1, Int((pointSize * scale).rounded()))
+        let cacheKey = key(for: data, maxPixelSize: maxPixelSize)
+
+        if let cached = cache.object(forKey: cacheKey) {
+            return cached
+        }
+
+        guard let decoded = decodeThumbnail(data: data, maxPixelSize: maxPixelSize) else {
+            return nil
+        }
+        cache.setObject(decoded, forKey: cacheKey)
+        return decoded
+    }
+
+    private static func key(for data: Data, maxPixelSize: Int) -> NSString {
+        let digest = SHA256.hash(data: data)
+        let hash = digest.map { String(format: "%02x", $0) }.joined()
+        return "\(hash)_\(maxPixelSize)" as NSString
+    }
+
+    private static func decodeThumbnail(data: Data, maxPixelSize: Int) -> NSImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    }
+}
 
 // MARK: - Color Conversion
 
@@ -153,7 +207,7 @@ struct ExtensionIconView: View {
                 .foregroundStyle(tint)
                 .frame(width: size.width, height: size.height)
         case let .image(data, targetSize, radius):
-            if let image = NSImage(data: data) {
+            if let image = ExtensionIconImageCache.image(for: data, pointSize: max(targetSize.width, targetSize.height)) {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -254,7 +308,7 @@ struct ExtensionBadgeIconView: View {
                     .font(.system(size: symbolSize, weight: weight.swiftUI))
                     .foregroundStyle(accent)
             case let .image(data, _, _):
-                if let image = NSImage(data: data) {
+                if let image = ExtensionIconImageCache.image(for: data, pointSize: imageSize) {
                     Image(nsImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
@@ -331,11 +385,16 @@ private final class ExtensionLottieCache {
     static let shared = ExtensionLottieCache()
     private let queue = DispatchQueue(label: "com.metamorphia.extension-lottie-cache")
     private var cache: [String: URL] = [:]
+    /// Keys ordered least- to most-recently used; the head is evicted first.
+    private var accessOrder: [String] = []
+    /// Maximum number of distinct animation payloads kept on disk at once.
+    private let maxEntries = 32
 
     func url(for data: Data) -> URL? {
         queue.sync {
             let key = Self.hash(data: data)
             if let existing = cache[key], FileManager.default.fileExists(atPath: existing.path) {
+                touch(key)
                 return existing
             }
 
@@ -343,10 +402,29 @@ private final class ExtensionLottieCache {
             do {
                 try data.write(to: url, options: .atomic)
                 cache[key] = url
+                touch(key)
+                evictIfNeeded()
                 return url
             } catch {
                 cache.removeValue(forKey: key)
+                accessOrder.removeAll { $0 == key }
                 return nil
+            }
+        }
+    }
+
+    /// Marks `key` as most-recently used.
+    private func touch(_ key: String) {
+        accessOrder.removeAll { $0 == key }
+        accessOrder.append(key)
+    }
+
+    /// Drops least-recently-used entries (and their temp files) until within `maxEntries`.
+    private func evictIfNeeded() {
+        while accessOrder.count > maxEntries, let oldest = accessOrder.first {
+            accessOrder.removeFirst()
+            if let url = cache.removeValue(forKey: oldest) {
+                try? FileManager.default.removeItem(at: url)
             }
         }
     }
@@ -493,7 +571,7 @@ struct ExtensionEdgeContentView: View {
                 .fill((colorDescriptor.isAccent ? accent : colorDescriptor.swiftUIColor).gradient)
                 .frame(width: 48, height: 14)
                 .mask {
-                    AudioVisualizerView(isPlaying: .constant(true))
+                    AudioVisualizerView(isPlaying: .constant(MusicManager.shared.isPlaying))
                         .frame(width: 16, height: 12)
                 }
         case let .animation(data, size):
@@ -516,7 +594,7 @@ struct ExtensionCountdownTextView: View {
     let customColor: Color?
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
+        TimelineView(CountdownSchedule(target: targetDate)) { context in
             let remainingText = formattedRemaining(since: context.date)
             Text(remainingText)
                 .font(font.swiftUIFont())
@@ -536,6 +614,29 @@ struct ExtensionCountdownTextView: View {
             return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
         }
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+}
+
+/// A 1 Hz timeline schedule that emits entries only until the countdown target,
+/// then a single terminal entry, after which SwiftUI stops re-evaluating the body.
+/// Unlike `.periodic`, this drives the countdown down to 00:00 and then stops ticking.
+private struct CountdownSchedule: TimelineSchedule {
+    let target: Date
+
+    func entries(from startDate: Date, mode: TimelineScheduleMode) -> AnyIterator<Date> {
+        var date = startDate
+        var emittedTerminal = false
+        return AnyIterator {
+            if date <= target {
+                defer { date = date.addingTimeInterval(1) }
+                return date
+            }
+            // Emit one final entry past the target so the display settles at 00:00,
+            // then end the sequence so re-rendering stops.
+            guard !emittedTerminal else { return nil }
+            emittedTerminal = true
+            return target
+        }
     }
 }
 

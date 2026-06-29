@@ -39,6 +39,7 @@ class BluetoothAudioManager: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let coordinator = MetamorphiaViewCoordinator.shared
     private var pollingTimer: Timer?
+    private let pollingQueue = DispatchQueue(label: "com.dynamicisland.bluetooth.polling", qos: .utility)
     private let bluetoothPreferencesSuite = "/Library/Preferences/com.apple.Bluetooth"
     private let batteryReader = BluetoothLEBatteryReader()
     private var isLiveBatteryRefreshInFlight = false
@@ -71,6 +72,7 @@ class BluetoothAudioManager: ObservableObject {
     private let batteryStatusUpdateInterval: TimeInterval = 20
     private let pmsetFetchQueue = DispatchQueue(label: "com.dynamicisland.bluetooth.pmset", qos: .utility)
     private var isPmsetRefreshInFlight = false
+    private var isBatteryStatusRefreshInFlight = false
     private var lastPmsetRefreshDate: Date?
     private let pmsetRefreshCooldown: TimeInterval = 5
     private var hudBatteryWaitTasks: [UUID: Task<Void, Never>] = [:]
@@ -119,50 +121,66 @@ class BluetoothAudioManager: ObservableObject {
     
     /// Starts polling for device connection changes (fallback mechanism)
     private func startPollingForChanges() {
-        print("🎧 [BluetoothAudioManager] Starting polling timer (3s interval)...")
-        
-        pollingTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+        print("🎧 [BluetoothAudioManager] Starting polling timer (10s interval)...")
+
+        // DistributedNotificationCenter observers handle the common connect/disconnect
+        // cases; this timer is a low-frequency fallback. Use a longer interval to keep
+        // the steady-state cost minimal.
+        pollingTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             self?.checkForDeviceChanges()
         }
     }
-    
-    /// Checks for device connection/disconnection changes
+
+    /// Checks for device connection/disconnection changes.
+    ///
+    /// The IOBluetooth enumeration (powerState / pairedDevices() / isAudioDevice(), which
+    /// performs synchronous SDP lookups per device) runs off the main thread; only the
+    /// comparison against the published `connectedDevices` state and any resulting mutation
+    /// hop back to the main thread.
     private func checkForDeviceChanges() {
-        // Check if Bluetooth is powered on
-        guard IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON else {
-            // Bluetooth is off - clear connected devices if any
-            if !connectedDevices.isEmpty {
-                print("🎧 [BluetoothAudioManager] ⚠️ Bluetooth powered off - clearing connected devices")
-                connectedDevices.removeAll()
-                isBluetoothAudioConnected = false
+        pollingQueue.async { [weak self] in
+            guard let self else { return }
+
+            // Check if Bluetooth is powered on
+            guard IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON else {
+                // Bluetooth is off - clear connected devices if any
+                DispatchQueue.main.async {
+                    if !self.connectedDevices.isEmpty {
+                        print("🎧 [BluetoothAudioManager] ⚠️ Bluetooth powered off - clearing connected devices")
+                        self.connectedDevices.removeAll()
+                        self.isBluetoothAudioConnected = false
+                    }
+                }
+                return
             }
-            return
-        }
-        
-        guard let pairedDevices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else {
-            return
-        }
-        
-        let currentlyConnectedAddresses = Set(
-            pairedDevices
-                .filter { $0.isConnected() && isAudioDevice($0) }
-                .compactMap { $0.addressString }
-        )
-        
-        let previousAddresses = Set(connectedDevices.map { $0.address })
-        
-        // Check for new connections
-        let newAddresses = currentlyConnectedAddresses.subtracting(previousAddresses)
-        if !newAddresses.isEmpty {
-            print("🎧 [BluetoothAudioManager] 🔍 Polling detected new connection(s)")
-            checkForNewlyConnectedDevices()
-        }
-        
-        // Check for disconnections
-        let removedAddresses = previousAddresses.subtracting(currentlyConnectedAddresses)
-        if !removedAddresses.isEmpty {
-            print("🎧 [BluetoothAudioManager] 🔍 Polling detected disconnection(s)")
-            updateConnectedDevices()
+
+            guard let pairedDevices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else {
+                return
+            }
+
+            let currentlyConnectedAddresses = Set(
+                pairedDevices
+                    .filter { $0.isConnected() && self.isAudioDevice($0) }
+                    .compactMap { $0.addressString }
+            )
+
+            DispatchQueue.main.async {
+                let previousAddresses = Set(self.connectedDevices.map { $0.address })
+
+                // Check for new connections
+                let newAddresses = currentlyConnectedAddresses.subtracting(previousAddresses)
+                if !newAddresses.isEmpty {
+                    print("🎧 [BluetoothAudioManager] 🔍 Polling detected new connection(s)")
+                    self.checkForNewlyConnectedDevices()
+                }
+
+                // Check for disconnections
+                let removedAddresses = previousAddresses.subtracting(currentlyConnectedAddresses)
+                if !removedAddresses.isEmpty {
+                    print("🎧 [BluetoothAudioManager] 🔍 Polling detected disconnection(s)")
+                    self.updateConnectedDevices()
+                }
+            }
         }
     }
     
@@ -679,9 +697,10 @@ class BluetoothAudioManager: ObservableObject {
     }
 
     private func refreshBatteryLevelsForConnectedDevices(forceCacheRefresh: Bool = true) {
-        if forceCacheRefresh {
-            updateBatteryStatuses(force: true)
-        }
+        // `force: true` bypasses the 20s throttle (used on connect/disconnect); the recurring
+        // weather path passes `false` so the throttle governs how often the status collectors
+        // (system_profiler/pmset) run. Either way the heavy gathering now happens off-main.
+        updateBatteryStatuses(force: forceCacheRefresh)
 
         applyConnectedDeviceBatteryLevels()
         triggerLiveBatteryRefreshIfNeeded()
@@ -1036,6 +1055,44 @@ class BluetoothAudioManager: ObservableObject {
             return
         }
 
+        // The collectors below launch `system_profiler` / `pmset` subprocesses (each with a
+        // synchronous `waitUntilExit()`) and enumerate the IORegistry — work that routinely
+        // takes seconds. When invoked on the main thread, hop the gathering onto a utility
+        // queue so the UI never blocks, then marshal the published results back to main and
+        // re-derive the connected-device levels (mirroring the pmset/live fallback paths).
+        if Thread.isMainThread {
+            guard !isBatteryStatusRefreshInFlight else { return }
+            isBatteryStatusRefreshInFlight = true
+            pollingQueue.async { [weak self] in
+                guard let self else { return }
+                let collected = self.collectBatteryStatuses()
+                DispatchQueue.main.async {
+                    self.isBatteryStatusRefreshInFlight = false
+                    self.applyBatteryStatuses(collected, timestamp: now)
+                    self.applyConnectedDeviceBatteryLevels()
+                    if let level = self.hudBatteryLevelCandidate() {
+                        self.updateActiveBluetoothHUDBattery(with: level)
+                    }
+                }
+            }
+            return
+        }
+
+        let collected = collectBatteryStatuses()
+        DispatchQueue.main.sync {
+            self.applyBatteryStatuses(collected, timestamp: now)
+        }
+    }
+
+    private struct CollectedBatteryStatuses {
+        let statuses: [String: String]
+        let byAddress: [String: Int]
+        let byName: [String: Int]
+    }
+
+    /// Gathers battery levels from every source (registry, Bluetooth defaults, system_profiler,
+    /// pmset). Safe to run off the main thread — it touches no published or instance state.
+    private func collectBatteryStatuses() -> CollectedBatteryStatuses {
         var combinedAddressPercentages: [String: Int] = [:]
         var combinedNamePercentages: [String: Int] = [:]
 
@@ -1059,18 +1116,18 @@ class BluetoothAudioManager: ObservableObject {
             statuses[key] = String(clampBatteryPercentage(value))
         }
 
-        let applyUpdates = {
-            self.batteryStatus = statuses
-            self.batteryStatusByAddress = combinedAddressPercentages
-            self.batteryStatusByName = combinedNamePercentages
-            self.lastBatteryStatusUpdate = now
-        }
+        return CollectedBatteryStatuses(
+            statuses: statuses,
+            byAddress: combinedAddressPercentages,
+            byName: combinedNamePercentages
+        )
+    }
 
-        if Thread.isMainThread {
-            applyUpdates()
-        } else {
-            DispatchQueue.main.sync(execute: applyUpdates)
-        }
+    private func applyBatteryStatuses(_ collected: CollectedBatteryStatuses, timestamp: Date) {
+        batteryStatus = collected.statuses
+        batteryStatusByAddress = collected.byAddress
+        batteryStatusByName = collected.byName
+        lastBatteryStatusUpdate = timestamp
     }
 
     private func mergeBatteryLevels(into target: inout [String: Int], from source: [String: Int]) {
@@ -1706,7 +1763,9 @@ class BluetoothAudioManager: ObservableObject {
 
     @MainActor
     func refreshConnectedDeviceBatteries() {
-        refreshBatteryLevelsForConnectedDevices()
+        // Recurring lock-screen weather path: rely on the 20s status throttle instead of
+        // forcing a cache refresh, so we don't respawn system_profiler/pmset on every call.
+        refreshBatteryLevelsForConnectedDevices(forceCacheRefresh: false)
     }
 
     @MainActor

@@ -212,7 +212,14 @@ public actor ProposalLoop {
         // Bridge Combine → AsyncStream. Downstream cancellation closes
         // the AsyncStream, which terminates the for-await loop below.
         let events = stream.events
-        let bridged = AsyncStream<ActivityEvent>(bufferingPolicy: .unbounded) { continuation in
+        // Bounded drop-oldest buffer mirroring ActivityStream's own ring
+        // semantics. The proposal loop is advisory (one card at a time,
+        // rate-limited to ≤1/90s), so if the async attention/budget
+        // providers transiently lag behind a 10–30 event/s burst, dropping
+        // the oldest pending events is harmless and caps buffer growth —
+        // an unbounded policy would accumulate ActivityEvents without limit
+        // for the duration of a MainActor stall.
+        let bridged = AsyncStream<ActivityEvent>(bufferingPolicy: .bufferingNewest(256)) { continuation in
             let cancellable = events.sink { event in
                 continuation.yield(event)
             }

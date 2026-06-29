@@ -100,7 +100,8 @@ struct InlineHUD: View {
     @Default(.showCapsLockLabel) var showCapsLockLabel
     @Default(.capsLockIndicatorTintMode) var capsLockTintMode
     @ObservedObject var bluetoothManager = BluetoothAudioManager.shared
-    
+    @ObservedObject var timerManager = TimerManager.shared
+
     @State private var displayName: String = ""
     
     var body: some View {
@@ -292,8 +293,8 @@ struct InlineHUD: View {
                         .frame(maxWidth: .infinity, alignment: .trailing)
                         .contentTransition(.interpolate)
                 } else if (type == .timer) {
-                    Text(TimerManager.shared.formattedRemainingTime())
-                        .foregroundStyle(TimerManager.shared.timerColor)
+                    Text(timerManager.formattedRemainingTime())
+                        .foregroundStyle(timerManager.timerColor)
                         .lineLimit(1)
                         .allowsTightening(true)
                         .multilineTextAlignment(.trailing)

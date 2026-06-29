@@ -25,6 +25,7 @@ struct NotchColorPickerView: View {
     @State private var hoveredColorId: UUID?
     @State private var showColorInfo: Bool = false
     @State private var selectedColor: PickedColor?
+    @State private var didPushPointingHand: Bool = false
     
     var body: some View {
         if !enableColorPickerFeature {
@@ -129,9 +130,21 @@ struct NotchColorPickerView: View {
                 .buttonStyle(PlainButtonStyle())
                 .onHover { isHovering in
                     if isHovering {
-                        NSCursor.pointingHand.push()
-                    } else {
+                        if !didPushPointingHand {
+                            NSCursor.pointingHand.push()
+                            didPushPointingHand = true
+                        }
+                    } else if didPushPointingHand {
                         NSCursor.pop()
+                        didPushPointingHand = false
+                    }
+                }
+                .onDisappear {
+                    // SwiftUI does not guarantee a hover-out callback when the view is
+                    // torn down while hovered, so balance any in-flight push here.
+                    if didPushPointingHand {
+                        NSCursor.pop()
+                        didPushPointingHand = false
                     }
                 }
             }

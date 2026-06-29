@@ -20,12 +20,18 @@ import Cocoa
 
 class AirDrop: NSObject, NSSharingServiceDelegate {
     let files: [URL]
-    
+
+    /// Keeps the delegate alive for the duration of the share operation.
+    /// `NSSharingService` holds its delegate weakly, so without this strong
+    /// self-reference the instance would deallocate as soon as the caller's
+    /// local reference goes out of scope, silently dropping any delegate callbacks.
+    private var keepAlive: AirDrop?
+
     init(files: [URL]) {
         self.files = files
         super.init()
     }
-    
+
     func begin() {
         do {
             try sendEx(files)
@@ -33,7 +39,7 @@ class AirDrop: NSObject, NSSharingServiceDelegate {
             NSAlert.popError(error)
         }
     }
-    
+
     private func sendEx(_ files: [URL]) throws {
         guard let service = NSSharingService(named: .sendViaAirDrop) else {
             throw NSError(domain: "AirDrop", code: 1, userInfo: [
@@ -45,7 +51,16 @@ class AirDrop: NSObject, NSSharingServiceDelegate {
                 NSLocalizedDescriptionKey: NSLocalizedString("AirDrop service not available", comment: ""),
             ])
         }
+        keepAlive = self
         service.delegate = self
         service.perform(withItems: files)
+    }
+
+    func sharingService(_ sharingService: NSSharingService, didShareItems items: [Any]) {
+        keepAlive = nil
+    }
+
+    func sharingService(_ sharingService: NSSharingService, didFailToShareItems items: [Any], error: Error) {
+        keepAlive = nil
     }
 }

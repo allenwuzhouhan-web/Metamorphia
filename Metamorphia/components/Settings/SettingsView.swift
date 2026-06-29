@@ -3904,6 +3904,7 @@ struct Appearance: View {
     @Default(.enableLockScreenTimerWidget) private var enableLockScreenTimerWidget
     @Default(.externalDisplayStyle) private var externalDisplayStyle
     @State private var selectedListVisualizer: CustomVisualizer? = nil
+    @State private var hoveredListVisualizer: CustomVisualizer? = nil
 
     @State private var isIconImporterPresented = false
     @State private var isIconDropTarget = false
@@ -4149,9 +4150,21 @@ struct Appearance: View {
             Section {
                 List {
                     ForEach(customVisualizers, id: \.UUID) { visualizer in
+                        let isAnimating = hoveredListVisualizer == visualizer || selectedListVisualizer == visualizer
                         HStack {
-                            LottieView(state: LUStateData(type: .loadedFrom(visualizer.url), speed: visualizer.speed, loopMode: .loop))
-                                .frame(width: 30, height: 30, alignment: .center)
+                            // Pin to a static frame unless this row is hovered/selected so
+                            // the list doesn't run many infinite Lottie loops at once.
+                            LottieView(
+                                state: LUStateData(
+                                    type: .loadedFrom(visualizer.url),
+                                    speed: visualizer.speed,
+                                    loopMode: .loop,
+                                    isControlEnabled: !isAnimating
+                                ),
+                                value: isAnimating ? 0 : 0.5
+                            )
+                            .frame(width: 30, height: 30, alignment: .center)
+                            .id(isAnimating)
                             Text(visualizer.name)
                             Spacer(minLength: 0)
                             if selectedVisualizer == visualizer {
@@ -4175,6 +4188,13 @@ struct Appearance: View {
                                 return
                             }
                             selectedListVisualizer = visualizer
+                        }
+                        .onHover { hovering in
+                            if hovering {
+                                hoveredListVisualizer = visualizer
+                            } else if hoveredListVisualizer == visualizer {
+                                hoveredListVisualizer = nil
+                            }
                         }
                     }
                 }
@@ -4283,7 +4303,7 @@ struct Appearance: View {
                 Defaults.Toggle(key: .showMirror) {
                     Text("Enable Dynamic mirror")
                 }
-                .disabled(!checkVideoInput())
+                .disabled(!webcamManager.cameraAvailable)
                 .settingsHighlight(id: highlightID("Enable Dynamic mirror"))
                 Picker("Mirror shape", selection: $mirrorShape) {
                     Text("Circle")
@@ -4419,8 +4439,30 @@ struct Appearance: View {
         return NSImage(named: fallbackName)
     }
 
+    /// Caches rasterized 64x64 thumbnails keyed by file path so repeated body
+    /// recomputes (triggered by unrelated @Default/@State changes) don't re-decode
+    /// the full-resolution icon files off disk on the main thread.
+    private static let customIconCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 64
+        return cache
+    }()
+
     private func customIconImage(for icon: CustomAppIcon) -> NSImage? {
-        NSImage(contentsOf: icon.fileURL)
+        let cacheKey = icon.fileURL.path as NSString
+        if let cached = Self.customIconCache.object(forKey: cacheKey) {
+            return cached
+        }
+        guard let full = NSImage(contentsOf: icon.fileURL) else { return nil }
+        let thumbSize = NSSize(width: 64, height: 64)
+        let thumb = NSImage(size: thumbSize)
+        thumb.lockFocus()
+        full.draw(in: NSRect(origin: .zero, size: thumbSize),
+                  from: NSRect(origin: .zero, size: full.size),
+                  operation: .copy, fraction: 1.0)
+        thumb.unlockFocus()
+        Self.customIconCache.setObject(thumb, forKey: cacheKey)
+        return thumb
     }
 
     private func appIconCard(title: String, image: NSImage?, isSelected: Bool, action: @escaping () -> Void) -> some View {
@@ -4512,6 +4554,7 @@ struct Appearance: View {
         if let index = customAppIcons.firstIndex(of: icon) {
             customAppIcons.remove(at: index)
         }
+        Self.customIconCache.removeObject(forKey: icon.fileURL.path as NSString)
         if FileManager.default.fileExists(atPath: icon.fileURL.path) {
             try? FileManager.default.removeItem(at: icon.fileURL)
         }
@@ -4519,14 +4562,6 @@ struct Appearance: View {
             selectedAppIconID = nil
             applySelectedAppIcon()
         }
-    }
-
-    func checkVideoInput() -> Bool {
-        if let _ = AVCaptureDevice.default(for: .video) {
-            return true
-        }
-
-        return false
     }
 
     @ViewBuilder
@@ -5344,12 +5379,33 @@ private struct LockScreenGlassVariantPreviewCell: View {
     }
 }
 
+/// Coalesces live lock-screen reposition calls so a continuous drag triggers at
+/// most one real window reposition per short interval instead of one per tick.
+@MainActor
+private final class LockScreenPositionPropagation {
+    private var pending: [String: DispatchWorkItem] = [:]
+    private let interval: TimeInterval = 1.0 / 60.0
+
+    func schedule(_ key: String, _ work: @escaping @MainActor () -> Void) {
+        pending[key]?.cancel()
+        let item = DispatchWorkItem {
+            MainActor.assumeIsolated {
+                self.pending[key] = nil
+                work()
+            }
+        }
+        pending[key] = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + interval, execute: item)
+    }
+}
+
 private struct LockScreenPositioningControls: View {
     @Default(.lockScreenWeatherVerticalOffset) private var weatherOffset
     @Default(.lockScreenMusicVerticalOffset) private var musicOffset
     @Default(.lockScreenTimerVerticalOffset) private var timerOffset
     @Default(.lockScreenMusicPanelWidth) private var musicWidth
     @Default(.lockScreenTimerWidgetWidth) private var timerWidth
+    @State private var propagation = LockScreenPositionPropagation()
     private let offsetRange: ClosedRange<Double> = -160...160
     private let musicWidthRange: ClosedRange<Double> = 320...Double(LockScreenMusicPanel.defaultCollapsedWidth)
     private let timerWidthRange: ClosedRange<Double> = 320...LockScreenTimerWidget.defaultWidth
@@ -5520,31 +5576,31 @@ private struct LockScreenPositioningControls: View {
     }
 
     private func propagateWeatherOffsetChange(animated: Bool) {
-        Task { @MainActor in
+        propagation.schedule("weatherOffset") {
             LockScreenWeatherPanelManager.shared.refreshPositionForOffsets(animated: animated)
         }
     }
 
     private func propagateTimerOffsetChange(animated: Bool) {
-        Task { @MainActor in
+        propagation.schedule("timerOffset") {
             LockScreenTimerWidgetManager.shared.refreshPositionForOffsets(animated: animated)
         }
     }
 
     private func propagateMusicOffsetChange(animated: Bool) {
-        Task { @MainActor in
+        propagation.schedule("musicOffset") {
             LockScreenPanelManager.shared.applyOffsetAdjustment(animated: animated)
         }
     }
 
     private func propagateMusicWidthChange(animated: Bool) {
-        Task { @MainActor in
+        propagation.schedule("musicWidth") {
             LockScreenPanelManager.shared.applyOffsetAdjustment(animated: animated)
         }
     }
 
     private func propagateTimerWidthChange(animated: Bool) {
-        Task { @MainActor in
+        propagation.schedule("timerWidth") {
             LockScreenTimerWidgetPanelManager.shared.refreshPosition(animated: animated)
         }
     }
@@ -8092,8 +8148,20 @@ struct AppIconImage: View {
         .frame(width: size, height: size)
     }
 
+    /// Caches rasterized 32x32 thumbnails keyed by bundle identifier so repeated
+    /// body recomputes don't re-hit NSWorkspace or re-rasterize on the main thread.
+    private static let iconCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 64
+        return cache
+    }()
+
     private func resolvedIcon() -> NSImage? {
         for bundleID in bundleIdentifiers {
+            let cacheKey = bundleID as NSString
+            if let cached = Self.iconCache.object(forKey: cacheKey) {
+                return cached
+            }
             if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
                 let icon = NSWorkspace.shared.icon(forFile: appURL.path)
                 // NSWorkspace returns a valid icon even for generic apps;
@@ -8104,6 +8172,7 @@ struct AppIconImage: View {
                           from: NSRect(origin: .zero, size: icon.size),
                           operation: .copy, fraction: 1.0)
                 thumb.unlockFocus()
+                Self.iconCache.setObject(thumb, forKey: cacheKey)
                 return thumb
             }
         }

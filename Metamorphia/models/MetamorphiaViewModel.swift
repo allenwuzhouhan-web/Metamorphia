@@ -133,8 +133,7 @@ class MetamorphiaViewModel: NSObject, ObservableObject {
             .map { value1, value2 in
                 value1 || value2
             }
-            .assign(to: \.anyDropZoneTargeting, on: self)
-            .store(in: &cancellables)
+            .assign(to: &$anyDropZoneTargeting)
         
         setupDetectorObserver()
 
@@ -283,14 +282,12 @@ class MetamorphiaViewModel: NSObject, ObservableObject {
             .map(\.newValue)
 
         // 2) For each non‑nil screen name, map to a Bool publisher for that screen's status
+        let detector = self.detector
         let statusPublisher = $screen
             .compactMap { $0 }
             .removeDuplicates()
-            .map { [weak self] screenName -> AnyPublisher<Bool, Never> in
-                guard let self else {
-                    return Just(false).eraseToAnyPublisher()
-                }
-                return self.detector.$fullscreenStatus
+            .map { screenName in
+                detector.$fullscreenStatus
                     .map { $0[screenName] ?? false }
                     .removeDuplicates()
                     .eraseToAnyPublisher()

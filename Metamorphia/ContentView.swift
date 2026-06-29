@@ -165,7 +165,8 @@ struct ContentView: View {
     /// such pull tears off the scratchpad tools picker (drag-from-notch).
     @State private var downDragStartedClosed = false
     @State private var stickyTerminalClickMonitor: Any?
-    @State private var hiddenEdgeHoverPollingTask: Task<Void, Never>?
+    @State private var hiddenEdgeHoverGlobalMonitor: Any?
+    @State private var hiddenEdgeHoverLocalMonitor: Any?
     @State private var isHoveringClosedMusicWaveformControl: Bool = false
     @State private var musicHoverExpansionActive: Bool = false
     @State private var isHoveringPrevControl: Bool = false
@@ -629,7 +630,16 @@ struct ContentView: View {
                 clearMusicControlVisibilityDeadline()
             }
             enqueueMusicControlWindowSync(forceRefresh: true)
-            startHiddenEdgeHoverPolling()
+            if shouldUseHiddenEdgeHoverPolling {
+                startHiddenEdgeHoverPolling()
+            }
+        }
+        .onChange(of: shouldUseHiddenEdgeHoverPolling) { _, needed in
+            if needed {
+                startHiddenEdgeHoverPolling()
+            } else {
+                stopHiddenEdgeHoverPolling()
+            }
         }
         .onChange(of: vm.notchState) { _, state in
             if state == .open {
@@ -1546,7 +1556,7 @@ struct ContentView: View {
                 .animation(.smooth(duration: 0.16), value: isHoveringClosedMusicWaveformControl)
                 .animation(.smooth(duration: 0.2), value: musicManager.isPlaying)
         } else {
-            LottieAnimationView()
+            LottieAnimationView(isPlaying: musicManager.isPlaying)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
@@ -1855,6 +1865,7 @@ struct ContentView: View {
     /// the extracted files. Non-file providers are silently skipped.
     private func routeDropToCommandBar(providers: [NSItemProvider]) {
         var urls: [URL] = []
+        let urlsLock = NSLock()
         let group = DispatchGroup()
         for provider in providers where provider.hasItemConformingToTypeIdentifier("public.file-url") {
             group.enter()
@@ -1862,7 +1873,7 @@ struct ContentView: View {
                 defer { group.leave() }
                 if let data = item as? Data,
                    let url = URL(dataRepresentation: data, relativeTo: nil) {
-                    urls.append(url)
+                    urlsLock.lock(); urls.append(url); urlsLock.unlock()
                 }
             }
         }
@@ -1978,28 +1989,75 @@ struct ContentView: View {
         return activationRect.contains(location)
     }
 
-    private func startHiddenEdgeHoverPolling() {
-        guard hiddenEdgeHoverPollingTask == nil else { return }
-
-        hiddenEdgeHoverPollingTask = Task { @MainActor in
-            while !Task.isCancelled {
-                if self.shouldUseHiddenEdgeHoverPolling {
-                    let hovering = self.hiddenHoverActivationContainsMouse()
-                    if hovering != self.isHovering {
-                        self.handleHover(hovering)
-                    }
-                }
-
-                try? await Task.sleep(for: .milliseconds(50))
-            }
-
-            self.hiddenEdgeHoverPollingTask = nil
+    private func evaluateHiddenEdgeHover() {
+        guard shouldUseHiddenEdgeHoverPolling else { return }
+        let hovering = hiddenHoverActivationContainsMouse()
+        if hovering != isHovering {
+            handleHover(hovering)
         }
     }
 
+    /// Cheap, thread-safe proximity test used to gate the global/local
+    /// `.mouseMoved` monitors. The hidden-edge activation rect always hugs a
+    /// screen's top edge, so any cursor sitting well below every top edge can
+    /// be rejected without hopping to the main actor. The threshold is kept
+    /// generously larger than any realistic activation height so the gate never
+    /// produces a false negative.
+    nonisolated private static func cursorNearAnyScreenTopEdge() -> Bool {
+        let topEdgeThreshold: CGFloat = 200
+        let location = NSEvent.mouseLocation
+        for screen in NSScreen.screens {
+            let frame = screen.frame
+            guard frame.minX <= location.x, location.x <= frame.maxX else { continue }
+            if location.y >= frame.maxY - topEdgeThreshold {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func startHiddenEdgeHoverPolling() {
+        // Event-driven top-edge detection: react only when the cursor actually
+        // moves instead of waking the main thread on a fixed timer. A global
+        // monitor catches movement over other apps (the steady state when the
+        // notch is hidden); a local monitor catches movement over our own
+        // window and must return the event so it is not swallowed.
+        if hiddenEdgeHoverGlobalMonitor == nil {
+            hiddenEdgeHoverGlobalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { _ in
+                // Cheap, synchronous proximity gate: the activation rect only
+                // ever sits at a screen's top edge, so when the cursor is far
+                // from every top edge there is nothing to evaluate. This keeps
+                // the common case (cursor moving anywhere mid-screen) to a
+                // single comparison with no main-actor Task allocation.
+                guard ContentView.cursorNearAnyScreenTopEdge() else { return }
+                Task { @MainActor in
+                    self.evaluateHiddenEdgeHover()
+                }
+            }
+        }
+        if hiddenEdgeHoverLocalMonitor == nil {
+            hiddenEdgeHoverLocalMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { event in
+                guard ContentView.cursorNearAnyScreenTopEdge() else { return event }
+                Task { @MainActor in
+                    self.evaluateHiddenEdgeHover()
+                }
+                return event
+            }
+        }
+        // Evaluate once on install so an already-hovering cursor is recognised
+        // without waiting for the next movement.
+        evaluateHiddenEdgeHover()
+    }
+
     private func stopHiddenEdgeHoverPolling() {
-        hiddenEdgeHoverPollingTask?.cancel()
-        hiddenEdgeHoverPollingTask = nil
+        if let hiddenEdgeHoverGlobalMonitor {
+            NSEvent.removeMonitor(hiddenEdgeHoverGlobalMonitor)
+            self.hiddenEdgeHoverGlobalMonitor = nil
+        }
+        if let hiddenEdgeHoverLocalMonitor {
+            NSEvent.removeMonitor(hiddenEdgeHoverLocalMonitor)
+            self.hiddenEdgeHoverLocalMonitor = nil
+        }
     }
 
     private func installStickyTerminalClickMonitor() {

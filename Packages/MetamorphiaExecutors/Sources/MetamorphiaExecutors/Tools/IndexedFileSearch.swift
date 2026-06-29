@@ -118,8 +118,13 @@ public enum IndexedFileSearch {
 
         let pattern = "*\(firstToken)*"
         let cmd = "find \(shellEscape(dir)) -iname \(shellEscape(pattern)) 2>/dev/null | head -n \(maxResults * 4)"
-        guard let output = try? ShellRunner.run(cmd, timeout: 15) else { return [] }
-        let paths = output.stdout.split(separator: "\n").map(String.init)
+        let result = try? await AsyncShellRunner.run(
+            executable: "/bin/zsh",
+            arguments: ["-c", cmd],
+            timeout: 15
+        )
+        guard let stdout = result?.stdout, !stdout.isEmpty else { return [] }
+        let paths = stdout.split(separator: "\n").map(String.init)
         return paths.compactMap { decorate(path: $0) }
     }
 

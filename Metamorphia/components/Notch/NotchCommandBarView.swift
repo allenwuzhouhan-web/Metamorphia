@@ -129,7 +129,10 @@ struct NotchCommandBarView: View {
             }
         }
         .animation(Self.fluidSpring, value: hasResponse)
-        .animation(Self.fluidSpring, value: viewModel.inputBarState)
+        // Key on the coarse phase, not the full state — otherwise every streamed
+        // token (which changes `streaming`'s payload) re-arms the spring across
+        // the whole subtree and freezes the UI for the response's duration.
+        .animation(Self.fluidSpring, value: viewModel.inputBarState.animationPhase)
         .animation(Self.fluidSpring, value: viewModel.currentAgent.id)
 #if canImport(MetamorphiaAgentKit)
         .animation(Self.quickFade, value: viewModel.slashSuggestions.map(\.id))
@@ -217,7 +220,7 @@ struct NotchCommandBarView: View {
                 Image(systemName: CommandBarStateHelpers.icon(for: viewModel.inputBarState))
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(CommandBarStateHelpers.iconColor(for: viewModel.inputBarState))
-                    .animation(.spring(response: 0.3), value: viewModel.inputBarState)
+                    .animation(.spring(response: 0.3), value: viewModel.inputBarState.animationPhase)
 
                 if viewModel.currentAgent.id != AgentProfile.general.id {
                     Circle()
@@ -357,6 +360,7 @@ struct NotchCommandBarView: View {
     private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
         guard !providers.isEmpty else { return false }
         var pendingURLs: [URL] = []
+        let pendingURLsLock = NSLock()
         let group = DispatchGroup()
         for provider in providers {
             group.enter()
@@ -364,7 +368,7 @@ struct NotchCommandBarView: View {
                 defer { group.leave() }
                 if let data = item as? Data,
                    let url = URL(dataRepresentation: data, relativeTo: nil) {
-                    pendingURLs.append(url)
+                    pendingURLsLock.lock(); pendingURLs.append(url); pendingURLsLock.unlock()
                 }
             }
         }

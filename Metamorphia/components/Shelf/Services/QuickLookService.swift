@@ -37,6 +37,12 @@ final class QuickLookService: ObservableObject {
     private var accessingURLs: [URL] = []
     private var previewPanelObserver: Any?
 
+    nonisolated deinit {
+        // Guarantee the selector-based willCloseNotification observer is removed
+        // even if the instance is torn down while a preview is still open.
+        NotificationCenter.default.removeObserver(self)
+    }
+
     func show(urls: [URL], selectFirst: Bool = true, slideshow: Bool = false) {
         guard !urls.isEmpty else { return }
         stopAccessingCurrentURLs()

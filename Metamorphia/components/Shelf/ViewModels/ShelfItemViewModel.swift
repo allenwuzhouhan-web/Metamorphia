@@ -31,6 +31,13 @@ import ObjectiveC
 final class ShelfItemViewModel: ObservableObject {
     @Published private(set) var item: ShelfItem
     @Published var thumbnail: NSImage?
+    /// Cached display name so SwiftUI bodies read this instead of `item.displayName`,
+    /// which for `.file` items performs synchronous disk reads/decodes on every body
+    /// recompute. Populated off the main thread by `loadThumbnail()`.
+    @Published private(set) var displayName: String
+    /// Cached NSWorkspace placeholder icon for `.file` items, computed off the main
+    /// thread so bodies don't call `NSWorkspace.shared.icon(forFile:)` during render.
+    @Published var placeholderIcon: NSImage?
     @Published var isDropTargeted: Bool = false
     @Published var isRenaming: Bool = false
     @Published var draftTitle: String = ""
@@ -38,44 +45,83 @@ final class ShelfItemViewModel: ObservableObject {
     private var quickShareLifecycle: SharingLifecycleDelegate?
     private var sharingAccessingURLs: [URL] = []
     private static var copiedURLs: [URL] = []
-    private static var copiedURLsReleaseTask: Task<Void, Never>?
+    /// `NSPasteboard.general.changeCount` captured when `copiedURLs` were written.
+    /// Once the live change count moves past this value, something else replaced the
+    /// pasteboard, so the parked security-scoped accesses can be released.
+    private static var copiedChangeCount: Int = 0
 
-    /// Stop holding security-scoped access for previously-copied URLs.
+    /// Unconditionally stop holding security-scoped access for previously-copied
+    /// URLs. Used when a fresh Copy supersedes an earlier one before writing the
+    /// new pasteboard contents.
     @MainActor
     private static func releaseCopiedURLs() {
-        copiedURLsReleaseTask?.cancel()
-        copiedURLsReleaseTask = nil
         for url in copiedURLs {
             url.stopAccessingSecurityScopedResource()
         }
         copiedURLs.removeAll()
+        copiedChangeCount = 0
     }
 
-    /// Schedule a delayed release of copied-URL access so a subsequent paste has
-    /// time to read the pasteboard, without leaking the handle for the app's
-    /// lifetime. A new Copy cancels and reschedules this.
-    @MainActor
-    private static func scheduleCopiedURLsRelease() {
-        copiedURLsReleaseTask?.cancel()
-        copiedURLsReleaseTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 60_000_000_000) // 60s
-            guard !Task.isCancelled else { return }
-            releaseCopiedURLs()
+    /// Releases the parked security-scoped accesses for `copiedURLs` if the general
+    /// pasteboard has been written by anyone since the Copy that opened them. This
+    /// bounds retention to "until the next pasteboard write" instead of "until the
+    /// next shelf Copy", which would otherwise keep them open for the app's lifetime.
+    private static func releaseCopiedURLsIfPasteboardChanged() {
+        guard !copiedURLs.isEmpty else { return }
+        guard NSPasteboard.general.changeCount != copiedChangeCount else { return }
+        for url in copiedURLs {
+            url.stopAccessingSecurityScopedResource()
         }
+        copiedURLs.removeAll()
+        copiedChangeCount = 0
     }
 
     private let selection = ShelfSelectionModel.shared
 
     init(item: ShelfItem) {
         self.item = item
-        self.draftTitle = item.displayName
+        // For .text/.link the display name is cheap; for .file this is the single
+        // synchronous read, refined off-main by loadThumbnail() below.
+        let initialName = item.displayName
+        self.displayName = initialName
+        self.draftTitle = initialName
+        // Reclaim any copied-file accesses parked by an earlier Copy if the
+        // pasteboard has since been replaced by anyone.
+        ShelfItemViewModel.releaseCopiedURLsIfPasteboardChanged()
         Task { await loadThumbnail() }
     }
 
     var isSelected: Bool { selection.isSelected(item.id) }
 
+    /// Re-syncs cached state when the underlying item changes (e.g. a rename
+    /// swaps the file bookmark while keeping the same id, so SwiftUI reuses this
+    /// view model). Refreshes the cheap name immediately, then reloads the
+    /// file-derived name/icon/thumbnail off the main thread.
+    func refresh(for newItem: ShelfItem) {
+        item = newItem
+        let initialName = newItem.displayName
+        displayName = initialName
+        draftTitle = initialName
+        thumbnail = nil
+        placeholderIcon = nil
+        ShelfItemViewModel.releaseCopiedURLsIfPasteboardChanged()
+        Task { await loadThumbnail() }
+    }
+
     func loadThumbnail() async {
         guard let url = item.fileURL else { return }
+        // Refresh the file-derived name and placeholder icon off the main thread so
+        // repeated body recomputes never touch disk. resolveFileURL already memoizes
+        // the security-scoped bookmark resolve.
+        let computed = await Task.detached(priority: .utility) { () -> (name: String, icon: NSImage) in
+            let name = ShelfItem.fileDisplayName(for: url)
+            let icon = NSWorkspace.shared.icon(forFile: url.path)
+            return (name, icon)
+        }.value
+        self.displayName = computed.name
+        if self.placeholderIcon == nil {
+            self.placeholderIcon = computed.icon
+        }
         if let image = await ThumbnailService.shared.thumbnail(for: url, size: CGSize(width: 56, height: 56)) {
             self.thumbnail = image
         }
@@ -545,6 +591,9 @@ final class ShelfItemViewModel: ObservableObject {
                 if !paths.isEmpty {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(paths.joined(separator: "\n"), forType: .string)
+                    // This write replaces the previously copied file URLs, so the
+                    // parked security-scoped accesses for them can be released.
+                    ShelfItemViewModel.releaseCopiedURLsIfPasteboardChanged()
                 }
 
             case "Copy":
@@ -570,7 +619,9 @@ final class ShelfItemViewModel: ObservableObject {
                         // Write to pasteboard, then schedule release so we don't
                         // hold the scoped-access handle for the app's lifetime.
                         pb.writeObjects(fileURLs as [NSURL])
-                        ShelfItemViewModel.scheduleCopiedURLsRelease()
+                        // Remember the change count so a later pasteboard write by
+                        // anyone can release these parked accesses.
+                        ShelfItemViewModel.copiedChangeCount = pb.changeCount
                     } else {
                         let strings = selected.map { $0.displayName }
                         if !strings.isEmpty {

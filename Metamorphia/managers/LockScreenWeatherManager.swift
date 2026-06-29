@@ -1090,8 +1090,11 @@ private func symbolAdjustedForDaylight(_ symbol: String, isDaytime: Bool) -> Str
 
 @MainActor
 private final class LockScreenWeatherLocationProvider: NSObject, CLLocationManagerDelegate {
+    private static let requestTimeout: Duration = .seconds(10)
+
     private let manager: CLLocationManager
-    private var pendingContinuations: [CheckedContinuation<CLLocation?, Never>] = []
+    private var pendingContinuations: [Int: CheckedContinuation<CLLocation?, Never>] = [:]
+    private var nextRequestID = 0
     private var lastLocation: CLLocation?
 
     override init() {
@@ -1116,8 +1119,14 @@ private final class LockScreenWeatherLocationProvider: NSObject, CLLocationManag
                 return lastLocation
             }
             manager.requestLocation()
+            let requestID = nextRequestID
+            nextRequestID += 1
             return await withCheckedContinuation { continuation in
-                self.pendingContinuations.append(continuation)
+                self.pendingContinuations[requestID] = continuation
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: Self.requestTimeout)
+                    self?.timeoutContinuation(requestID)
+                }
             }
         default:
             return nil
@@ -1137,6 +1146,11 @@ private final class LockScreenWeatherLocationProvider: NSObject, CLLocationManag
         guard !pendingContinuations.isEmpty else { return }
         let continuations = pendingContinuations
         pendingContinuations.removeAll()
-        continuations.forEach { $0.resume(returning: location) }
+        continuations.values.forEach { $0.resume(returning: location) }
+    }
+
+    private func timeoutContinuation(_ requestID: Int) {
+        guard let continuation = pendingContinuations.removeValue(forKey: requestID) else { return }
+        continuation.resume(returning: nil)
     }
 }

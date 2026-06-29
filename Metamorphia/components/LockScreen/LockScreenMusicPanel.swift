@@ -311,7 +311,7 @@ struct LockScreenMusicPanel: View {
     }
 
     private func albumArtButton(size: CGFloat, cornerRadius: CGFloat) -> some View {
-        Button(action: toggleExpanded) {
+        return Button(action: toggleExpanded) {
                 ZStack(alignment: .bottomTrailing) {
                     albumArtImage(size: size, cornerRadius: cornerRadius)
                     if showAppIcon, let icon = lockScreenAppIcon {
@@ -1065,7 +1065,7 @@ struct LockScreenMusicPanel: View {
     }
 
     private func albumArtImage(size: CGFloat, cornerRadius: CGFloat) -> some View {
-        Image(nsImage: musicManager.albumArt)
+        return Image(nsImage: musicManager.albumArt)
             .resizable()
             .aspectRatio(contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: albumArtIsLandscape ? cornerRadius/3 : cornerRadius))

@@ -11,6 +11,16 @@ import MetamorphiaPerception
 /// presence, and the KeyComboTool parser logic.
 final class GestureToolsTests: XCTestCase {
 
+    /// Bootstraps the process-global perception runtime before any perception
+    /// test runs; without it the pipeline traps in PerceptionHost and aborts the
+    /// whole test binary. Idempotent and process-global.
+    override class func setUp() {
+        super.setUp()
+        if !PerceptionRuntime.isBootstrapped {
+            PerceptionRuntime.bootstrapForTests()
+        }
+    }
+
     // MARK: - Inventory
 
     private var newTools: [any ToolDefinition] {

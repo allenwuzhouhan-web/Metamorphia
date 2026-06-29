@@ -224,11 +224,18 @@ public final class PermissionVault: ObservableObject {
 
     public func startRevocationWatch() {
         guard revocationTimer == nil else { return }
-        revocationTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        // 30s is responsive enough to surface a mid-session revocation re-prompt
+        // while keeping the periodic main-thread probe work (TCC.db file open,
+        // CGPreflight, IOKit access check) well clear of contributing to hitches.
+        // Tolerance lets the OS coalesce the wakeup for energy savings.
+        let timer = Timer(timeInterval: 30.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refresh()
             }
         }
+        timer.tolerance = 5.0
+        RunLoop.main.add(timer, forMode: .common)
+        revocationTimer = timer
     }
 
     public func stopRevocationWatch() {
@@ -279,6 +286,21 @@ public final class PermissionVault: ObservableObject {
         return .denied
     }
 
+    private typealias IOHIDCheckAccessFn = @convention(c) (UInt32) -> UInt32
+
+    /// Resolved once: IOKit's `IOHIDCheckAccess` symbol. dlopen on a system
+    /// framework returns a cached handle, but we resolve here a single time so
+    /// the per-poll path never re-dlopen/dlsym-s (and never leaks a handle ref).
+    private static let ioHIDCheckAccess: IOHIDCheckAccessFn? = {
+        guard
+            let handle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY),
+            let sym = dlsym(handle, "IOHIDCheckAccess")
+        else {
+            return nil
+        }
+        return unsafeBitCast(sym, to: IOHIDCheckAccessFn.self)
+    }()
+
     private func probeInputMonitoring() -> Status {
         // IOHIDCheckAccess / IOHIDRequestAccess are available on macOS 10.15+.
         // We check access without triggering a prompt; the kIOHIDRequestTypeListenEvent
@@ -292,15 +314,10 @@ public final class PermissionVault: ObservableObject {
         //   2 = kIOHIDAccessTypeUnknown
         //
         // kIOHIDRequestTypeListenEvent = 1
-        typealias IOHIDCheckAccessFn = @convention(c) (UInt32) -> UInt32
-        guard
-            let handle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY),
-            let sym = dlsym(handle, "IOHIDCheckAccess")
-        else {
+        guard let fn = Self.ioHIDCheckAccess else {
             // IOKit symbol unavailable — degrade gracefully.
             return .notDetermined
         }
-        let fn = unsafeBitCast(sym, to: IOHIDCheckAccessFn.self)
         let result = fn(1) // kIOHIDRequestTypeListenEvent
         switch result {
         case 0:  return .granted

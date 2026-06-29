@@ -37,8 +37,14 @@ public actor MCPHTTPClient: MCPTransport {
     // Reconnection
     private var reconnectAttempts = 0
     private var isReconnecting = false
+    private var connectedAt: Date?
     private static let maxReconnectAttempts = 5
     private static let maxBackoffSeconds: Double = 30
+    // A connection must stay up at least this long before it counts as stable.
+    // Drops sooner than this are treated as flaps so reconnectAttempts keeps
+    // accumulating and the maxReconnectAttempts cap can eventually trip.
+    private static let minStableSeconds: Double = 5
+
     /// Cap on an accumulated HTTP/JSON response body (1 MB). Prevents a hostile or
     /// broken server from driving unbounded memory growth via a never-ending body.
     private static let maxBodyBytes = 1 * 1024 * 1024
@@ -79,6 +85,7 @@ public actor MCPHTTPClient: MCPTransport {
 
     public func disconnect() {
         connected = false
+        connectedAt = nil
         sseTask?.cancel()
         sseTask = nil
         sessionId = nil
@@ -149,6 +156,9 @@ public actor MCPHTTPClient: MCPTransport {
         ])
 
         connected = true
+        connectedAt = Date()
+        // Streamable HTTP has no long-lived stream that can flap, so a
+        // completed initialize means the server is genuinely reachable.
         reconnectAttempts = 0
         isReconnecting = false
 
@@ -307,7 +317,11 @@ public actor MCPHTTPClient: MCPTransport {
         ])
 
         connected = true
-        reconnectAttempts = 0
+        connectedAt = Date()
+        // NOTE: do not zero reconnectAttempts here. A successful GET can be
+        // followed immediately by the SSE stream dropping; resetting on every
+        // connect would let a flapping server reconnect forever. The counter is
+        // only cleared once the stream proves stable (see handleSSEDisconnect).
         isReconnecting = false
 
         sendSSENotification("notifications/initialized", params: [:])
@@ -377,6 +391,13 @@ public actor MCPHTTPClient: MCPTransport {
     private func handleSSEDisconnect() {
         guard connected else { return }
         print("[MCP-HTTP] SSE stream ended for \(serverName)")
+        // Only treat the prior connection as healthy if it stayed up long
+        // enough. A stable connection that drops gets the full reconnect budget;
+        // a server that connects then immediately drops keeps accumulating
+        // attempts so attemptReconnect() eventually gives up instead of looping.
+        if let connectedAt, Date().timeIntervalSince(connectedAt) >= Self.minStableSeconds {
+            reconnectAttempts = 0
+        }
         disconnect()
         Task { await attemptReconnect() }
     }

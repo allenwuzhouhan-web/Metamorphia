@@ -35,9 +35,20 @@ final class YouTubeMusicController: MediaControllerProtocol {
     var playbackStatePublisher: AnyPublisher<PlaybackState, Never> {
         $playbackState.eraseToAnyPublisher()
     }
+
+    /// Serializes every mutation of the @Published `playbackState` onto the main
+    /// actor. The published value and its Combine subscriber list are not
+    /// thread-safe, and writes otherwise arrive from the WebSocket executor, the
+    /// periodic timer, and async command handlers concurrently.
+    @MainActor
+    private func mutatePlaybackState(_ transform: (inout PlaybackState) -> Void) {
+        var copy = playbackState
+        transform(&copy)
+        playbackState = copy
+    }
     
     var isWorking: Bool {
-        isActive() && (updateTimer != nil || webSocketClient != nil)
+        isActive() && (pollTask != nil || webSocketClient != nil)
     }
     
     // MARK: - Private Properties
@@ -46,7 +57,7 @@ final class YouTubeMusicController: MediaControllerProtocol {
     private let authManager: YouTubeMusicAuthManager
     private var webSocketClient: YouTubeMusicWebSocketClient?
     
-    private var updateTimer: Timer?
+    private var pollTask: Task<Void, Never>?
     private var appStateObserver: Task<Void, Never>?
     private var reconnectDelay: TimeInterval = 1.0
     
@@ -57,12 +68,18 @@ final class YouTubeMusicController: MediaControllerProtocol {
         self.authManager = YouTubeMusicAuthManager(httpClient: httpClient)
         
         setupAppStateObserver()
-        
+
         Task {
             await initializeIfAppActive()
         }
     }
-    
+
+    deinit {
+        pollTask?.cancel()
+        appStateObserver?.cancel()
+        artworkFetchTask?.cancel()
+    }
+
     // MARK: - MediaControllerProtocol Implementation
     func play() async { await sendCommand(endpoint: "/play", method: "POST") }
     
@@ -95,10 +112,10 @@ final class YouTubeMusicController: MediaControllerProtocol {
     
     func updatePlaybackInfo() async {
         guard isActive() else {
-            resetPlaybackState()
+            await resetPlaybackState()
             return
         }
-        
+
         do {
             let token = try await authManager.authenticate()
             let response = try await httpClient.getPlaybackInfo(token: token)
@@ -161,8 +178,8 @@ final class YouTubeMusicController: MediaControllerProtocol {
             await webSocketClient?.disconnect()
             webSocketClient = nil
         }
-        
-        resetPlaybackState()
+
+        await resetPlaybackState()
     }
     
     private func initializeIfAppActive() async {
@@ -230,33 +247,38 @@ final class YouTubeMusicController: MediaControllerProtocol {
             }
             guard let newPosition = position else { return }
 
-            var copied = playbackState
-            copied.currentTime = newPosition
-            copied.lastUpdated = Date()
-            playbackState = copied
+            await mutatePlaybackState { copy in
+                copy.currentTime = newPosition
+                copy.lastUpdated = Date()
+            }
 
         case .repeatChanged:
             guard let data = message.extractData() else { return }
-            var copy = playbackState
 
+            let newRepeatMode: RepeatMode?
             if let repeatStr = data["repeat"] as? String {
                 switch repeatStr.uppercased() {
-                case "NONE": copy.repeatMode = .off
-                case "ALL": copy.repeatMode = .all
-                case "ONE": copy.repeatMode = .one
-                default: break
+                case "NONE": newRepeatMode = .off
+                case "ALL": newRepeatMode = .all
+                case "ONE": newRepeatMode = .one
+                default: newRepeatMode = nil
                 }
+            } else {
+                newRepeatMode = nil
             }
-            copy.lastUpdated = Date()
-            playbackState = copy
+            await mutatePlaybackState { copy in
+                if let newRepeatMode { copy.repeatMode = newRepeatMode }
+                copy.lastUpdated = Date()
+            }
 
         case .shuffleChanged:
             guard let data = message.extractData() else { return }
-            var copy = playbackState
-            if let shuffle = data["shuffle"] as? Bool { copy.isShuffled = shuffle }
-            else if let shuffle = data["isShuffled"] as? Bool { copy.isShuffled = shuffle }
-            copy.lastUpdated = Date()
-            playbackState = copy
+
+            let newShuffle = (data["shuffle"] as? Bool) ?? (data["isShuffled"] as? Bool)
+            await mutatePlaybackState { copy in
+                if let newShuffle { copy.isShuffled = newShuffle }
+                copy.lastUpdated = Date()
+            }
 
         case .volumeChanged:
             break
@@ -280,19 +302,24 @@ final class YouTubeMusicController: MediaControllerProtocol {
     
     private func startPeriodicUpdates() async {
         guard isActive() && webSocketClient == nil else { return }
-        
+
         stopPeriodicUpdates()
-        
-        updateTimer = Timer.scheduledTimer(withTimeInterval: configuration.updateInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+
+        // A cancellable Task loop instead of a Timer: it needs no run loop (so it
+        // fires reliably even when scheduled from a cooperative-pool thread) and is
+        // cancellation-safe across threads, unlike Timer.invalidate().
+        let interval = configuration.updateInterval
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
                 await self?.updatePlaybackInfo()
+                try? await Task.sleep(for: .seconds(interval))
             }
         }
     }
-    
+
     private func stopPeriodicUpdates() {
-        updateTimer?.invalidate()
-        updateTimer = nil
+        pollTask?.cancel()
+        pollTask = nil
     }
 
     func pollPlaybackState() async {
@@ -322,24 +349,24 @@ final class YouTubeMusicController: MediaControllerProtocol {
             )
             // Lightweight endpoint-specific parsing
             if endpoint == "/shuffle" {
-                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let shuffleState = json["state"] as? Bool {
-                    playbackState.isShuffled = shuffleState
-                } else {
-                    playbackState.isShuffled = !playbackState.isShuffled
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let shuffleState = json?["state"] as? Bool
+                await mutatePlaybackState { copy in
+                    copy.isShuffled = shuffleState ?? !copy.isShuffled
                 }
             } else if endpoint == "/repeat-mode" {
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    if let mode = json["mode"] as? String { updateRepeatMode(mode) }
+                    if let mode = json["mode"] as? String { await updateRepeatMode(mode) }
                 }
             }  else if endpoint == "/switch-repeat" {
                 // Find next repeat mode
-                let nextMode: RepeatMode
-                switch playbackState.repeatMode {
-                case .off: nextMode = .all
-                case .all: nextMode = .one
-                case .one: nextMode = .off
+                await mutatePlaybackState { copy in
+                    switch copy.repeatMode {
+                    case .off: copy.repeatMode = .all
+                    case .all: copy.repeatMode = .one
+                    case .one: copy.repeatMode = .off
+                    }
                 }
-                playbackState.repeatMode = nextMode
             } else if refresh && webSocketClient == nil {
                 try? await Task.sleep(for: .milliseconds(100))
                 await updatePlaybackInfo()
@@ -352,47 +379,39 @@ final class YouTubeMusicController: MediaControllerProtocol {
     }
     
     private func updatePlaybackState(with response: PlaybackResponse) async {
-        var newState = playbackState
-        
-        newState.isPlaying = !response.isPaused
+        // Extract primitive values off-actor, then apply them on the main actor
+        // where `playbackState` is owned.
+        let isPlaying = !response.isPaused
+        let title = response.title
+        let artist = response.artist
+        let album = response.album
+        let elapsed = response.elapsedSeconds
+        let duration = response.songDuration
+        let shuffled = response.isShuffled
+        let repeatModeRaw = response.repeatMode
 
-        if let title = response.title {
-            newState.title = title
-        }
+        await mutatePlaybackState { newState in
+            newState.isPlaying = isPlaying
 
-        if let artist = response.artist {
-            newState.artist = artist
-        }
+            if let title { newState.title = title }
+            if let artist { newState.artist = artist }
+            if let album { newState.album = album }
+            if let elapsed { newState.currentTime = elapsed }
+            if let duration { newState.duration = duration }
 
-        if let album = response.album {
-            newState.album = album
-        }
+            newState.lastUpdated = Date()
 
-        if let elapsed = response.elapsedSeconds {
-            newState.currentTime = elapsed
-        }
+            if let shuffled { newState.isShuffled = shuffled }
 
-        if let duration = response.songDuration {
-            newState.duration = duration
-        }
-
-        newState.lastUpdated = Date()
-        
-        if let shuffled = response.isShuffled {
-            newState.isShuffled = shuffled
-        }
-        
-        if let mode = response.repeatMode {
-            switch mode {
-            case 0: newState.repeatMode = .off
-            case 1: newState.repeatMode = .all
-            case 2: newState.repeatMode = .one
-            default: break
+            if let mode = repeatModeRaw {
+                switch mode {
+                case 0: newState.repeatMode = .off
+                case 1: newState.repeatMode = .all
+                case 2: newState.repeatMode = .one
+                default: break
+                }
             }
         }
-
-        // Always update - removed comparison since PlaybackState doesn't conform to Equatable
-        playbackState = newState
 
         artworkFetchTask?.cancel()
         artworkFetchTask = nil
@@ -410,6 +429,7 @@ final class YouTubeMusicController: MediaControllerProtocol {
         }
     }
     
+    @MainActor
     private func resetPlaybackState() {
         playbackState = PlaybackState(
             bundleIdentifier: configuration.bundleIdentifier,
@@ -424,6 +444,7 @@ final class YouTubeMusicController: MediaControllerProtocol {
         NSWorkspace.shared.open(url)
     }
 
+     @MainActor
      private func updateRepeatMode(_ mode: String) {
         var target: RepeatMode? = nil
         switch mode {

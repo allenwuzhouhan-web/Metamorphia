@@ -135,10 +135,22 @@ public final class BrowserTabSensor {
         self.allowlist = allowlist
     }
 
+    deinit {
+        // Tear down the repeating poll timer with the owner regardless of pause
+        // state. The main RunLoop strongly retains a scheduled repeating Timer
+        // independently of this object, so without this it would keep firing
+        // after release. Safe to touch from a nonisolated deinit: this is the
+        // last reference and invalidate() is the only access.
+        pollTimer?.invalidate()
+    }
+
     // MARK: - Lifecycle
 
     public func start() {
         guard Defaults[.observeBrowserTabs] else { return }
+        // Idempotency: a second start() without an intervening stop() must not
+        // orphan the existing observer token (which could never be removed).
+        guard workspaceObserver == nil else { return }
 
         // Subscribe to frontmost-app changes so we can wake/pause the poll loop.
         workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(

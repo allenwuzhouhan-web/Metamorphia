@@ -26,23 +26,29 @@ import LottieUI
 import Defaults
 
 struct LottieAnimationView: View {
+    /// Whether music is currently playing. When false the Lottie view is
+    /// unmounted so its render loop is torn down (matching the sibling
+    /// AudioVisualizerView, which stops animating the moment playback pauses).
+    var isPlaying: Bool = true
     private static let defaultVisualizerURL = URL(string: "https://assets9.lottiefiles.com/packages/lf20_mniampqn.json")
     @Default(.selectedVisualizer) var selectedVisualizer
     var body: some View {
-        if selectedVisualizer == nil {
-            if let url = Self.defaultVisualizerURL {
-                LottieView(state: LUStateData(type: .loadedFrom(url), speed: 1.0, loopMode: .loop))
+        if isPlaying {
+            if selectedVisualizer == nil {
+                if let url = Self.defaultVisualizerURL {
+                    LottieView(state: LUStateData(type: .loadedFrom(url), speed: 1.0, loopMode: .loop))
+                } else {
+                    Color.clear
+                }
             } else {
-                Color.clear
-            }
-        } else {
-            LottieView(
-                state: LUStateData(
-                    type: .loadedFrom(selectedVisualizer!.url),
-                    speed: selectedVisualizer!.speed,
-                    loopMode: .loop
+                LottieView(
+                    state: LUStateData(
+                        type: .loadedFrom(selectedVisualizer!.url),
+                        speed: selectedVisualizer!.speed,
+                        loopMode: .loop
+                    )
                 )
-            )
+            }
         }
     }
 }

@@ -66,13 +66,9 @@ public final class OllamaRouter: @unchecked Sendable {
     ) async -> String? {
         guard let url = URL(string: "\(baseURL)/api/generate") else { return nil }
 
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = timeout
-        config.timeoutIntervalForResource = timeout
-        let localSession = URLSession(configuration: config)
-
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         let body: [String: Any] = [
@@ -89,7 +85,7 @@ public final class OllamaRouter: @unchecked Sendable {
         request.httpBody = bodyData
 
         do {
-            let (data, response) = try await localSession.data(for: request)
+            let (data, response) = try await routingSession.data(for: request)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let text = json["response"] as? String else { return nil }

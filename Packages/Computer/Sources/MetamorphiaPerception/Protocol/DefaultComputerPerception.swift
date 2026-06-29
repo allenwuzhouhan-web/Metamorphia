@@ -341,8 +341,9 @@ public final class DefaultComputerPerception: ComputerPerception, @unchecked Sen
             return ScreenCapture.captureMainDisplay()
         }()
 
-        // No image available (permission denied / capture failed) — report "no
-        // diff" instead of crashing.
+        // No image available (permission denied / capture failed) — bail
+        // gracefully, consistent with the no-previous-map case above, instead
+        // of crashing.
         guard let cgImage else { return nil }
 
         return VisionDiffer.diff(

@@ -143,6 +143,11 @@ public actor EscalationPolicy {
     /// Ring buffer capacity for recent escalation timestamps per bundle.
     private static let ringCapacity = 10
 
+    /// Bundle keys idle longer than this are dropped during the periodic sweep.
+    private static let bundleRetention: TimeInterval = 7 * 24 * 60 * 60   // 7 days
+    /// Hard ceiling on tracked bundle keys; oldest are evicted past this.
+    private static let maxTrackedBundles = 256
+
     // MARK: - Per-bundle state
 
     /// Keyed by effective bundle key (`bundleID ?? "_"`).
@@ -230,6 +235,9 @@ public actor EscalationPolicy {
         // Update profile counts and quality score
         updateProfile(key: key, bundleID: context.bundleID, reason: reason)
 
+        // Bound the tracked-bundle key set on long-running processes.
+        pruneStaleBundlesIfNeeded(now: now, keep: key)
+
         return Decision(allow: true, reason: reason, tokenID: token, denyCause: nil)
     }
 
@@ -315,6 +323,61 @@ public actor EscalationPolicy {
             todayStart[key] = now
         } else if todayStart[key] == nil {
             todayStart[key] = now
+        }
+    }
+
+    /// Most recent activity timestamp for a bundle key, derived from existing
+    /// signals (last ring-buffer escalation, else today-start). `nil` when the
+    /// key has no time-stamped activity.
+    private func lastActivity(forKey key: String) -> Date? {
+        recentEscalations[key]?.last ?? todayStart[key]
+    }
+
+    /// Forget all per-bundle state for `key`. Never touches the synthetic
+    /// `"_superseded_"` telemetry key (it carries no time-stamped activity, so
+    /// the retention sweep already skips it) or the default `"_"` key.
+    private func removeBundle(key: String) {
+        lastEscalationAt.removeValue(forKey: key)
+        todayCount.removeValue(forKey: key)
+        todayStart.removeValue(forKey: key)
+        outstandingTokens.removeValue(forKey: key)
+        recentEscalations.removeValue(forKey: key)
+        profiles.removeValue(forKey: key)
+        settlementCounts.removeValue(forKey: key)
+    }
+
+    /// Drop bundle keys idle past the retention window, then enforce a hard cap
+    /// on the number of tracked bundles by evicting the least-recently-active.
+    /// `keep` is the key just touched by the current escalation; it is never
+    /// evicted. Keys with an outstanding token are also preserved so a pending
+    /// `settle` can still match.
+    private func pruneStaleBundlesIfNeeded(now: Date, keep: String) {
+        func hasOutstanding(_ key: String) -> Bool {
+            !(outstandingTokens[key]?.isEmpty ?? true)
+        }
+        func evictable(_ key: String) -> Bool {
+            key != keep && key != "_" && !hasOutstanding(key)
+        }
+
+        // 1. Retention sweep: drop keys idle longer than the window.
+        //    Snapshot the keys so we can mutate the dictionary while iterating.
+        for key in Array(lastEscalationAt.keys) where evictable(key) {
+            if let last = lastActivity(forKey: key),
+               now.timeIntervalSince(last) > Self.bundleRetention {
+                removeBundle(key: key)
+            }
+        }
+
+        // 2. Hard cap: evict least-recently-active beyond the ceiling.
+        if lastEscalationAt.count > Self.maxTrackedBundles {
+            let candidates = lastEscalationAt.keys
+                .filter(evictable)
+                .sorted { (lastActivity(forKey: $0) ?? .distantPast)
+                            < (lastActivity(forKey: $1) ?? .distantPast) }
+            let overflow = lastEscalationAt.count - Self.maxTrackedBundles
+            for key in candidates.prefix(overflow) {
+                removeBundle(key: key)
+            }
         }
     }
 

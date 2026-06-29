@@ -12,10 +12,11 @@ final class ScreenQueryToolTests: XCTestCase {
 
     // MARK: - Bootstrap
 
-    /// `screen_query` execution reaches `PerceptionRuntime.host`, which
-    /// `preconditionFailure`s (signal 5, aborting the whole test binary) if the
-    /// runtime was never bootstrapped. Install a throwaway temp-dir host before
-    /// any test runs. Idempotent and process-global.
+    /// Bootstraps the process-global perception runtime before any perception
+    /// test runs. `screen_query` execution reaches `PerceptionRuntime.host`,
+    /// which `preconditionFailure`s (signal 5, aborting the whole test binary)
+    /// if the runtime was never bootstrapped. Install a throwaway temp-dir host
+    /// before any test runs. Idempotent and process-global.
     override class func setUp() {
         super.setUp()
         if !PerceptionRuntime.isBootstrapped {

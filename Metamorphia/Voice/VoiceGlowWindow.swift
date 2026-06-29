@@ -59,6 +59,10 @@ final class VoiceGlowWindow {
         }
     }
 
+    deinit {
+        glowLayer?.stop()
+    }
+
     func updatePulseIntensity(_ state: VoiceState) {
         switch state {
         case .activated: glowLayer?.setPulseDuration(1.5)
@@ -86,8 +90,9 @@ final class VoiceGlowLayer: CALayer {
 
     private let edgeDepth: CGFloat = 60
     private var edgeLayers: [CAGradientLayer] = []
-    private var colorTimer: Timer?
-    private var colorPhase: Int = 0
+    /// Wall-clock seconds for one full pass through the rainbow palette. Matches
+    /// the previous Timer cadence (0.3s per step × palette length).
+    private var rainbowCycleDuration: CFTimeInterval { 0.3 * CFTimeInterval(rainbowColors.count) }
 
     private let rainbowColors: [CGColor] = [
         NSColor(hue: 0.00, saturation: 0.65, brightness: 1.0, alpha: 0.55).cgColor,
@@ -164,37 +169,55 @@ final class VoiceGlowLayer: CALayer {
             addBreathingPulse(to: edge, duration: 3.0)
         }
 
-        colorTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] timer in
-            guard let self = self, !self.edgeLayers.isEmpty else {
-                timer.invalidate()
-                return
-            }
-            self.colorPhase = (self.colorPhase + 1) % self.rainbowColors.count
+        // Cycle the rainbow palette with a single repeating keyframe animation
+        // per edge instead of a 0.3s Timer rebuilding 8 CABasicAnimations every
+        // tick. Each edge is phase-offset by `i * 2` palette steps to preserve
+        // the original staggered look. No Timer means nothing to leak if the
+        // window is torn down without `fadeOut()`.
+        for (i, edge) in edgeLayers.enumerated() {
+            addRainbowCycle(to: edge, phaseOffset: i * 2)
+        }
+    }
 
-            for (i, edge) in self.edgeLayers.enumerated() {
-                let idx = (self.colorPhase + i * 2) % self.rainbowColors.count
-                let newColors = [self.rainbowColors[idx], CGColor.clear]
+    private func addRainbowCycle(to layer: CAGradientLayer, phaseOffset: Int) {
+        let count = rainbowColors.count
+        guard count > 0 else { return }
 
-                let colorAnim = CABasicAnimation(keyPath: "colors")
-                colorAnim.toValue = newColors
-                colorAnim.duration = 0.3
-                colorAnim.fillMode = .forwards
-                colorAnim.isRemovedOnCompletion = false
-                edge.add(colorAnim, forKey: "rainbow")
+        var colorValues: [[CGColor]] = []
+        var shadowValues: [CGColor] = []
+        // One extra sample wrapping back to the start so the loop is seamless.
+        for step in 0...count {
+            let idx = (phaseOffset + step) % count
+            colorValues.append([rainbowColors[idx], CGColor.clear])
+            shadowValues.append(rainbowShadows[idx])
+        }
 
-                let shadowAnim = CABasicAnimation(keyPath: "shadowColor")
-                shadowAnim.toValue = self.rainbowShadows[idx]
-                shadowAnim.duration = 0.3
-                shadowAnim.fillMode = .forwards
-                shadowAnim.isRemovedOnCompletion = false
-                edge.add(shadowAnim, forKey: "rainbowShadow")
-            }
+        let colorAnim = CAKeyframeAnimation(keyPath: "colors")
+        colorAnim.values = colorValues
+        colorAnim.duration = rainbowCycleDuration
+        colorAnim.repeatCount = .infinity
+        colorAnim.calculationMode = .linear
+        layer.add(colorAnim, forKey: "rainbow")
+
+        let shadowAnim = CAKeyframeAnimation(keyPath: "shadowColor")
+        shadowAnim.values = shadowValues
+        shadowAnim.duration = rainbowCycleDuration
+        shadowAnim.repeatCount = .infinity
+        shadowAnim.calculationMode = .linear
+        layer.add(shadowAnim, forKey: "rainbowShadow")
+    }
+
+    /// Removes the repeating rainbow animations from each edge. Safe to call
+    /// from any teardown path (including `deinit`), independent of `fadeOut(_:)`.
+    func stop() {
+        for edge in edgeLayers {
+            edge.removeAnimation(forKey: "rainbow")
+            edge.removeAnimation(forKey: "rainbowShadow")
         }
     }
 
     func fadeOut(completion: @escaping () -> Void) {
-        colorTimer?.invalidate()
-        colorTimer = nil
+        stop()
 
         let fadeOut = CABasicAnimation(keyPath: "opacity")
         fadeOut.toValue = 0

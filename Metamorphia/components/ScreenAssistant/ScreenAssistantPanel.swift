@@ -114,7 +114,10 @@ struct ScreenAssistantPanelView: View {
 
 struct MarkdownText: View {
     let content: String
-    
+
+    // Compile the bold pattern once rather than on every render of every bubble.
+    private static let boldRegex = try? NSRegularExpression(pattern: #"\*\*(.*?)\*\*"#)
+
     var body: some View {
         // Simple markdown parsing for now
         Text(parseMarkdown(content))
@@ -126,8 +129,7 @@ struct MarkdownText: View {
         var attributedString = AttributedString(text)
         
         // Simple bold parsing (**text**)
-        let boldPattern = #"\*\*(.*?)\*\*"#
-        if let regex = try? NSRegularExpression(pattern: boldPattern) {
+        if let regex = Self.boldRegex {
             let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
             for match in matches.reversed() {
                 if let range = Range(match.range, in: text) {

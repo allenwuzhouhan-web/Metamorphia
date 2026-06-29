@@ -29,10 +29,14 @@ import Defaults
 final class CustomOSDWindowManager {
     static let shared = CustomOSDWindowManager()
     
-    private var volumeWindows: [NSScreen: OSDWindow] = [:]
-    private var brightnessWindows: [NSScreen: OSDWindow] = [:]
-    private var backlightWindows: [NSScreen: OSDWindow] = [:]
-    
+    // Keyed by stable display id (CGDirectDisplayID) rather than NSScreen, because macOS
+    // hands out fresh NSScreen instances on every display reconfiguration and those would
+    // never match a cached entry, leaking the previous screen's windows.
+    private var volumeWindows: [CGDirectDisplayID: OSDWindow] = [:]
+    private var brightnessWindows: [CGDirectDisplayID: OSDWindow] = [:]
+    private var backlightWindows: [CGDirectDisplayID: OSDWindow] = [:]
+
+    private var screenChangeObserver: NSObjectProtocol?
     private var hideWorkItem: DispatchWorkItem?
     private let displayDuration: TimeInterval = 2.0
     private let animationDuration: TimeInterval = 0.3
@@ -62,7 +66,39 @@ final class CustomOSDWindowManager {
     }
     
     func initialize() {
+        guard !isInitialized else { return }
         isInitialized = true
+        registerScreenChangeObserver()
+    }
+
+    private func registerScreenChangeObserver() {
+        guard screenChangeObserver == nil else { return }
+        screenChangeObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                self.pruneDisconnectedScreens()
+            }
+        }
+    }
+
+    /// Reclaims OSD windows whose display id is no longer present after a reconfiguration.
+    private func pruneDisconnectedScreens() {
+        let activeIDs = Set(NSScreen.screens.compactMap { screenNumber(for: $0) })
+
+        func prune(_ windows: inout [CGDirectDisplayID: OSDWindow]) {
+            for (displayID, window) in windows where !activeIDs.contains(displayID) {
+                window.nsWindow.orderOut(nil)
+                windows.removeValue(forKey: displayID)
+            }
+        }
+
+        prune(&volumeWindows)
+        prune(&brightnessWindows)
+        prune(&backlightWindows)
     }
     
     // MARK: - Private Implementation
@@ -76,7 +112,9 @@ final class CustomOSDWindowManager {
         
         // Show on target screen(s)
         for screen in screens {
-            let window = ensureWindow(for: type, screen: screen)
+            // Skip screens without a stable display id: caching them would leak,
+            // and presenting an uncached window would orphan it (never ordered out/released).
+            guard let window = ensureWindow(for: type, screen: screen) else { continue }
             updateContent(window: window, type: type, value: value, icon: icon)
             
             let targetFrame = calculateFrame(for: screen)
@@ -94,33 +132,45 @@ final class CustomOSDWindowManager {
         scheduleHide(for: type)
     }
     
-    private func ensureWindow(for type: SneakContentType, screen: NSScreen) -> OSDWindow {
+    private func ensureWindow(for type: SneakContentType, screen: NSScreen) -> OSDWindow? {
+        guard let displayID = screenNumber(for: screen) else {
+            // Without a stable display id we cannot cache the window without leaking, and an
+            // uncached window would never be ordered out or released. Skip presentation instead.
+            return nil
+        }
         switch type {
         case .volume:
-            if let existing = volumeWindows[screen] {
+            if let existing = volumeWindows[displayID] {
                 return existing
             }
             let window = createWindow(for: type, screen: screen)
-            volumeWindows[screen] = window
+            volumeWindows[displayID] = window
             return window
         case .brightness:
-            if let existing = brightnessWindows[screen] {
+            if let existing = brightnessWindows[displayID] {
                 return existing
             }
             let window = createWindow(for: type, screen: screen)
-            brightnessWindows[screen] = window
+            brightnessWindows[displayID] = window
             return window
         case .backlight:
-            if let existing = backlightWindows[screen] {
+            if let existing = backlightWindows[displayID] {
                 return existing
             }
             let window = createWindow(for: type, screen: screen)
-            backlightWindows[screen] = window
+            backlightWindows[displayID] = window
             return window
         default:
-            Logger.log("[CustomOSDWindowManager] Unsupported OSD type: \(type). Returning uncached window.", category: .warning)
-            return createWindow(for: type, screen: screen)
+            Logger.log("[CustomOSDWindowManager] Unsupported OSD type: \(type). Skipping presentation.", category: .warning)
+            return nil
         }
+    }
+
+    private func screenNumber(for screen: NSScreen) -> CGDirectDisplayID? {
+        guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            return nil
+        }
+        return number.uint32Value
     }
     
     private func createWindow(for type: SneakContentType, screen: NSScreen) -> OSDWindow {
@@ -255,7 +305,13 @@ final class CustomOSDWindowManager {
     func tearDown() {
         hideWorkItem?.cancel()
         hideWorkItem = nil
-        
+
+        if let observer = screenChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            screenChangeObserver = nil
+        }
+        isInitialized = false
+
         for window in volumeWindows.values {
             window.nsWindow.orderOut(nil)
         }

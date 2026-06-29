@@ -61,7 +61,8 @@ public final class WorkspaceTriggerSource {
     /// same C-function pointer + context) before this object deallocates —
     /// otherwise the C callback dereferences freed memory on the next display
     /// reconfiguration. We balance register in `start()` with remove in `stop()`
-    /// / `deinit`.
+    /// / `deinit`. Re-registering with the same callback and self pointer on a
+    /// later `start()` is valid because the remove matches on that exact pair.
     private var didRegisterCGCallback = false
 
     // MARK: - Init
@@ -168,16 +169,24 @@ public final class WorkspaceTriggerSource {
         pasteboardPollTask?.cancel()
         pasteboardPollTask = nil
 
+        // Remove the process-global reconfiguration callback so no stale
+        // .displayConfigurationChanged events post after stop() and the callback
+        // no longer holds this instance's self pointer once it is deallocated.
         removeCGReconfigCallback()
 
         started = false
     }
 
+    // MARK: - Deinit
+
     deinit {
-        // The CG reconfig callback captures an unretained pointer to self.
-        // It must be removed before deallocation or it will deref freed memory.
-        // `CGDisplayRemoveReconfigurationCallback` and the context pointer are
-        // both free functions / fixed values, so this is safe from deinit.
+        // The CG reconfig callback captures an unretained pointer to self, so it
+        // must be removed before deallocation or it will deref freed memory on
+        // the next display reconfiguration. CGDisplayRemoveReconfigurationCallback
+        // matches on the exact (function pointer, userInfo) pair, so passing the
+        // same callback and self pointer removes precisely this instance's
+        // registration. The function pointer and context are both fixed values,
+        // so this is safe to call from deinit.
         if didRegisterCGCallback {
             CGDisplayRemoveReconfigurationCallback(
                 cgReconfigCallback,

@@ -921,14 +921,21 @@ class MusicManager: ObservableObject {
         lyricSyncTask = Task { [weak self] in
             guard let self = self else { return }
             while !Task.isCancelled {
-                // Compute estimated playback position and update lyric
-                let position = self.estimatedPlaybackPosition()
-                await MainActor.run {
-                    self.updateCurrentLyric(for: position)
+                // Only do per-iteration work while audio is actually playing.
+                // When paused/idle the estimated position is frozen, so there is
+                // nothing to update — poll slowly instead of waking the main
+                // thread at 3.3 Hz for no UI change.
+                if await MainActor.run(body: { self.isPlaying }) {
+                    let position = self.estimatedPlaybackPosition()
+                    await MainActor.run {
+                        self.updateCurrentLyric(for: position)
+                    }
+                    // Sleep ~300ms between updates while playing.
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                } else {
+                    // Paused: idle at ~1 Hz so we promptly resume on play.
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
                 }
-
-                // Sleep ~300ms between updates
-                try? await Task.sleep(nanoseconds: 300_000_000)
             }
         }
     }

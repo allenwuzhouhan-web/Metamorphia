@@ -28,46 +28,79 @@ import UniformTypeIdentifiers
 actor ThumbnailService {
     static let shared = ThumbnailService()
 
-    private var cache: [String: NSImage] = [:]
+    private let cacheCountLimit = 200
+    private let cache = NSCache<NSString, NSImage>()
+    private var cacheKeys: Set<String> = []
+    private var cacheKeyOrder: [String] = []
     private var pendingRequests: [String: Task<NSImage?, Never>] = [:]
     private let thumbnailGenerator = QLThumbnailGenerator.shared
 
-    private init() {}
-    
+    private init() {
+        cache.countLimit = cacheCountLimit
+    }
+
     func thumbnail(for url: URL, size: CGSize) async -> NSImage? {
         let cacheKey = "\(url.path)_\(size.width)x\(size.height)"
-        
-        if let cached = cache[cacheKey] {
+
+        if let cached = cache.object(forKey: cacheKey as NSString) {
             return cached
         }
-        
+
         if let pending = pendingRequests[cacheKey] {
             return await pending.value
         }
-        
+
         let task = Task<NSImage?, Never> {
             let thumbnail = await generateQuickLookThumbnail(for: url, size: size)
             if let thumbnail = thumbnail {
-                cache[cacheKey] = thumbnail
+                cache.setObject(thumbnail, forKey: cacheKey as NSString)
+                rememberCacheKey(cacheKey)
             }
             pendingRequests[cacheKey] = nil
             return thumbnail
         }
-        
+
         pendingRequests[cacheKey] = task
         return await task.value
     }
-    
+
     func clearCache() {
-        cache.removeAll()
+        cache.removeAllObjects()
+        cacheKeys.removeAll()
+        cacheKeyOrder.removeAll()
     }
-    
+
     func clearCache(for url: URL) {
-        cache = cache.filter { !$0.key.starts(with: url.path) }
+        let staleKeys = cacheKeys.filter { $0.starts(with: url.path) }
+        for key in staleKeys {
+            cache.removeObject(forKey: key as NSString)
+            cacheKeys.remove(key)
+        }
+        if !staleKeys.isEmpty {
+            cacheKeyOrder.removeAll { staleKeys.contains($0) }
+        }
     }
-    
+
     // MARK: - Private Methods
-    
+
+    /// Records a freshly cached key, evicting the oldest tracked key once the
+    /// set would exceed the cache's count limit. NSCache evicts entries on its
+    /// own without notifying us, so bounding the parallel set here keeps it from
+    /// growing without limit over a long session.
+    private func rememberCacheKey(_ cacheKey: String) {
+        if cacheKeys.contains(cacheKey) {
+            cacheKeyOrder.removeAll { $0 == cacheKey }
+        } else {
+            cacheKeys.insert(cacheKey)
+        }
+        cacheKeyOrder.append(cacheKey)
+
+        while cacheKeyOrder.count > cacheCountLimit {
+            let evicted = cacheKeyOrder.removeFirst()
+            cacheKeys.remove(evicted)
+        }
+    }
+
     private func generateQuickLookThumbnail(for url: URL, size: CGSize) async -> NSImage? {
         let scale = await MainActor.run { NSScreen.main?.backingScaleFactor ?? 2.0 }
         

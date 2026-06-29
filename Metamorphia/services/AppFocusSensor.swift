@@ -26,6 +26,7 @@ import ApplicationServices
 import Defaults
 import Foundation
 import MetamorphiaAgentKit
+import MetamorphiaPerception
 
 // MARK: - Defaults key
 
@@ -177,23 +178,26 @@ public final class AppFocusSensor {
         var windowTitle: String?
 
         if axTrusted && !Self.titleDenylist.contains(bundleID) && !AppFocusDenylistStore.shared.contains(bundleID: bundleID) {
-            // Replicate the 5-line AX pattern from FocusTracker.currentFocus().
-            let appElement = AXUIElementCreateApplication(pid)
-            var focusedWindow: CFTypeRef?
-            if AXUIElementCopyAttributeValue(
-                appElement,
-                kAXFocusedWindowAttribute as CFString,
-                &focusedWindow
-            ) == .success, let window = focusedWindow {
+            // Route the synchronous AX reads through the bounded-timeout queue
+            // (the established safe pattern, see SelectionTracker.readSelectionLength).
+            // A hung/poisoned frontmost app now throws — yielding a nil title —
+            // instead of blocking the main actor until the ~6 s default AX timeout.
+            windowTitle = try? AXTimeoutQueue.shared.run(pid: pid, timeout: 0.1) {
+                let appElement = AXUIElementCreateApplication(pid)
+                var focusedWindow: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(
+                    appElement,
+                    kAXFocusedWindowAttribute as CFString,
+                    &focusedWindow
+                ) == .success, let window = focusedWindow else { return nil as String? }
                 var titleRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(
+                guard AXUIElementCopyAttributeValue(
                     (window as! AXUIElement),
                     kAXTitleAttribute as CFString,
                     &titleRef
-                ) == .success {
-                    windowTitle = titleRef as? String
-                }
-            }
+                ) == .success else { return nil as String? }
+                return titleRef as? String
+            } ?? nil
         }
         // Denylist apps: bundleID is kept, title is redacted to nil.
         // axTrusted == false: title stays nil (set above by not entering the block).

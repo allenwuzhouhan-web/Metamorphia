@@ -74,6 +74,12 @@ public final class NotchActivationGesture: ObservableObject {
 
     public init() {}
 
+    deinit {
+        // Guard against a mid-press deallocation orphaning the 62.5 Hz tickTimer
+        // (and the one-shot commitTimer) on the RunLoop.
+        cancelTimers()
+    }
+
     // MARK: - Events
 
     /// Mouse entered the notch hit region.

@@ -81,7 +81,8 @@ struct ShelfItem: Identifiable, Codable, Equatable, Sendable {
             if let cached = ShelfItemResolutionCache.shared.displayName(forBookmark: bookmarkData) {
                 return cached
             }
-            let resolved = resolveFileDisplayName(bookmarkData: bookmarkData)
+            guard let resolvedURL = ShelfStateViewModel.shared.cachedFileURL(for: bookmarkData) else { return "" }
+            let resolved = Self.fileDisplayName(for: resolvedURL)
             // Don't pin a transient resolution failure (empty string) — let a later
             // render retry once the bookmark resolves.
             if !resolved.isEmpty {
@@ -102,48 +103,49 @@ struct ShelfItem: Identifiable, Codable, Equatable, Sendable {
         }
     }
 
-    private func resolveFileDisplayName(bookmarkData: Data) -> String {
-        let bookmark = Bookmark(data: bookmarkData)
-        guard let resolvedURL = bookmark.resolveURL() else { return "" }
-
+    /// Computes the friendly display name for a resolved file URL. This touches
+    /// disk (content decode for TextBlocks/WebLocs, `localizedNameKey` lookup),
+    /// so it is `nonisolated` and meant to be called off the main thread (e.g.
+    /// from `ShelfItemViewModel`'s async load) rather than inside a SwiftUI body.
+    nonisolated static func fileDisplayName(for resolvedURL: URL) -> String {
         // Check for stored data files (text blocks, weblocs, etc.) to provide friendly names
         if resolvedURL.pathExtension.lowercased() == "json" && resolvedURL.path.contains("TextBlocks") {
-                do {
-                    let data = try Data(contentsOf: resolvedURL)
-                    let decoder = JSONDecoder()
-                    decoder.dateDecodingStrategy = .iso8601
-                    struct TextBlockData: Codable {
-                        let content: String
-                        let title: String?
-                        var displayTitle: String {
-                            if let title = title, !title.isEmpty {
-                                return title
-                            }
-                            let firstLine = content.components(separatedBy: .newlines).first ?? content
-                            if firstLine.count > 50 {
-                                return String(firstLine.prefix(47)) + "..."
-                            }
-                            return firstLine
+            do {
+                let data = try Data(contentsOf: resolvedURL)
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                struct TextBlockData: Codable {
+                    let content: String
+                    let title: String?
+                    var displayTitle: String {
+                        if let title = title, !title.isEmpty {
+                            return title
                         }
+                        let firstLine = content.components(separatedBy: .newlines).first ?? content
+                        if firstLine.count > 50 {
+                            return String(firstLine.prefix(47)) + "..."
+                        }
+                        return firstLine
                     }
-                    if let textData = try? decoder.decode(TextBlockData.self, from: data) {
-                        return textData.displayTitle
-                    }
-                } catch {
-                    // Fall through to default naming
                 }
-            } else if resolvedURL.pathExtension.lowercased() == "webloc" && resolvedURL.path.contains("WebLocs") {
-                do {
-                    let data = try Data(contentsOf: resolvedURL)
-                    if let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-                       let urlString = plist["URL"] as? String {
-                        let title = plist["Title"] as? String
-                        return title ?? urlString
-                    }
-                } catch {
-                    // Fall through to default naming
+                if let textData = try? decoder.decode(TextBlockData.self, from: data) {
+                    return textData.displayTitle
                 }
+            } catch {
+                // Fall through to default naming
             }
+        } else if resolvedURL.pathExtension.lowercased() == "webloc" && resolvedURL.path.contains("WebLocs") {
+            do {
+                let data = try Data(contentsOf: resolvedURL)
+                if let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                   let urlString = plist["URL"] as? String {
+                    let title = plist["Title"] as? String
+                    return title ?? urlString
+                }
+            } catch {
+                // Fall through to default naming
+            }
+        }
         return (try? resolvedURL.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? resolvedURL.lastPathComponent
     }
 

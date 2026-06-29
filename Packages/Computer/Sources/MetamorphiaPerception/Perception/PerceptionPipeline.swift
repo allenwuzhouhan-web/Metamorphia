@@ -114,8 +114,10 @@ public final class PerceptionPipeline: @unchecked Sendable {
 
     /// Rank 8 — retains the most-recent full-resolution screenshot per display so
     /// `VisionDiffer` can crop a diff region without re-capturing. Populated at
-    /// the tail of `capture()` via a detached non-blocking store. Actor-isolated
-    /// and LRU-capped internally.
+    /// the tail of `capture()` via a detached non-blocking store, but only once a
+    /// vision-diff consumer has fetched (see `VisualDiffState.isActive`) — so the
+    /// 10 Hz perception loop doesn't pin a full-screen frame in memory when nobody
+    /// uses the vision-diff API. Actor-isolated and LRU-capped internally.
     public let visualDiffState = VisualDiffState()
 
     // MARK: - Callbacks
@@ -149,9 +151,13 @@ public final class PerceptionPipeline: @unchecked Sendable {
         // best-effort fire-and-forget: even if the Task hasn't started by
         // the time the next `capture()` call runs, that call's TTL check
         // will still miss because the actor resolves sequentially.
-        Task { [cache, ocrState] in
+        Task { [cache, ocrState, visualDiffState] in
             await cache.clear()
             await ocrState.cancelAndClear()
+            // Release the retained full-res vision-diff frame and reset
+            // retention to inactive — it re-arms the next time a vision-diff
+            // consumer fetches.
+            await visualDiffState.clear()
         }
         AXReader.invalidateCache()
     }
@@ -440,14 +446,13 @@ public final class PerceptionPipeline: @unchecked Sendable {
         // runs off the driver thread through `Self.runPhase`.
         let windowTitle = axResult?.windowTitle ?? windows.first(where: { $0.isFocused })?.title ?? ""
         let safetyT0 = CFAbsoluteTimeGetCurrent()
-        let safetyReport = SafetyScanner.scan(
+        let (safetyReport, sensitiveResults) = SafetyScanner.scanWithSensitiveResults(
             elements: finalElements,
             appBundleID: axResult?.appBundleID,
             windowTitle: windowTitle
         )
 
-        // Redact sensitive field values.
-        let sensitiveResults = SensitiveFieldDetector.scan(elements: finalElements)
+        // Redact sensitive field values, reusing the scan results from above.
         if !sensitiveResults.isEmpty {
             SafetyScanner.redactSensitiveValues(
                 elements: &finalElements,
@@ -538,7 +543,16 @@ public final class PerceptionPipeline: @unchecked Sendable {
 
         // Rank 8 — retain the full-res image so VisionDiffer can crop without
         // re-capturing. Non-blocking (detached) so it doesn't slow `capture()`.
-        if let retainedImage = dhashResult.image {
+        //
+        // Gated on an active vision-diff session: the 10 Hz PerceptionLoop
+        // drives this path continuously, so retaining a full-screen CGImage on
+        // every tick would pin ~33–59 MB in memory for the app's lifetime even
+        // when nobody ever calls `visionDiff()`. `VisualDiffState` only flips
+        // active once a consumer fetches, and the consumers fall back to a
+        // fresh `ScreenCapture.captureDisplay()` when `fetch()` returns nil —
+        // so dropping the frame here costs at most one extra screenshot on the
+        // first vision-diff of a session.
+        if let retainedImage = dhashResult.image, await visualDiffState.isActive {
             let state = visualDiffState
             Task.detached(priority: .utility) { [state] in
                 await state.store(retainedImage, displayIndex: mainDisplayIndex)
@@ -627,7 +641,7 @@ public final class PerceptionPipeline: @unchecked Sendable {
         let axBox       = await axTask
         let windowsBox  = await windowsTask
         let displaysBox = await displaysTask
-        _ = await dhashTask   // dHash lane: hash+image captured but not merged here
+        let dhashBox    = await dhashTask   // dHash lane: full-res image retained for vision-diff reuse below
         let menusBox    = await menusTask
         let domBox      = await browserDOMTask
 
@@ -688,7 +702,8 @@ public final class PerceptionPipeline: @unchecked Sendable {
         // resolved, annotate matching AX elements with domSelector/domNodeId
         // so `SemanticExecutor.press` can take the CDP path. Skipped for
         // non-browser frontmost apps (fetchInteractiveNodes early-returns),
-        // and the fetcher's fingerprint cache makes repeated calls cheap.
+        // and the fetcher's enumeration fingerprint cache makes repeated calls
+        // on an unchanged tab cheap (a URL/title probe, no full DOM scan).
         let resolvedElements: [ScreenElement]
         if resolvedDOM != nil, lanes.contains(.browserDOM) {
             let focusedWindowBounds = resolvedWindows.first(where: { $0.isFocused })?.bounds
@@ -710,6 +725,19 @@ public final class PerceptionPipeline: @unchecked Sendable {
             offScreenHint: base?.metadata.offScreenHint,
             timing: nil
         )
+
+        // Rank 8 — when the .dHash lane was requested it already paid for a
+        // full-res capture; retain that frame for VisionDiffer instead of
+        // discarding it (and re-capturing later). Gated on an active vision-diff
+        // session exactly like the full `capture()` path, so the common push
+        // path that never calls `visionDiff()` pins nothing in memory.
+        if let retainedImage = dhashBox.value?.image, await visualDiffState.isActive {
+            let mainDisplayIndex = resolvedDisplays.first(where: \.isMain)?.index ?? 0
+            let state = visualDiffState
+            Task.detached(priority: .utility) { [state] in
+                await state.store(retainedImage, displayIndex: mainDisplayIndex)
+            }
+        }
 
         return ScreenMap(
             timestamp: Date(),
@@ -744,38 +772,55 @@ public final class PerceptionPipeline: @unchecked Sendable {
         let callback = self.onOCREnrichment
         let state = self.ocrState
 
+        // Coalesce on the actor: if an OCR is already in flight, skip this tick
+        // entirely rather than cancel + restart. The heavy Vision work isn't
+        // cancellation-aware, so cancel+restart only adds a second overlapping
+        // full-resolution screenshot + recognition pass. Skipping bounds the
+        // number of retained full-res images to one at a time. The previous
+        // outer Task.detached + cancelActive() + setActive() sequence was three
+        // non-atomic actor hops, so two ticks could interleave and leave two
+        // inner tasks running; building the inner task inside the actor method
+        // makes scheduling atomic.
         Task.detached(priority: .utility) { [state, stabilizer, displays] in
-            await state.cancelActive()
-            let task = Task.detached(priority: .utility) { [displays] in
-                guard let cgImage = ScreenCapture.captureMainDisplay() else { return }
-                guard !Task.isCancelled else { return }
+            _ = await state.scheduleIfIdle {
+                // `taskHolder` lets the inner task reference its own handle so
+                // it can free the `active` slot via `finishActive` on
+                // completion. Assigned synchronously right after creation,
+                // before the task body's first suspension point can run.
+                let taskHolder = TaskBox()
+                let task = Task.detached(priority: .utility) { [displays] in
+                    defer { Task { await state.finishActive(taskHolder.task!) } }
+                    guard let cgImage = ScreenCapture.captureMainDisplay() else { return }
+                    guard !Task.isCancelled else { return }
 
-                guard let ocrResults = try? await OCRReader.recognize(image: cgImage) else { return }
-                guard !Task.isCancelled else { return }
+                    guard let ocrResults = try? await OCRReader.recognize(image: cgImage) else { return }
+                    guard !Task.isCancelled else { return }
 
-                await state.storePending(
-                    results: ocrResults,
-                    imageWidth: cgImage.width,
-                    imageHeight: cgImage.height
-                )
-
-                if let callback = callback {
-                    let enriched = Fusion.merge(
-                        ax: axElements,
-                        ocr: ocrResults,
+                    await state.storePending(
+                        results: ocrResults,
                         imageWidth: cgImage.width,
-                        imageHeight: cgImage.height,
-                        refStabilizer: stabilizer,
-                        appBundleID: appBundleID,
-                        windowIndex: 0,
-                        displayScaleFactor: scaleFactor,
-                        displays: displays,
-                        sourceDisplayIndex: mainDisplayIndex
+                        imageHeight: cgImage.height
                     )
-                    callback(enriched)
+
+                    if let callback = callback {
+                        let enriched = Fusion.merge(
+                            ax: axElements,
+                            ocr: ocrResults,
+                            imageWidth: cgImage.width,
+                            imageHeight: cgImage.height,
+                            refStabilizer: stabilizer,
+                            appBundleID: appBundleID,
+                            windowIndex: 0,
+                            displayScaleFactor: scaleFactor,
+                            displays: displays,
+                            sourceDisplayIndex: mainDisplayIndex
+                        )
+                        callback(enriched)
+                    }
                 }
+                taskHolder.task = task
+                return task
             }
-            await state.setActive(task)
         }
     }
 
@@ -1058,6 +1103,30 @@ private actor AsyncOCRState {
         active = task
     }
 
+    /// Coalescing scheduler. If an OCR task is already in flight, skips
+    /// scheduling entirely (returns false) — the in-flight Vision work can't be
+    /// cancelled mid-recognition anyway, so cancel+restart would only add a
+    /// second overlapping full-resolution screenshot. When idle, builds the
+    /// inner task via `make`, stores it as `active`, and returns true. The inner
+    /// task is responsible for calling `finishActive(_:)` on completion so the
+    /// slot frees up for the next tick. Atomic by virtue of actor isolation.
+    func scheduleIfIdle(_ make: @Sendable () -> Task<Void, Never>) -> Bool {
+        guard active == nil else { return false }
+        active = make()
+        return true
+    }
+
+    /// Clears the active slot if `task` is still the registered one. Called from
+    /// the inner OCR task's `defer` so a completed task doesn't permanently
+    /// block `scheduleIfIdle`. The identity check avoids a stale completion
+    /// clobbering a newer task (none can exist while coalescing, but it keeps
+    /// the contract safe if scheduling policy changes).
+    func finishActive(_ task: Task<Void, Never>) {
+        if active == task {
+            active = nil
+        }
+    }
+
     func cancelAndClear() {
         active?.cancel()
         active = nil
@@ -1065,6 +1134,16 @@ private actor AsyncOCRState {
         pendingWidth = 0
         pendingHeight = 0
     }
+}
+
+/// Single-write holder that lets a detached OCR task reference its own `Task`
+/// handle so it can free the actor's `active` slot on completion. The handle is
+/// assigned synchronously inside the actor's `scheduleIfIdle` make-closure,
+/// before the task body's first suspension point runs, so the force-unwrap in
+/// the task's `defer` is always satisfied. No concurrent mutation occurs;
+/// `@unchecked Sendable` is safe.
+private final class TaskBox: @unchecked Sendable {
+    var task: Task<Void, Never>?
 }
 
 // MARK: - dHash phase result (Rank 7)
@@ -1118,11 +1197,21 @@ public actor VisualDiffState {
     private var entriesByDisplay: [Int: Entry] = [:]
     private var lastTimestamp: Date = .distantPast
 
+    /// Whether a vision-diff consumer has run this session. Retention is pure
+    /// overhead for the common path (agent perception / OCR / delta encoding)
+    /// that never invokes the Rank 8 vision-diff API, so `store(...)` is gated
+    /// on this flag. The first `fetch`/`fetchAll` call flips it on — that call
+    /// returns nil and the consumer falls back to a fresh capture, but every
+    /// subsequent capture in the session then retains its frame here.
+    public private(set) var isActive = false
+
     public init() {}
 
     /// Store the freshest image for this display. Replaces any prior retention.
-    /// Evicts the oldest entry when the per-display cap is exceeded.
+    /// Evicts the oldest entry when the per-display cap is exceeded. No-op until
+    /// a vision-diff consumer has activated retention (see `isActive`).
     public func store(_ image: SendableImage, displayIndex: Int) {
+        guard isActive else { return }
         let now = Date()
         entriesByDisplay[displayIndex] = Entry(image: image, storedAt: now)
         lastTimestamp = now
@@ -1131,8 +1220,10 @@ public actor VisualDiffState {
 
     /// Fetch the retained image for this display, or nil if nothing is
     /// currently retained (first capture, or the store hasn't completed yet).
+    /// Also activates retention so subsequent captures begin storing frames.
     public func fetch(displayIndex: Int) -> SendableImage? {
-        entriesByDisplay[displayIndex]?.image
+        isActive = true
+        return entriesByDisplay[displayIndex]?.image
     }
 
     /// Timestamp of the most recent store (`.distantPast` if never stored).
@@ -1141,8 +1232,10 @@ public actor VisualDiffState {
     }
 
     /// Fetch every retained image keyed by display index. Used by
-    /// `VisionDiffer.diffMultiDisplay` to build per-display crops.
+    /// `VisionDiffer.diffMultiDisplay` to build per-display crops. Also
+    /// activates retention so subsequent captures begin storing frames.
     public func fetchAll() -> [Int: SendableImage] {
+        isActive = true
         var out: [Int: SendableImage] = [:]
         for (idx, entry) in entriesByDisplay {
             out[idx] = entry.image
@@ -1150,10 +1243,12 @@ public actor VisualDiffState {
         return out
     }
 
-    /// Drop every retained image. Safe to call from any task.
+    /// Drop every retained image and stop retaining until the next vision-diff
+    /// consumer activates again. Safe to call from any task.
     public func clear() {
         entriesByDisplay.removeAll(keepingCapacity: true)
         lastTimestamp = .distantPast
+        isActive = false
     }
 
     private func evictLRUIfNeeded() {

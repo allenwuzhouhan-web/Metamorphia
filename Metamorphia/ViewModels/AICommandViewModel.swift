@@ -362,6 +362,16 @@ public final class AICommandViewModel: ObservableObject {
     private let userSkillsDirectory: URL?
     private var conversationSink: AnyCancellable?
 
+    /// Single ordered channel for `AgentProgressSink.publish` events. `publish`
+    /// is `nonisolated` and called from detached Tasks on the hot streaming
+    /// path (one `streamingToken` per chunk); routing every event through one
+    /// continuation drained by a single long-lived MainActor task replaces the
+    /// per-event `Task { @MainActor }` allocation with a single bounded
+    /// consumer, while preserving FIFO ordering across event kinds.
+    private let progressEvents: AsyncStream<AgentProgressEvent>
+    private let progressEventsContinuation: AsyncStream<AgentProgressEvent>.Continuation
+    private var progressConsumerTask: Task<Void, Never>?
+
     // MARK: - Continuum Phase 1: entity extraction
     private let aliasStore: EntityAliasStore
     private let entityExtractor: EntityExtractor
@@ -386,6 +396,21 @@ public final class AICommandViewModel: ObservableObject {
         self.entityExtractor = EntityExtractor(aliasStore: store, termFrequency: tf)
         self.isStubMode = false
         self.currentAgent = AgentRegistry.shared.loadPersistedActive()
+
+        var continuation: AsyncStream<AgentProgressEvent>.Continuation!
+        self.progressEvents = AsyncStream(bufferingPolicy: .unbounded) { continuation = $0 }
+        self.progressEventsContinuation = continuation
+
+        // Drain progress events on a single long-lived MainActor task instead
+        // of spawning one `Task { @MainActor }` per `publish` call. `[weak self]`
+        // so the consumer never keeps the view model alive past `deinit`.
+        let stream = self.progressEvents
+        self.progressConsumerTask = Task { @MainActor [weak self] in
+            for await event in stream {
+                guard let self else { return }
+                self.handleProgressEvent(event)
+            }
+        }
 
         // Hydrate prior session BEFORE wiring the sink so the initial
         // assignment doesn't trigger a redundant disk write.
@@ -416,6 +441,11 @@ public final class AICommandViewModel: ObservableObject {
         }
     }
 
+    deinit {
+        progressEventsContinuation.finish()
+        progressConsumerTask?.cancel()
+    }
+
     /// Submit a prompt. Cancels any in-flight run first.
     ///
     /// Slash-command semantics: if the input contains one or more `/skill`
@@ -428,6 +458,7 @@ public final class AICommandViewModel: ObservableObject {
     /// interim TurnResult writes so the iPhone sees partial text live.
     public func submit(prompt: String, systemPrompt: String, sessionID: String? = nil) async {
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        FreezeDiagnostics.mark("submit:start")
 
         if ConversationContinuationService.parseWeChatDirectMessageRequest(prompt) != nil {
             currentInput = ""
@@ -452,6 +483,7 @@ public final class AICommandViewModel: ObservableObject {
                 isStreaming: false,
                 isError: isError
             ))
+            capConversation()
             liveStatus = nil
             agentTree = nil
             return
@@ -481,6 +513,7 @@ public final class AICommandViewModel: ObservableObject {
                 isStreaming: false,
                 isError: isError
             ))
+            capConversation()
             liveStatus = nil
             agentTree = nil
             return
@@ -711,6 +744,7 @@ public final class AICommandViewModel: ObservableObject {
             richContent: functionSpec.map { .functionGraph($0) }
         )
         conversation.append(turn)
+        capConversation()
 
         let chainedSystemPrompt = injectSkillBodies(
             base: systemPrompt,
@@ -785,6 +819,8 @@ public final class AICommandViewModel: ObservableObject {
 
         let runTrace = AgentTrace(goal: commandWithAttachments)
 
+        FreezeDiagnostics.mark("submit:agentLoop:start")
+
         // M9 fix (1+3): arm throttled TurnResult writebacks for phone turns.
         // The sessionID is now passed directly into loop.submit as runSessionId
         // so the ConversationStore persists under the phone's thread id without
@@ -801,6 +837,7 @@ public final class AICommandViewModel: ObservableObject {
             trace: runTrace,
             runSessionId: sessionID
         )
+        FreezeDiagnostics.mark("submit:agentLoop:done")
 
         if sessionID != nil {
             remoteStreamSessionID = nil
@@ -836,7 +873,12 @@ public final class AICommandViewModel: ObservableObject {
                 if case .excelAnalysis(let plan) = parsed.content,
                    let excelAnalysisRoute {
                     // Deterministic Swift math fills the placeholder plan.
-                    let full = ExcelCopilot.computeResult(plan: plan, route: excelAnalysisRoute)
+                    // The OLS/correlation accumulation is O(n*p^2) over up to
+                    // maxCaptureRows; hop it off the main actor so it never
+                    // blocks UI updates while it runs.
+                    let full = await Task.detached(priority: .userInitiated) {
+                        ExcelCopilot.computeResult(plan: plan, route: excelAnalysisRoute)
+                    }.value
                     resolvedContent = .excelAnalysis(full)
                     resolveFailure = nil
                 } else if case .powerPointFinish(let finish) = parsed.content,
@@ -1070,6 +1112,7 @@ public final class AICommandViewModel: ObservableObject {
             isStaged: true
         )
         conversation.append(turn)
+        capConversation()
         return true
     }
 
@@ -1126,6 +1169,49 @@ public final class AICommandViewModel: ObservableObject {
     /// `inputBarState` to `.result`, and attaches a synthetic `AgentTrace` so
     /// the T12 trace sheet can display the local hit.
     @MainActor
+    private func finalizeLocalTurn(_ hit: LocalCommandHit, prompt: String) {
+        let pill = ToolCallPill(
+            toolName: "local:\(hit.matcherName)",
+            stepIndex: 1,
+            totalSteps: 1,
+            isComplete: true,
+            isSuccess: true
+        )
+
+        // Build a synthetic trace so the T12 trace button lights up.
+        let trace = AgentTrace(goal: prompt)
+        trace.append(TraceEntry(
+            kind: .toolCall(
+                name: "local:\(hit.matcherName)",
+                arguments: hit.arguments,
+                result: hit.message,
+                durationMs: hit.elapsed * 1000,
+                success: true
+            )
+        ))
+        trace.finalOutcome = .success
+        trace.endTime = Date()
+
+        let turn = Turn(
+            prompt: prompt,
+            result: hit.message,
+            toolPills: [pill],
+            isStreaming: false,
+            richContent: nil,
+            isStaged: false,
+            isError: false,
+            trace: trace
+        )
+        conversation.append(turn)
+        capConversation()
+        inputBarState = .result(message: hit.message)
+
+        if AppDelegate.shared?.vm.notchState == .minimized {
+            hasUnseenCompletion = true
+        }
+    }
+
+    @MainActor
     private func finalizePowerPointDirectEditTurn(_ result: PowerPointDirectEditResult, prompt: String) {
         currentInput = ""
         errorMessage = nil
@@ -1162,49 +1248,8 @@ public final class AICommandViewModel: ObservableObject {
             trace: trace
         )
         conversation.append(turn)
+        capConversation()
         protectedTerminalTurnIDs.insert(turn.id)
-
-        if AppDelegate.shared?.vm.notchState == .minimized {
-            hasUnseenCompletion = true
-        }
-    }
-
-    @MainActor
-    private func finalizeLocalTurn(_ hit: LocalCommandHit, prompt: String) {
-        let pill = ToolCallPill(
-            toolName: "local:\(hit.matcherName)",
-            stepIndex: 1,
-            totalSteps: 1,
-            isComplete: true,
-            isSuccess: true
-        )
-
-        // Build a synthetic trace so the T12 trace button lights up.
-        let trace = AgentTrace(goal: prompt)
-        trace.append(TraceEntry(
-            kind: .toolCall(
-                name: "local:\(hit.matcherName)",
-                arguments: hit.arguments,
-                result: hit.message,
-                durationMs: hit.elapsed * 1000,
-                success: true
-            )
-        ))
-        trace.finalOutcome = .success
-        trace.endTime = Date()
-
-        let turn = Turn(
-            prompt: prompt,
-            result: hit.message,
-            toolPills: [pill],
-            isStreaming: false,
-            richContent: nil,
-            isStaged: false,
-            isError: false,
-            trace: trace
-        )
-        conversation.append(turn)
-        inputBarState = .result(message: hit.message)
 
         if AppDelegate.shared?.vm.notchState == .minimized {
             hasUnseenCompletion = true
@@ -1235,6 +1280,7 @@ public final class AICommandViewModel: ObservableObject {
             trace: nil
         )
         conversation.append(turn)
+        capConversation()
         protectedTerminalTurnIDs.insert(turn.id)
         if AppDelegate.shared?.vm.notchState == .minimized {
             hasUnseenCompletion = true
@@ -1645,6 +1691,7 @@ public final class AICommandViewModel: ObservableObject {
                 prompt: prompt, result: hit.message,
                 toolPills: [pill], isStreaming: false
             ))
+            capConversation()
             inputBarState = .result(message: hit.message)
             return
         }
@@ -1666,6 +1713,7 @@ public final class AICommandViewModel: ObservableObject {
             toolPills: [],
             isStreaming: false
         ))
+        capConversation()
     }
     public func setActiveAgent(_ profile: AgentProfile) {
         guard profile.id != currentAgent.id else { return }
@@ -1931,6 +1979,31 @@ public final class AICommandViewModel: ObservableObject {
         )
     }
 
+    /// Cap the live `conversation` array so a long-running menu-bar session
+    /// doesn't accumulate turns (full text + RichTurnContent + AgentTrace)
+    /// without bound. Called right after every runtime append.
+    ///
+    /// Drops the oldest turns past `keep`, then releases the heavy per-turn
+    /// payloads (`trace`, `richContent`) for all but the most recent few.
+    /// Neither is persisted, so nilling them is a display-only loss for old
+    /// turns and safe.
+    private func capConversation() {
+        let keep = 40
+        if conversation.count > keep {
+            conversation.removeFirst(conversation.count - keep)
+            // Prune protection entries for turns that were just dropped so the
+            // set stays bounded by the same cap over a long menu-bar session.
+            protectedTerminalTurnIDs.formIntersection(Set(conversation.map(\.id)))
+        }
+        let heavyKeep = 6
+        if conversation.count > heavyKeep {
+            for i in 0..<(conversation.count - heavyKeep) {
+                if conversation[i].trace != nil { conversation[i].trace = nil }
+                if conversation[i].richContent != nil { conversation[i].richContent = nil }
+            }
+        }
+    }
+
     public func handlePowerPointFinishAction(turnID: UUID, action: PowerPointFinishAction) async {
         guard let turn = conversation.first(where: { $0.id == turnID }) else { return }
         guard case .powerPointFinish(let finish)? = turn.richContent else { return }
@@ -2006,6 +2079,7 @@ public final class AICommandViewModel: ObservableObject {
             trace: nil
         )
         conversation.append(turn)
+        capConversation()
         let turnID = turn.id
 
         let outcome = await DocumentCopilot.applyCurrentWordAuditComments()
@@ -2044,6 +2118,7 @@ public final class AICommandViewModel: ObservableObject {
             trace: nil
         )
         conversation.append(turn)
+        capConversation()
         inputBarState = success ? .result(message: result) : .error(message: result)
         if AppDelegate.shared?.vm.notchState == .minimized {
             hasUnseenCompletion = true
@@ -2068,9 +2143,16 @@ public final class AICommandViewModel: ObservableObject {
 
 extension AICommandViewModel: AgentProgressSink {
     public nonisolated func publish(_ event: AgentProgressEvent) {
-        Task { @MainActor in
-            guard !self.isSilentRunInProgress else { return }
-            switch event.kind {
+        // Hand the event to the single ordered consumer instead of spawning a
+        // Task per call. `yield` is thread-safe and preserves FIFO order, so a
+        // high-frequency token stream no longer allocates one Task per chunk.
+        progressEventsContinuation.yield(event)
+    }
+
+    @MainActor
+    private func handleProgressEvent(_ event: AgentProgressEvent) {
+        guard !self.isSilentRunInProgress else { return }
+        switch event.kind {
             case .toolStarted(let name):
                 self.appendToolPill(name: name, step: 0, total: 0)
                 // Adopt the tool name as the currently-executing tool; step/total
@@ -2115,6 +2197,7 @@ extension AICommandViewModel: AgentProgressSink {
                 case .result, .error, .ready:
                     break
                 default:
+                    if self.streamingBuffer.isEmpty { FreezeDiagnostics.mark("submit:streaming:firstToken") }
                     self.streamingBuffer += chunk
                     self.inputBarState = .streaming(partialText: self.streamingBuffer)
                     // M9: throttled interim push so the phone sees live partial text.
@@ -2144,7 +2227,6 @@ extension AICommandViewModel: AgentProgressSink {
             case .started, .thinking, .costBudgetExceeded:
                 break
             }
-        }
     }
 
     private func handleStatus(_ label: String) {

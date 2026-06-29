@@ -24,7 +24,7 @@ struct SystemItemButton: View {
     @EnvironmentObject var vm: MetamorphiaViewModel
     @State var icon: String = "gear"
     var onTap: () -> Void
-    @State var label: String?
+    @State var label: String = ""
     @State var showEmojis: Bool = true
     @State var emoji: String = "🔧"
 
@@ -40,7 +40,7 @@ struct SystemItemButton: View {
                             .foregroundStyle(.gray)
                     }
 
-                    Text((showEmojis ? "\(emoji) " : "") + (label ?? ""))
+                    Text((showEmojis ? "\(emoji) " : "") + label)
                         .font(.caption2)
                         .fontWeight(.regular)
                         .foregroundStyle(.gray)

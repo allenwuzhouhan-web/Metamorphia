@@ -505,21 +505,20 @@ public final class RetraceIndex: @unchecked Sendable {
     }
 
     private func bruteNearest(_ q: [Float], limit: Int, filterRowids: [Int64]?) -> [(Int64, Double)] {
-        var sql: String
-        if let filterRowids, !filterRowids.isEmpty {
-            let placeholders = filterRowids.map { _ in "?" }.joined(separator: ",")
-            sql = "SELECT rowid, embedding FROM items_vec WHERE rowid IN (\(placeholders))"
-        } else {
-            sql = "SELECT rowid, embedding FROM items_vec"
-        }
+        // No candidate set means no pre-filtered window: scanning and
+        // materializing every stored embedding would pull the whole table
+        // (hundreds of MB at scale) through the serial queue for one query.
+        // An empty candidate window also semantically means "no results".
+        guard let filterRowids, !filterRowids.isEmpty else { return [] }
+
+        let placeholders = filterRowids.map { _ in "?" }.joined(separator: ",")
+        let sql = "SELECT rowid, embedding FROM items_vec WHERE rowid IN (\(placeholders))"
 
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-        if let filterRowids {
-            for (i, r) in filterRowids.enumerated() {
-                sqlite3_bind_int64(stmt, Int32(i + 1), r)
-            }
+        for (i, r) in filterRowids.enumerated() {
+            sqlite3_bind_int64(stmt, Int32(i + 1), r)
         }
 
         var scored: [(Int64, Double)] = []
@@ -805,7 +804,7 @@ public final class RetraceIndex: @unchecked Sendable {
     }
 
     private func bindText(_ stmt: OpaquePointer?, _ index: Int32, _ value: String) {
-        sqlite3_bind_text(stmt, index, (value as NSString).utf8String, -1, nil)
+        value.withCString { sqlite3_bind_text(stmt, index, $0, -1, SQLITE_TRANSIENT) }
     }
 
     private func bindTextOrNull(_ stmt: OpaquePointer?, _ index: Int32, _ value: String?) {

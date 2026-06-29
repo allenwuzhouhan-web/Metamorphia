@@ -28,6 +28,17 @@ struct LatexParser {
     private static var cacheOrder: [String] = []
     private static let cacheCap = 128
 
+    /// Longest source we will attempt to parse. Pathological assistant/scratchpad
+    /// input (thousands of nested braces or fractions) recurses one frame per
+    /// nesting level; anything past this is surfaced verbatim instead of risking
+    /// stack exhaustion. Well below the realistic frame-crash floor.
+    private static let maxSourceLength = 4096
+
+    /// Maximum nesting depth before the parser bails to a `.fallback`. Threaded
+    /// through every mutually-recursive entry point. Defense in depth behind the
+    /// length cap above.
+    private static let maxDepth = 64
+
     /// Parse a LaTeX math fragment into an atom tree. Always returns something.
     nonisolated static func parse(_ latex: String) -> MathAtom {
         cacheLock.lock()
@@ -37,9 +48,14 @@ struct LatexParser {
         }
         cacheLock.unlock()
 
+        // Over-long sources never reach the recursive parser.
+        guard latex.count <= maxSourceLength else {
+            return .fallback(latex)
+        }
+
         let tokens = LatexTokenizer.tokenize(latex)
         var parser = LatexParser(tokens: tokens)
-        let atoms = parser.parseList(until: nil)
+        let atoms = parser.parseList(until: nil, depth: 0)
         let atom = normalize(atoms)
 
         cacheLock.lock()
@@ -96,7 +112,14 @@ struct LatexParser {
 
     /// Parse atoms until `stop` is reached (consumed) or input ends.
     /// Handles scripts (^ _) by attaching them to the preceding atom.
-    private mutating func parseList(until stop: LatexToken?) -> [MathAtom] {
+    /// `depth` bounds nesting so pathological input can't overflow the stack.
+    private mutating func parseList(until stop: LatexToken?, depth: Int) -> [MathAtom] {
+        guard depth <= LatexParser.maxDepth else {
+            // Too deeply nested — consume the rest of this group as a flat run so
+            // we still advance the cursor, then surface a fallback.
+            skipUntil(stop)
+            return [.fallback("…")]
+        }
         var atoms: [MathAtom] = []
 
         while let tok = peek() {
@@ -115,14 +138,14 @@ struct LatexParser {
             case .caret, .underscore:
                 // A script with no base: attach to an empty run so it still renders.
                 let base: MathAtom = atoms.popLast() ?? .run("", .normal)
-                atoms.append(parseScripts(base: base))
+                atoms.append(parseScripts(base: base, depth: depth))
             default:
-                let atom = parseAtom()
+                let atom = parseAtom(depth: depth)
                 // Look ahead for scripts immediately following this atom.
                 if case .caret = peek() {
-                    atoms.append(parseScripts(base: atom))
+                    atoms.append(parseScripts(base: atom, depth: depth))
                 } else if case .underscore = peek() {
-                    atoms.append(parseScripts(base: atom))
+                    atoms.append(parseScripts(base: atom, depth: depth))
                 } else {
                     atoms.append(atom)
                 }
@@ -131,19 +154,32 @@ struct LatexParser {
         return atoms
     }
 
+    /// Consume tokens until `stop` (or EOF) without building atoms. Used to keep
+    /// the cursor advancing when a depth budget is exhausted, so an over-nested
+    /// group is swallowed whole rather than partially re-parsed by the caller.
+    private mutating func skipUntil(_ stop: LatexToken?) {
+        guard let stop else {
+            index = tokens.count
+            return
+        }
+        while let tok = advance() {
+            if tok == stop { return }
+        }
+    }
+
     /// Parse trailing ^ and _ scripts onto a base. Either or both, any order.
-    private mutating func parseScripts(base: MathAtom) -> MathAtom {
+    private mutating func parseScripts(base: MathAtom, depth: Int) -> MathAtom {
         var sup: MathAtom?
         var sub: MathAtom?
 
         while let tok = peek() {
             if tok == .caret {
                 _ = advance()
-                let s = parseScriptArgument()
+                let s = parseScriptArgument(depth: depth)
                 sup = sup.map { .list([$0, s]) } ?? s
             } else if tok == .underscore {
                 _ = advance()
-                let s = parseScriptArgument()
+                let s = parseScriptArgument(depth: depth)
                 sub = sub.map { .list([$0, s]) } ?? s
             } else {
                 break
@@ -156,24 +192,24 @@ struct LatexParser {
     }
 
     /// A script argument is a single atom or a braced group.
-    private mutating func parseScriptArgument() -> MathAtom {
+    private mutating func parseScriptArgument(depth: Int) -> MathAtom {
         guard let tok = peek() else { return .run("", .normal) }
         if tok == .openBrace {
             _ = advance()
-            let inner = parseList(until: .closeBrace)
+            let inner = parseList(until: .closeBrace, depth: depth + 1)
             return LatexParser.normalize(inner)
         }
-        return parseAtom()
+        return parseAtom(depth: depth)
     }
 
     // MARK: - Single atom
 
-    private mutating func parseAtom() -> MathAtom {
+    private mutating func parseAtom(depth: Int) -> MathAtom {
         guard let tok = advance() else { return .run("", .normal) }
 
         switch tok {
         case .openBrace:
-            let inner = parseList(until: .closeBrace)
+            let inner = parseList(until: .closeBrace, depth: depth + 1)
             return LatexParser.normalize(inner)
 
         case .closeBrace:
@@ -195,13 +231,13 @@ struct LatexParser {
             return .run("", .normal)
 
         case .command(let name):
-            return parseCommand(name)
+            return parseCommand(name, depth: depth)
         }
     }
 
     // MARK: - Commands
 
-    private mutating func parseCommand(_ name: String) -> MathAtom {
+    private mutating func parseCommand(_ name: String, depth: Int) -> MathAtom {
         // Spacing commands.
         if let amount = MathSymbols.spacing[name] {
             return .space(amount)
@@ -209,37 +245,37 @@ struct LatexParser {
 
         switch name {
         case "frac", "tfrac", "dfrac", "cfrac":
-            let num = parseGroupArgument()
-            let den = parseGroupArgument()
+            let num = parseGroupArgument(depth: depth)
+            let den = parseGroupArgument(depth: depth)
             return .fraction(numerator: num, denominator: den)
 
         case "sqrt":
             // Optional [index] then a required radicand.
-            let index = parseOptionalBracketArgument()
-            let radicand = parseGroupArgument()
+            let index = parseOptionalBracketArgument(depth: depth)
+            let radicand = parseGroupArgument(depth: depth)
             return .radical(index: index, radicand: radicand)
 
         case "text", "textrm", "textnormal", "mbox":
             return .run(readVerbatimGroup(), .text)
 
         case "mathrm", "operatorname", "rm":
-            let g = parseGroupArgument()
+            let g = parseGroupArgument(depth: depth)
             return restyle(g, to: .roman)
 
         case "mathbf", "bf", "boldsymbol", "bm":
-            let g = parseGroupArgument()
+            let g = parseGroupArgument(depth: depth)
             return restyle(g, to: .bold)
 
         case "mathbb":
-            let g = parseGroupArgument()
+            let g = parseGroupArgument(depth: depth)
             return restyle(g, to: .blackboard)
 
         case "mathit", "mathsf", "mathcal", "mathfrak", "mathnormal":
             // We do not have dedicated faces for these; render upright-normal.
-            return parseGroupArgument()
+            return parseGroupArgument(depth: depth)
 
         case "left":
-            return parseLeftRight()
+            return parseLeftRight(depth: depth)
 
         case "right":
             // A stray \right with no matching \left — skip its delimiter token.
@@ -247,7 +283,7 @@ struct LatexParser {
             return .run("", .normal)
 
         case "begin":
-            return parseEnvironment()
+            return parseEnvironment(depth: depth)
 
         case "end":
             // Stray \end — swallow its name argument.
@@ -320,20 +356,20 @@ struct LatexParser {
     // MARK: - Argument helpers
 
     /// Parse a required argument: a braced group, or the next single atom.
-    private mutating func parseGroupArgument() -> MathAtom {
+    private mutating func parseGroupArgument(depth: Int) -> MathAtom {
         guard let tok = peek() else { return .run("", .normal) }
         if tok == .openBrace {
             _ = advance()
-            let inner = parseList(until: .closeBrace)
+            let inner = parseList(until: .closeBrace, depth: depth + 1)
             return LatexParser.normalize(inner)
         }
         // Single-token argument (e.g. \sqrt2, x^2 already handled). Honor scripts.
-        let atom = parseAtom()
+        let atom = parseAtom(depth: depth)
         return atom
     }
 
     /// Parse an optional `[ … ]` argument (used by \sqrt[n]). Returns nil if absent.
-    private mutating func parseOptionalBracketArgument() -> MathAtom? {
+    private mutating func parseOptionalBracketArgument(depth: Int) -> MathAtom? {
         guard case .symbol("[") = peek() else { return nil }
         _ = advance() // consume '['
         var inner: [MathAtom] = []
@@ -342,7 +378,7 @@ struct LatexParser {
                 _ = advance()
                 return LatexParser.normalize(inner)
             }
-            inner.append(parseAtom())
+            inner.append(parseAtom(depth: depth))
         }
         // Unterminated bracket — return what we have.
         return LatexParser.normalize(inner)
@@ -391,9 +427,17 @@ struct LatexParser {
 
     // MARK: - \left … \right
 
-    private mutating func parseLeftRight() -> MathAtom {
+    private mutating func parseLeftRight(depth: Int) -> MathAtom {
         let leftTok = consumeDelimiterToken()
         let left = MathSymbols.delimiter(for: leftTok)
+
+        // A fence opens a new nesting level for its body.
+        let bodyDepth = depth + 1
+        guard bodyDepth <= LatexParser.maxDepth else {
+            skipUntil(.command("right"))
+            _ = consumeDelimiterToken()
+            return .fallback("…")
+        }
 
         // Parse the body until we hit a matching \right.
         var body: [MathAtom] = []
@@ -414,19 +458,19 @@ struct LatexParser {
             // Reuse list parsing semantics for scripts.
             if case .caret = tok {
                 let base = body.popLast() ?? .run("", .normal)
-                body.append(parseScripts(base: base))
+                body.append(parseScripts(base: base, depth: bodyDepth))
                 continue
             }
             if case .underscore = tok {
                 let base = body.popLast() ?? .run("", .normal)
-                body.append(parseScripts(base: base))
+                body.append(parseScripts(base: base, depth: bodyDepth))
                 continue
             }
-            let atom = parseAtom()
+            let atom = parseAtom(depth: bodyDepth)
             if case .caret = peek() {
-                body.append(parseScripts(base: atom))
+                body.append(parseScripts(base: atom, depth: bodyDepth))
             } else if case .underscore = peek() {
-                body.append(parseScripts(base: atom))
+                body.append(parseScripts(base: atom, depth: bodyDepth))
             } else {
                 body.append(atom)
             }
@@ -449,8 +493,16 @@ struct LatexParser {
 
     // MARK: - Environments (matrices)
 
-    private mutating func parseEnvironment() -> MathAtom {
+    private mutating func parseEnvironment(depth: Int) -> MathAtom {
         let envName = readVerbatimGroup()
+
+        // An environment body nests one level deeper.
+        let bodyDepth = depth + 1
+        guard bodyDepth <= LatexParser.maxDepth else {
+            _ = parseUntilEnd(envName: envName, depth: LatexParser.maxDepth)
+            return .fallback("…")
+        }
+
         let delimiter: MathDelimiter
         switch envName {
         case "pmatrix": delimiter = .paren
@@ -461,16 +513,16 @@ struct LatexParser {
         case "matrix", "array", "cases", "aligned", "align", "gathered": delimiter = .none
         default:
             // Unknown environment: parse its body as a flat list until \end.
-            let body = parseUntilEnd(envName: envName)
+            let body = parseUntilEnd(envName: envName, depth: bodyDepth)
             return LatexParser.normalize(body)
         }
 
-        let rows = parseMatrixRows(envName: envName)
+        let rows = parseMatrixRows(envName: envName, depth: bodyDepth)
         return .matrix(rows: rows, delimiter: delimiter)
     }
 
     /// Parse matrix cells split by `&` and rows split by `\\`, until \end{env}.
-    private mutating func parseMatrixRows(envName: String) -> [[MathAtom]] {
+    private mutating func parseMatrixRows(envName: String, depth: Int) -> [[MathAtom]] {
         var rows: [[MathAtom]] = []
         var currentRow: [MathAtom] = []
         var currentCell: [MathAtom] = []
@@ -503,16 +555,16 @@ struct LatexParser {
                 flushRow()
             case .caret:
                 let base = currentCell.popLast() ?? .run("", .normal)
-                currentCell.append(parseScripts(base: base))
+                currentCell.append(parseScripts(base: base, depth: depth))
             case .underscore:
                 let base = currentCell.popLast() ?? .run("", .normal)
-                currentCell.append(parseScripts(base: base))
+                currentCell.append(parseScripts(base: base, depth: depth))
             default:
-                let atom = parseAtom()
+                let atom = parseAtom(depth: depth)
                 if case .caret = peek() {
-                    currentCell.append(parseScripts(base: atom))
+                    currentCell.append(parseScripts(base: atom, depth: depth))
                 } else if case .underscore = peek() {
-                    currentCell.append(parseScripts(base: atom))
+                    currentCell.append(parseScripts(base: atom, depth: depth))
                 } else {
                     currentCell.append(atom)
                 }
@@ -524,7 +576,7 @@ struct LatexParser {
     }
 
     /// Parse a flat list until the matching \end (for unknown environments).
-    private mutating func parseUntilEnd(envName: String) -> [MathAtom] {
+    private mutating func parseUntilEnd(envName: String, depth: Int) -> [MathAtom] {
         var atoms: [MathAtom] = []
         while let tok = peek() {
             if case .command("end") = tok {
@@ -539,19 +591,19 @@ struct LatexParser {
             }
             if case .caret = tok {
                 let base = atoms.popLast() ?? .run("", .normal)
-                atoms.append(parseScripts(base: base))
+                atoms.append(parseScripts(base: base, depth: depth))
                 continue
             }
             if case .underscore = tok {
                 let base = atoms.popLast() ?? .run("", .normal)
-                atoms.append(parseScripts(base: base))
+                atoms.append(parseScripts(base: base, depth: depth))
                 continue
             }
-            let atom = parseAtom()
+            let atom = parseAtom(depth: depth)
             if case .caret = peek() {
-                atoms.append(parseScripts(base: atom))
+                atoms.append(parseScripts(base: atom, depth: depth))
             } else if case .underscore = peek() {
-                atoms.append(parseScripts(base: atom))
+                atoms.append(parseScripts(base: atom, depth: depth))
             } else {
                 atoms.append(atom)
             }

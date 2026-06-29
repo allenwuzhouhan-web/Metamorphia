@@ -69,16 +69,28 @@ class SparkleNSView: NSView {
         emitterLayer.emitterSize = self.bounds.size
         emitterLayer.emitterPosition = CGPoint(x: bounds.width / 2, y: bounds.height / 2)
 
-        // Fixed birth rate (fix #11): the previous `area`/`baseBirthRate`
-        // locals were computed but never used — the emitter always used the
-        // constant below.
-        let adjustedBirthRate: Float = 20
-        emitterLayer.emitterCells?.first?.birthRate = adjustedBirthRate
+        // Use a fixed birth rate, but keep emission paused while the view is
+        // detached from any window so a layout/resize pass during teardown
+        // cannot silently re-arm the emitter offscreen. (The previous
+        // `area`/`baseBirthRate` locals were computed but never used.)
+        let activeBirthRate: Float = 20
+        emitterLayer.emitterCells?.first?.birthRate = window != nil ? activeBirthRate : 0
     }
     
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         updateEmitterForCurrentBounds()
+    }
+
+    // Pause particle emission while the view is offscreen (not in a window)
+    // so the emitter idles instead of rendering continuously.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            updateEmitterForCurrentBounds()
+        } else {
+            emitterLayer?.emitterCells?.first?.birthRate = 0
+        }
     }
 }
 

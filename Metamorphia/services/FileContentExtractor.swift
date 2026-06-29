@@ -32,9 +32,9 @@ public actor FileContentExtractor {
         case "pdf":
             rawContent = extractPDF(url: url)
         case "rtf", "rtfd":
-            rawContent = extractRTF(url: url)
+            rawContent = await extractRTF(url: url)
         case "docx", "doc", "pages", "pptx", "ppt", "xlsx", "xls":
-            rawContent = extractViaTextutil(url: url)
+            rawContent = await extractViaTextutil(url: url)
         default:
             rawContent = extractPlainText(url: url, maxChars: Self.perFileCharCap)
         }
@@ -70,7 +70,7 @@ public actor FileContentExtractor {
         return out
     }
 
-    private func extractRTF(url: URL) -> String {
+    private nonisolated func extractRTF(url: URL) async -> String {
         if let data = try? Data(contentsOf: url),
            let attr = try? NSAttributedString(
                data: data,
@@ -78,39 +78,77 @@ public actor FileContentExtractor {
                documentAttributes: nil) {
             return attr.string
         }
-        return runTextutil(url: url)
+        return await runTextutil(url: url)
     }
 
-    private func extractViaTextutil(url: URL) -> String {
-        return runTextutil(url: url)
+    private nonisolated func extractViaTextutil(url: URL) async -> String {
+        return await runTextutil(url: url)
     }
 
-    private func runTextutil(url: URL) -> String {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/textutil")
-        task.arguments = ["-convert", "txt", "-stdout", url.path]
-        let stdout = Pipe()
-        let stderr = Pipe()
-        task.standardOutput = stdout
-        task.standardError = stderr
+    private nonisolated func runTextutil(url: URL) async -> String {
+        await withCheckedContinuation { continuation in
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/textutil")
+            task.arguments = ["-convert", "txt", "-stdout", url.path]
+            let stdout = Pipe()
+            let stderr = Pipe()
+            task.standardOutput = stdout
+            task.standardError = stderr
 
-        do { try task.run() } catch {
-            print("[FileContentExtractor] textutil launch failed: \(error)")
-            return ""
-        }
+            let lock = NSLock()
+            var stdoutData = Data()
+            var didResume = false
 
-        let deadline = Date().addingTimeInterval(Self.shellTimeout)
-        while task.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-        if task.isRunning {
-            task.terminate()
-            print("[FileContentExtractor] textutil timed out: \(url.lastPathComponent)")
-            return ""
-        }
+            func resumeOnce(_ value: String) {
+                lock.lock()
+                guard !didResume else {
+                    lock.unlock()
+                    return
+                }
+                didResume = true
+                lock.unlock()
+                continuation.resume(returning: value)
+            }
 
-        let data = stdout.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8) ?? ""
+            stdout.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                guard !chunk.isEmpty else { return }
+                lock.lock()
+                stdoutData.append(chunk)
+                lock.unlock()
+            }
+            task.terminationHandler = { _ in
+                stdout.fileHandleForReading.readabilityHandler = nil
+                let finalChunk = stdout.fileHandleForReading.readDataToEndOfFile()
+                lock.lock()
+                stdoutData.append(finalChunk)
+                let output = String(data: stdoutData, encoding: .utf8) ?? ""
+                lock.unlock()
+                resumeOnce(output)
+            }
+
+            do {
+                try task.run()
+            } catch {
+                print("[FileContentExtractor] textutil launch failed: \(error)")
+                resumeOnce("")
+                return
+            }
+
+            Task.detached(priority: .userInitiated) {
+                let nanoseconds = UInt64(max(Self.shellTimeout, 0.1) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                lock.lock()
+                let alreadyResumed = didResume
+                lock.unlock()
+                guard !alreadyResumed else { return }
+                if task.isRunning {
+                    task.terminate()
+                }
+                print("[FileContentExtractor] textutil timed out: \(url.lastPathComponent)")
+                resumeOnce("")
+            }
+        }
     }
 
     private func extractPlainText(url: URL, maxChars: Int) -> String {

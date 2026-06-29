@@ -34,7 +34,10 @@ public final class CalendarLens: ObservableObject {
 
     private let store = EKEventStore()
     private var pollTimer: Timer?
-    private var briefedEventIds: Set<String> = []
+    /// Event ids that have already been briefed, keyed to the time they were
+    /// briefed so stale entries can be evicted (a briefed event never reappears
+    /// in the upcoming-events poll, so its id is dead weight after the meeting).
+    private var briefedAtByEventId: [String: Date] = [:]
 
     /// Resolved attendee digests keyed by event identifier.
     /// Set at T-15 so T-5 can promote straight to brief assembly.
@@ -55,6 +58,7 @@ public final class CalendarLens: ObservableObject {
     private static let briefWindowHigh: TimeInterval =  6 * 60   // 6 min
     private static let briefDisplayDuration: TimeInterval = 25
     private static let storyRecencyWindow: TimeInterval = 7 * 24 * 3600  // 7 days
+    private static let briefedIdRetention: TimeInterval = 48 * 3600      // 48 h
 
     // MARK: - Lifecycle
 
@@ -183,7 +187,7 @@ public final class CalendarLens: ObservableObject {
 
         for event in events {
             guard let eventId = event.eventIdentifier else { continue }
-            guard !briefedEventIds.contains(eventId) else { continue }
+            guard briefedAtByEventId[eventId] == nil else { continue }
 
             let secondsUntil = event.startDate.timeIntervalSince(now)
 
@@ -212,9 +216,9 @@ public final class CalendarLens: ObservableObject {
                 }
                 guard let digests = resolvedAttendees[eventId] else { continue }
 
-                // Insert before the await so a second overlapping poll cannot
+                // Record before the await so a second overlapping poll cannot
                 // enter this branch for the same event (Fix 1 — race guard).
-                briefedEventIds.insert(eventId)
+                briefedAtByEventId[eventId] = now
                 resolvedAttendees.removeValue(forKey: eventId)
 
                 let brief = await assembleBrief(
@@ -246,6 +250,12 @@ public final class CalendarLens: ObservableObject {
             let isStillUpcoming = events.contains { $0.eventIdentifier == key }
             if !isStillUpcoming { resolvedAttendees.removeValue(forKey: key) }
         }
+
+        // Evict briefed-event ids older than the dedupe horizon. A meeting
+        // briefed this long ago has already happened and will never reappear
+        // in the upcoming-events poll, so its id only wastes memory.
+        let briefedCutoff = now.addingTimeInterval(-Self.briefedIdRetention)
+        briefedAtByEventId = briefedAtByEventId.filter { $0.value > briefedCutoff }
     }
 
     // MARK: - Attendee resolution

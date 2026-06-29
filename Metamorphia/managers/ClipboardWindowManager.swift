@@ -23,7 +23,8 @@ class ClipboardWindowManager: ObservableObject {
     static let shared = ClipboardWindowManager()
     
     private var clipboardWindow: NSWindow?
-    
+    private var windowDelegate: WindowDelegate?
+
     private init() {}
     
     func showClipboardWindow() {
@@ -70,11 +71,16 @@ class ClipboardWindowManager: ObservableObject {
         let hostingView = NSHostingView(rootView: contentView)
         window.contentView = hostingView
         
-        // Handle window closing
-        window.delegate = WindowDelegate { [weak self] window in
+        // Handle window closing. NSWindow.delegate is weak, so retain the
+        // delegate here for the window's lifetime or its close-button cleanup
+        // never runs.
+        let delegate = WindowDelegate { [weak self] window in
             ScreenCaptureVisibilityManager.shared.unregister(window)
             self?.clipboardWindow = nil
+            self?.windowDelegate = nil
         }
+        window.delegate = delegate
+        self.windowDelegate = delegate
 
         ScreenCaptureVisibilityManager.shared.register(window, scope: .panelsOnly)
         
@@ -85,9 +91,15 @@ class ClipboardWindowManager: ObservableObject {
     }
     
     func hideClipboardWindow() {
-        clipboardWindow?.close()
+        guard let window = clipboardWindow else { return }
+        window.close()
+        // close() does not invoke windowShouldClose(_:), so mirror the
+        // close-button path here to release the window and hosting view.
+        ScreenCaptureVisibilityManager.shared.unregister(window)
+        clipboardWindow = nil
+        windowDelegate = nil
     }
-    
+
     func toggleClipboardWindow() {
         if let window = clipboardWindow, window.isVisible {
             hideClipboardWindow()

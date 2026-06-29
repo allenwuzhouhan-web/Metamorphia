@@ -66,7 +66,15 @@ public actor ActivityStream {
 
     // MARK: - State
 
-    private var ring: [ActivityEvent] = []
+    // Fixed-capacity circular buffer. `storage` is grown lazily up to
+    // ``ringCapacity`` slots; once full, `head` advances and the slot it points
+    // at is overwritten in place. This makes drop-oldest O(1) per append instead
+    // of the O(n) element shift an `Array.removeFirst()` would incur on a full
+    // 10k-element buffer. `snapshot()`/`recent(since:)` reconstruct the
+    // oldest-first ordering from `head`, so external read behavior is unchanged.
+    private var storage: [ActivityEvent] = []
+    /// Index of the oldest event once `storage` has reached capacity.
+    private var head = 0
     private var writer: (@Sendable (ActivityEvent) -> Void)?
     private let gate: any ActivityStreamGate
 
@@ -92,10 +100,14 @@ public actor ActivityStream {
     public func emit(_ event: ActivityEvent) {
         guard gate.isEnabled else { return }
 
-        if ring.count >= ActivityStream.ringCapacity {
-            ring.removeFirst()
+        if storage.count < ActivityStream.ringCapacity {
+            // Still filling: append in order, `head` stays at 0.
+            storage.append(event)
+        } else {
+            // Full: overwrite the oldest slot in place and advance `head`.
+            storage[head] = event
+            head = (head + 1) % ActivityStream.ringCapacity
         }
-        ring.append(event)
 
         subject.send(event)
         writer?(event)
@@ -105,12 +117,12 @@ public actor ActivityStream {
     ///
     /// Used by ``ActivityJournal`` for startup backfill.
     public func snapshot() -> [ActivityEvent] {
-        ring
+        orderedEvents()
     }
 
     /// Events whose timestamp is on or after `since`, oldest first.
     public func recent(since: Date) -> [ActivityEvent] {
-        ring.filter { $0.timestamp >= since }
+        orderedEvents().filter { $0.timestamp >= since }
     }
 
     /// Attach a writer that is called synchronously after every successful
@@ -136,6 +148,17 @@ public actor ActivityStream {
     }
 
     // MARK: - Internal helpers
+
+    /// Events in oldest-first order, reconstructed from the circular `storage`.
+    ///
+    /// While the buffer is still filling, `head == 0` and this is just `storage`.
+    /// Once full, the oldest event lives at `head`, so the logical order is the
+    /// slice from `head` to the end followed by the slice from the start to
+    /// `head`.
+    private func orderedEvents() -> [ActivityEvent] {
+        guard head != 0 else { return storage }
+        return Array(storage[head...]) + Array(storage[..<head])
+    }
 
     /// Actor-isolated writer installation. Exposed `internal` so tests can
     /// `await` it directly to guarantee the writer is installed before emitting.

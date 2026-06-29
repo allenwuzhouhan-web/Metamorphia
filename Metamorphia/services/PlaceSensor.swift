@@ -178,7 +178,18 @@ public final class PlaceSensor {
         guard Defaults[.observePlace], running, !binaryUnavailable else { return }
         guard let salt else { return }
 
-        let hash = Self.currentPlaceHash(salt: salt, missingBinaryLogged: &missingBinaryLogged)
+        // Spawn the `airport` subprocess off the main thread — run()/waitUntilExit()/
+        // readDataToEndOfFile() each block, and must not stall the main actor.
+        let alreadyLogged = missingBinaryLogged
+        let sample = await Task.detached(priority: .utility) {
+            Self.currentPlaceHash(salt: salt, missingBinaryLogged: alreadyLogged)
+        }.value
+        let hash = sample.hash
+
+        // Fold the once-only missing-binary log state back on the main actor.
+        if sample.binaryMissing {
+            missingBinaryLogged = true
+        }
 
         // If the binary went missing this tick, shut the poll down permanently
         // (until the next explicit start() call, which resets binaryUnavailable).
@@ -207,33 +218,47 @@ public final class PlaceSensor {
 
     // MARK: - SSID + hash
 
+    /// Result of one place sample: the hash (or offline sentinel) plus whether
+    /// the `airport` binary was confirmed absent this tick. `binaryMissing` is
+    /// folded back into the actor-isolated `missingBinaryLogged`/`binaryUnavailable`
+    /// state by the caller, keeping that mutation off the detached worker.
+    struct PlaceSample {
+        let hash: String
+        let binaryMissing: Bool
+    }
+
     /// Read the current SSID, hash it with `salt`, and return the 16-char hex
     /// prefix. Returns `"offline"` when Wi-Fi is not associated.
     ///
+    /// `alreadyLogged` suppresses the once-only missing-binary log; pass the
+    /// current `missingBinaryLogged` value. `nonisolated` so it can run on a
+    /// background task — the `airport` subprocess must never block the main actor.
+    ///
     /// Privacy: the SSID string never leaves this function. Only the hash
     /// (or the offline sentinel) is returned.
-    static func currentPlaceHash(salt: Data, missingBinaryLogged: inout Bool) -> String {
-        guard let ssid = readSSID(missingBinaryLogged: &missingBinaryLogged) else {
-            return offlineSentinel
+    nonisolated static func currentPlaceHash(salt: Data, missingBinaryLogged alreadyLogged: Bool) -> PlaceSample {
+        let read = readSSID(alreadyLogged: alreadyLogged)
+        guard let ssid = read.ssid else {
+            return PlaceSample(hash: offlineSentinel, binaryMissing: read.binaryMissing)
         }
-        return hashSSID(ssid, salt: salt)
+        return PlaceSample(hash: hashSSID(ssid, salt: salt), binaryMissing: read.binaryMissing)
     }
 
     /// Invoke `airport -I` and parse the SSID line.
-    /// Returns nil when the binary is absent, Wi-Fi is off, or the SSID field
-    /// is missing (e.g. Ethernet-only or monitor mode).
+    /// `ssid` is nil when the binary is absent, Wi-Fi is off, or the SSID field
+    /// is missing (e.g. Ethernet-only or monitor mode); `binaryMissing` reports
+    /// whether the absence was specifically a missing binary.
     ///
-    /// The returned value is the raw SSID. Callers MUST NOT log it.
-    private static func readSSID(missingBinaryLogged: inout Bool) -> String? {
+    /// The returned SSID is raw. Callers MUST NOT log it.
+    nonisolated private static func readSSID(alreadyLogged: Bool) -> (ssid: String?, binaryMissing: Bool) {
         let binaryURL = URL(fileURLWithPath: airportPath)
         guard FileManager.default.fileExists(atPath: airportPath) else {
-            if !missingBinaryLogged {
+            if !alreadyLogged {
                 print("[PlaceSensor] airport binary missing at \(airportPath) — " +
                       "place detection unavailable. This is expected on a future macOS " +
                       "that has removed the deprecated binary. Migrate to CoreWLAN.")
-                missingBinaryLogged = true
             }
-            return nil
+            return (nil, true)
         }
 
         let task = Process()
@@ -249,7 +274,7 @@ public final class PlaceSensor {
             task.waitUntilExit()
         } catch {
             // Treat any launch error as no-SSID (conservative fail-safe).
-            return nil
+            return (nil, false)
         }
 
         let output = String(
@@ -263,16 +288,16 @@ public final class PlaceSensor {
             guard trimmed.hasPrefix("SSID: ") else { continue }
             let ssid = String(trimmed.dropFirst("SSID: ".count))
             // Guard against empty string (can appear when not associated).
-            return ssid.isEmpty ? nil : ssid
+            return (ssid.isEmpty ? nil : ssid, false)
         }
-        return nil
+        return (nil, false)
     }
 
     /// Compute HMAC-SHA256(ssid, key: salt)[0..<8] as a 16-char lowercase hex string.
     ///
     /// Privacy: `ssid` is consumed in-memory only and must not be stored
     /// or logged by the caller.
-    static func hashSSID(_ ssid: String, salt: Data) -> String {
+    nonisolated static func hashSSID(_ ssid: String, salt: Data) -> String {
         let digest = HMAC<SHA256>.authenticationCode(
             for: Data(ssid.utf8),
             using: SymmetricKey(data: salt)

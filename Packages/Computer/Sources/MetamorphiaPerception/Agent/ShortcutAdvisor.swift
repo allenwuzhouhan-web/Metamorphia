@@ -47,7 +47,8 @@ public enum ShortcutAdvisor {
         // Get the menu bar
         var menuBarRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(appElement, kAXMenuBarAttribute as CFString, &menuBarRef) == .success,
-              let menuBar = menuBarRef else { return [] }
+              let menuBar = menuBarRef,
+              CFGetTypeID(menuBar) == AXUIElementGetTypeID() else { return [] }
 
         let menuBarElement = menuBar as! AXUIElement
 

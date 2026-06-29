@@ -660,6 +660,8 @@ enum PowerPointCopilot {
             do {
                 try process.run()
             } catch {
+                stdout.fileHandleForReading.readabilityHandler = nil
+                stderr.fileHandleForReading.readabilityHandler = nil
                 resumeOnce(.failure(error))
                 return
             }

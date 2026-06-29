@@ -211,9 +211,10 @@ public enum BrowserDOMJoiner {
     /// no nodes / no viewport origin can be resolved.
     ///
     /// Runs in the perception pipeline's hot path per tick. Two safety
-    /// properties keep it cheap: (a) `BrowserDOMFetcher`'s fingerprint
-    /// cache makes repeated calls on the same tab resolve without hitting
-    /// the WebSocket; (b) the three-pass matcher is bounded O(n·m) on
+    /// properties keep it cheap: (a) `fetchInteractiveNodes`'s fingerprint
+    /// cache returns the prior enumeration on an unchanged tab after only a
+    /// cheap URL/title probe, so the full-document enumeration JS doesn't
+    /// re-run every tick; (b) the three-pass matcher is bounded O(n·m) on
     /// small n,m — a typical page has 30-80 interactive elements.
     public static func enrichElements(
         in elements: [ScreenElement],

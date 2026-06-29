@@ -13,12 +13,12 @@ final class ComputerPerceptionToolsTests: XCTestCase {
 
     // MARK: - Bootstrap
 
-    /// The perception pipeline reaches `PerceptionRuntime.host` on first
-    /// access and `preconditionFailure`s (signal 5, aborting the whole test
-    /// binary) if `bootstrap`/`bootstrapForTests` was never called. Install a
-    /// throwaway temp-dir host before any test in this class runs. The call is
-    /// idempotent and process-global, so it also covers sibling perception
-    /// test classes whatever the run order.
+    /// Bootstraps the process-global perception runtime before any perception
+    /// test runs. The pipeline reaches `PerceptionRuntime.host` on first access
+    /// and `preconditionFailure`s (signal 5, aborting the whole test binary) if
+    /// `bootstrap`/`bootstrapForTests` was never called, so we install a
+    /// throwaway temp-dir host first. The call is idempotent and process-global,
+    /// so it also covers sibling perception test classes whatever the run order.
     override class func setUp() {
         super.setUp()
         if !PerceptionRuntime.isBootstrapped {

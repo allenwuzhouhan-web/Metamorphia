@@ -27,6 +27,15 @@ public enum WindowEnumerator {
         // NSScreen frame to do the containment test.
         let displays = allDisplays()
 
+        // Snapshot running apps once into a pid->bundleID map rather than
+        // scanning the freshly-allocated `runningApplications` array per window.
+        let bundleIDByPID: [pid_t: String] = Dictionary(
+            NSWorkspace.shared.runningApplications.compactMap { app in
+                app.bundleIdentifier.map { (app.processIdentifier, $0) }
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+
         var windows: [WindowInfo] = []
         var index = 0
 
@@ -52,10 +61,8 @@ public enum WindowEnumerator {
             // Skip tiny windows (likely invisible helper windows)
             guard bounds.width > 50 && bounds.height > 50 else { continue }
 
-            // Look up bundle ID from running apps
-            let bundleID = NSWorkspace.shared.runningApplications
-                .first(where: { $0.processIdentifier == ownerPID })?
-                .bundleIdentifier
+            // Look up bundle ID from the running-apps snapshot
+            let bundleID = bundleIDByPID[ownerPID]
 
             let centerTopLeft = CGPoint(x: bounds.midX, y: bounds.midY)
             let displayIndex = displayIndexForTopLeftPoint(centerTopLeft, displays: displays)

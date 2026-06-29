@@ -303,7 +303,7 @@ struct AnimationPreviewCard: View {
                     )
                 
                 // Animation preview
-                AnimationPreview(animation: animation)
+                AnimationPreview(animation: animation, isPlaying: isHovering)
                     .frame(width: 60, height: 40)
                 
                 // Delete button (only for custom animations)
@@ -382,25 +382,33 @@ struct AnimationPreviewCard: View {
 // MARK: - Animation Preview
 struct AnimationPreview: View {
     let animation: CustomIdleAnimation
-    
-    var body: some View {
+    /// When false, the preview is pinned to a single static frame so the grid
+    /// doesn't run many infinite Lottie loops at once. Cards play only on hover.
+    var isPlaying: Bool = false
+
+    private var url: URL {
         switch animation.source {
-        case .lottieFile(let url):
-            LottieView(state: LUStateData(
-                type: .loadedFrom(url),
-                speed: animation.speed,
-                loopMode: .loop
-            ))
-            .frame(width: 60, height: 40)
-            
-        case .lottieURL(let url):
-            LottieView(state: LUStateData(
-                type: .loadedFrom(url),
-                speed: animation.speed,
-                loopMode: .loop
-            ))
-            .frame(width: 60, height: 40)
+        case .lottieFile(let url): return url
+        case .lottieURL(let url): return url
         }
+    }
+
+    var body: some View {
+        // When not playing, enable control mode and pin to a single frame so the
+        // underlying LottieView never starts its infinite render loop; only the
+        // hovered card animates. `.id(isPlaying)` forces the view to be rebuilt
+        // on hover changes so playback actually starts/stops.
+        LottieView(
+            state: LUStateData(
+                type: .loadedFrom(url),
+                speed: animation.speed,
+                loopMode: .loop,
+                isControlEnabled: !isPlaying
+            ),
+            value: isPlaying ? 0 : 0.5
+        )
+        .frame(width: 60, height: 40)
+        .id(isPlaying)
     }
 }
 

@@ -27,12 +27,6 @@ public final class ImplicitContextMiddleware: AgentMiddleware, @unchecked Sendab
     /// Directories to scan for recently-modified files. Defaults to Desktop / Documents / Downloads.
     private let recentFileSearchDirs: [URL]
 
-    /// Last app name fetched from the provider, refreshed asynchronously so the
-    /// synchronous `beforeModelCall` hook never blocks the agent-loop thread.
-    /// Guarded by `cachedAppNameLock` because the refresh runs on a detached task.
-    private let cachedAppNameLock = NSLock()
-    private var cachedAppName: String?
-
     public init(
         systemContext: SystemContextProvider,
         clipboard: ClipboardProvider = NullClipboardProvider(),
@@ -57,6 +51,12 @@ public final class ImplicitContextMiddleware: AgentMiddleware, @unchecked Sendab
     // MARK: - Storage Keys
 
     private static let injectedKey = "ImplicitContext.injected"
+
+    /// Storage key under which the agent loop stashes a pre-resolved frontmost
+    /// app name (read once per task, off the synchronous middleware chain). The
+    /// hook reads this cached value instead of blocking a cooperative-pool
+    /// thread on an actor-isolated `await`. See `AgentLoop.submit`.
+    public static let appNameKey = "ImplicitContext.appName"
 
     // MARK: - Relevance Signals
 
@@ -95,7 +95,7 @@ public final class ImplicitContextMiddleware: AgentMiddleware, @unchecked Sendab
 
         var contextParts: [String] = []
 
-        if let app = gatherAppContext(query: lower) {
+        if let app = gatherAppContext(query: lower, ctx: ctx) {
             contextParts.append(app)
         }
 
@@ -164,42 +164,13 @@ public final class ImplicitContextMiddleware: AgentMiddleware, @unchecked Sendab
 
     // MARK: - Context Gathering
 
-    private func gatherAppContext(query: String) -> String? {
-        // Prefer the value cached by a previous turn's background refresh — that
-        // path never blocks. Always kick off a fresh async refresh for the next
-        // turn so the cache stays warm.
-        cachedAppNameLock.lock()
-        var appName = cachedAppName
-        let cacheWasWarm = appName != nil
-        cachedAppNameLock.unlock()
-
-        // If the cache is cold (first turn of a session), prime it with a bounded
-        // read so the very first deictic query still gets the frontmost app. The
-        // read runs on a DETACHED task (its own executor), so the short bounded
-        // wait here cannot deadlock the structured agent-loop continuation the way
-        // an unstructured `Task {}` + `DispatchSemaphore.wait` on the cooperative
-        // pool could. Subsequent turns hit the warm-cache fast path above.
-        if !cacheWasWarm {
-            let box = AppNameBox()
-            let semaphore = DispatchSemaphore(value: 0)
-            Task.detached(priority: .userInitiated) { [systemContext] in
-                box.value = await systemContext.lastCapturedAppName
-                semaphore.signal()
-            }
-            _ = semaphore.wait(timeout: .now() + .milliseconds(50))
-            appName = box.value
-            cachedAppNameLock.lock()
-            cachedAppName = box.value
-            cachedAppNameLock.unlock()
-        } else {
-            Task { [weak self] in
-                guard let self else { return }
-                let latest = await self.systemContext.lastCapturedAppName
-                self.cachedAppNameLock.lock()
-                self.cachedAppName = latest
-                self.cachedAppNameLock.unlock()
-            }
-        }
+    private func gatherAppContext(query: String, ctx: MiddlewareContext) -> String? {
+        // The frontmost app name is resolved once per task by `AgentLoop.submit`
+        // (an `await` on the actor-isolated provider) and stashed in storage.
+        // Reading it here is a plain synchronous lookup — no `Task`/semaphore,
+        // so this hook never blocks a cooperative-pool thread waiting on a
+        // child task that needs that same pool to make progress.
+        let appName = ctx.storage[Self.appNameKey] as? String
 
         guard let name = appName, !name.isEmpty, name != "Metamorphia", name != "Executer" else {
             return nil
@@ -280,13 +251,6 @@ public final class ImplicitContextMiddleware: AgentMiddleware, @unchecked Sendab
     }
 
     // MARK: - Helpers
-
-    /// Tiny reference box so the detached prime task can hand the fetched app name
-    /// back to the synchronous caller without capturing a `var` across a concurrency
-    /// boundary. The semaphore establishes the happens-before for the read.
-    private final class AppNameBox: @unchecked Sendable {
-        var value: String?
-    }
 
     private func findRecentFiles(minutes: Int) -> [URL] {
         let fm = FileManager.default

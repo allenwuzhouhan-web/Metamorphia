@@ -19,11 +19,24 @@ public actor MCPClient: MCPTransport {
     private var nextId = 1
     private var readBuffer = Data()
     private var connected = false
-    private var readTask: Task<Void, Never>?
+    /// Drains stdout chunks in arrival order into the actor (a single consumer
+    /// preserves FIFO ordering that separately-spawned Tasks would not).
+    private var readPump: Task<Void, Never>?
+    private var readContinuation: AsyncStream<Data>.Continuation?
     /// Raw JSON-RPC (newline-delimited) mode instead of Content-Length framed.
     /// Locked once detected so auto-detection can't flip it mid-flight.
     private var rawJsonMode = false
     private var rawJsonModeLocked = false
+
+    /// Brace-scan state for raw-JSON framing, carried across stdout chunks so a
+    /// still-streaming large message is examined byte-by-byte exactly once
+    /// (O(n)) instead of re-scanning the whole buffer from the start each chunk
+    /// (O(n^2)). `rawScanOffset` counts bytes already examined from the current
+    /// buffer start; reset after a complete frame is consumed.
+    private var rawScanDepth = 0
+    private var rawScanInString = false
+    private var rawScanEscaped = false
+    private var rawScanOffset = 0
 
     // Reconnection state
     private var lastCommand: String?
@@ -66,13 +79,14 @@ public actor MCPClient: MCPTransport {
         let proc = Process()
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
 
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         proc.arguments = [command] + args
         proc.standardInput = stdinPipe
         proc.standardOutput = stdoutPipe
-        proc.standardError = stderrPipe
+        // stderr is diagnostic only; discard it so a chatty server can't fill
+        // the OS pipe buffer (~64KB) and block on its next write.
+        proc.standardError = FileHandle.nullDevice
 
         // SECURITY: do NOT pass the full parent environment to a third-party MCP
         // server — that would leak the user's API keys, tokens, and secrets to an
@@ -94,18 +108,7 @@ public actor MCPClient: MCPTransport {
             }
         }
 
-        let handle = stdoutPipe.fileHandleForReading
-        readTask = Task.detached { [weak self] in
-            while !Task.isCancelled {
-                let data = handle.availableData
-                if data.isEmpty {
-                    await self?.handleDisconnect()
-                    break
-                }
-                await self?.handleData(data)
-                try? await Task.sleep(nanoseconds: 1_000_000) // 1 ms — prevent tight loop on bursts
-            }
-        }
+        startReading(on: stdoutPipe.fileHandleForReading)
 
         // MCP initialize handshake — try Content-Length framing first.
         let initParams: [String: Any] = [
@@ -129,12 +132,13 @@ public actor MCPClient: MCPTransport {
             let proc2 = Process()
             let stdinPipe2 = Pipe()
             let stdoutPipe2 = Pipe()
-            let stderrPipe2 = Pipe()
             proc2.executableURL = URL(fileURLWithPath: "/usr/bin/env")
             proc2.arguments = [command] + args
             proc2.standardInput = stdinPipe2
             proc2.standardOutput = stdoutPipe2
-            proc2.standardError = stderrPipe2
+            // stderr is diagnostic only; discard it so a chatty server can't fill
+            // the OS pipe buffer and block on its next write.
+            proc2.standardError = FileHandle.nullDevice
             proc2.environment = procEnv
             try proc2.run()
             self.process = proc2
@@ -147,18 +151,7 @@ public actor MCPClient: MCPTransport {
                 Task { await self.handleProcessTermination(exitCode: terminatedProc.terminationStatus) }
             }
 
-            let handle2 = stdoutPipe2.fileHandleForReading
-            readTask = Task.detached { [weak self] in
-                while !Task.isCancelled {
-                    let data = handle2.availableData
-                    if data.isEmpty {
-                        await self?.handleDisconnect()
-                        break
-                    }
-                    await self?.handleData(data)
-                    try? await Task.sleep(nanoseconds: 1_000_000)
-                }
-            }
+            startReading(on: stdoutPipe2.fileHandleForReading)
 
             initResult = try await sendRequest("initialize", params: initParams, timeout: 15)
         }
@@ -197,10 +190,9 @@ public actor MCPClient: MCPTransport {
 
     public func disconnect() {
         connected = false
+        stopReading()
         stdoutHandle?.closeFile()
         stdoutHandle = nil
-        readTask?.cancel()
-        readTask = nil
         stdin?.closeFile()
         stdin = nil
         process?.terminate()
@@ -211,6 +203,47 @@ public actor MCPClient: MCPTransport {
             continuation.resume(throwing: MCPError.disconnected)
         }
         pendingRequests.removeAll()
+    }
+
+    // MARK: - Reader
+
+    /// Drives the stdout reader without occupying a Swift cooperative-pool thread.
+    /// The readability handler runs on a Foundation-managed dispatch source thread
+    /// and only yields the captured bytes into an AsyncStream; a single consumer
+    /// task drains them in arrival order back inside the actor.
+    private func startReading(on handle: FileHandle) {
+        stopReading()
+        // Fresh stdout stream — clear any partial-frame scan state so a stale
+        // offset from a torn-down connection can't desync the new buffer.
+        rawScanDepth = 0
+        rawScanInString = false
+        rawScanEscaped = false
+        rawScanOffset = 0
+        let (stream, continuation) = AsyncStream<Data>.makeStream()
+        readContinuation = continuation
+        handle.readabilityHandler = { fh in
+            let data = fh.availableData
+            if data.isEmpty {
+                continuation.finish()
+            } else {
+                continuation.yield(data)
+            }
+        }
+        readPump = Task { [weak self] in
+            for await data in stream {
+                await self?.handleData(data)
+            }
+            await self?.handleDisconnect()
+        }
+    }
+
+    /// Tears down the active reader (handler + stream + consumer).
+    private func stopReading() {
+        stdoutHandle?.readabilityHandler = nil
+        readContinuation?.finish()
+        readContinuation = nil
+        readPump?.cancel()
+        readPump = nil
     }
 
     // MARK: - MCP Operations
@@ -394,43 +427,49 @@ public actor MCPClient: MCPTransport {
     }
 
     private func extractRawJsonMessage() -> [String: Any]? {
-        while let first = readBuffer.first, (first == 0x0A || first == 0x0D || first == 0x20) {
-            readBuffer.removeFirst()
+        // Only trim leading whitespace when no frame scan is in progress; once a
+        // frame has started the leading byte is "{", so trimming mid-scan would
+        // be a no-op anyway and would otherwise invalidate the persisted offset.
+        if rawScanOffset == 0 {
+            while let first = readBuffer.first, (first == 0x0A || first == 0x0D || first == 0x20) {
+                readBuffer.removeFirst()
+            }
         }
         guard !readBuffer.isEmpty else { return nil }
 
-        var depth = 0
-        var inString = false
-        var escaped = false
         var endIndex: Data.Index?
 
-        for i in readBuffer.indices {
+        // Resume the brace scan where the previous chunk left off so each byte is
+        // examined exactly once across the lifetime of a streaming message.
+        var i = readBuffer.index(readBuffer.startIndex, offsetBy: rawScanOffset)
+        while i < readBuffer.endIndex {
             let byte = readBuffer[i]
-            if escaped {
-                escaped = false
-                continue
-            }
-            if byte == UInt8(ascii: "\\") && inString {
-                escaped = true
-                continue
-            }
-            if byte == UInt8(ascii: "\"") {
-                inString = !inString
-                continue
-            }
-            if inString { continue }
-            if byte == UInt8(ascii: "{") {
-                depth += 1
-            } else if byte == UInt8(ascii: "}") {
-                depth -= 1
-                if depth == 0 {
-                    endIndex = readBuffer.index(after: i)
-                    break
+            if rawScanEscaped {
+                rawScanEscaped = false
+            } else if byte == UInt8(ascii: "\\") && rawScanInString {
+                rawScanEscaped = true
+            } else if byte == UInt8(ascii: "\"") {
+                rawScanInString = !rawScanInString
+            } else if !rawScanInString {
+                if byte == UInt8(ascii: "{") {
+                    rawScanDepth += 1
+                } else if byte == UInt8(ascii: "}") {
+                    rawScanDepth -= 1
+                    if rawScanDepth == 0 {
+                        endIndex = readBuffer.index(after: i)
+                        break
+                    }
                 }
             }
+            i = readBuffer.index(after: i)
         }
 
-        guard let end = endIndex else { return nil }
+        guard let end = endIndex else {
+            // Partial message: record how far we scanned so the next chunk resumes
+            // here instead of rescanning the whole accumulated buffer.
+            rawScanOffset = readBuffer.count
+            return nil
+        }
         let jsonData = readBuffer[readBuffer.startIndex..<end]
         var trimEnd = end
         while trimEnd < readBuffer.endIndex {
@@ -439,6 +478,11 @@ public actor MCPClient: MCPTransport {
             trimEnd = readBuffer.index(after: trimEnd)
         }
         readBuffer = Data(readBuffer[trimEnd...])
+        // Frame consumed — reset scan state for the next message.
+        rawScanDepth = 0
+        rawScanInString = false
+        rawScanEscaped = false
+        rawScanOffset = 0
 
         return (try? JSONSerialization.jsonObject(with: jsonData)) as? [String: Any]
     }
@@ -462,6 +506,9 @@ public actor MCPClient: MCPTransport {
     private func handleDisconnect() {
         guard connected else { return }
         connected = false
+        stopReading()
+        stdoutHandle?.closeFile()
+        stdoutHandle = nil
         stdin?.closeFile()
         stdin = nil
         process = nil
@@ -480,8 +527,7 @@ public actor MCPClient: MCPTransport {
         let wasConnected = connected
         if connected {
             connected = false
-            readTask?.cancel()
-            readTask = nil
+            stopReading()
             stdoutHandle?.closeFile()
             stdoutHandle = nil
             stdin?.closeFile()

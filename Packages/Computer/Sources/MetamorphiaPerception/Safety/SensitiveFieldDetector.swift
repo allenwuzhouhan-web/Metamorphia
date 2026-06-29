@@ -64,8 +64,12 @@ public enum SensitiveFieldDetector {
     public static func scan(elements: [ScreenElement]) -> [SensitiveResult] {
         var results: [SensitiveResult] = []
 
+        // Build a coarse spatial grid of candidate label elements once per scan so
+        // findNearbyLabels queries only nearby buckets instead of the full array.
+        let grid = LabelGrid(elements: elements)
+
         for element in elements {
-            if let result = classify(element: element, allElements: elements) {
+            if let result = classify(element: element, allElements: elements, labelGrid: grid) {
                 results.append(result)
             }
         }
@@ -75,6 +79,11 @@ public enum SensitiveFieldDetector {
 
     /// Classify a single element's sensitivity.
     public static func classify(element: ScreenElement, allElements: [ScreenElement]) -> SensitiveResult? {
+        classify(element: element, allElements: allElements, labelGrid: nil)
+    }
+
+    /// Classify a single element's sensitivity, optionally reusing a prebuilt label grid.
+    private static func classify(element: ScreenElement, allElements: [ScreenElement], labelGrid: LabelGrid?) -> SensitiveResult? {
         // AXSecureTextField is the definitive signal for password fields
         if element.state.contains(.password) || element.subrole == "AXSecureTextField" {
             return SensitiveResult(ref: element.ref, type: .password, reason: "Secure text field")
@@ -113,7 +122,7 @@ public enum SensitiveFieldDetector {
         }
 
         // Check nearby labels — a text field next to a "Password" static text label
-        let nearbyLabels = findNearbyLabels(for: element, in: allElements, radius: 150)
+        let nearbyLabels = findNearbyLabels(for: element, in: allElements, radius: 150, grid: labelGrid)
         for nearby in nearbyLabels {
             let nearLower = nearby.lowercased()
             for pattern in passwordLabels {
@@ -143,11 +152,68 @@ public enum SensitiveFieldDetector {
 
     // MARK: - Nearby Label Detection
 
+    /// Coarse spatial index of candidate label elements, bucketed by clickPoint.
+    /// Lets findNearbyLabels query only buckets within `radius` instead of the full array.
+    private struct LabelGrid {
+        static let cellSize: CGFloat = 50
+
+        /// Candidate label element (center + label) keyed by grid cell.
+        private var cells: [GridKey: [(center: CGPoint, label: String, ref: ElementRef)]] = [:]
+
+        struct GridKey: Hashable {
+            let x: Int
+            let y: Int
+        }
+
+        init(elements: [ScreenElement]) {
+            for element in elements {
+                guard element.role == .staticText || element.role == .unknown,
+                      !element.label.isEmpty,
+                      let center = element.clickPoint else { continue }
+                let key = Self.key(for: center)
+                cells[key, default: []].append((center, element.label, element.ref))
+            }
+        }
+
+        static func key(for point: CGPoint) -> GridKey {
+            GridKey(x: Int((point.x / cellSize).rounded(.down)),
+                    y: Int((point.y / cellSize).rounded(.down)))
+        }
+
+        /// Candidate label elements in cells within `radius` of the given center.
+        func candidates(near center: CGPoint, radius: CGFloat) -> [(center: CGPoint, label: String, ref: ElementRef)] {
+            let span = Int((radius / Self.cellSize).rounded(.up))
+            let base = Self.key(for: center)
+            var result: [(center: CGPoint, label: String, ref: ElementRef)] = []
+            for dx in -span...span {
+                for dy in -span...span {
+                    if let bucket = cells[GridKey(x: base.x + dx, y: base.y + dy)] {
+                        result.append(contentsOf: bucket)
+                    }
+                }
+            }
+            return result
+        }
+    }
+
     /// Find labels of static text elements near a given element (within radius pixels).
-    private static func findNearbyLabels(for element: ScreenElement, in allElements: [ScreenElement], radius: CGFloat) -> [String] {
+    private static func findNearbyLabels(for element: ScreenElement, in allElements: [ScreenElement], radius: CGFloat, grid: LabelGrid? = nil) -> [String] {
         guard let targetCenter = element.clickPoint else { return [] }
 
         var labels: [String] = []
+
+        if let grid {
+            for other in grid.candidates(near: targetCenter, radius: radius) {
+                guard other.ref != element.ref else { continue }
+                let dx = targetCenter.x - other.center.x
+                let dy = targetCenter.y - other.center.y
+                if sqrt(dx * dx + dy * dy) <= radius {
+                    labels.append(other.label)
+                }
+            }
+            return labels
+        }
+
         for other in allElements {
             guard other.ref != element.ref,
                   other.role == .staticText || other.role == .unknown,

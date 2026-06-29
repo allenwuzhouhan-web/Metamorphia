@@ -28,9 +28,22 @@ public enum MathSpanScanner {
     private static var splitCacheOrder: [String] = []
     private static let splitCacheCap = 128
 
+    /// Longest message we will memoize. The count cap bounds *how many* entries
+    /// live in the cache but not their size; a few very long math-heavy messages
+    /// could otherwise leave that many large strings (plus their spans) resident.
+    /// Messages past this length are still scanned correctly — just not cached,
+    /// so the resident footprint stays bounded by length × count.
+    private static let splitCacheMaxKeyLength = 16_384
+
     /// Scan a string into ordered text/math spans. Unterminated delimiters are
     /// emitted as plain text so nothing is ever lost.
     public static func split(_ s: String) -> [MathSpan] {
+        // Over-long messages bypass the cache entirely so a handful of huge
+        // strings can't pin large amounts of memory under the count cap.
+        guard s.count <= splitCacheMaxKeyLength else {
+            return scan(s)
+        }
+
         splitCacheLock.lock()
         if let cached = splitCache[s] {
             splitCacheLock.unlock()

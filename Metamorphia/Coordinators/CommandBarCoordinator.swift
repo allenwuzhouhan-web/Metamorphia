@@ -219,7 +219,7 @@ public final class CommandBarCoordinator {
         // 1) Screen under the mouse.
         let mouse = NSEvent.mouseLocation
         for screen in NSScreen.screens where screen.frame.contains(mouse) {
-            if let vm = delegate.viewModels[screen] {
+            if let id = delegate.displayID(for: screen), let vm = delegate.viewModels[id] {
                 return vm
             }
         }
@@ -227,12 +227,13 @@ public final class CommandBarCoordinator {
         // 2) User-preferred screen (from Settings).
         let preferredName = MetamorphiaViewCoordinator.shared.preferredScreen
         if let preferred = NSScreen.screens.first(where: { $0.localizedName == preferredName }),
-           let vm = delegate.viewModels[preferred] {
+           let id = delegate.displayID(for: preferred),
+           let vm = delegate.viewModels[id] {
             return vm
         }
 
         // 3) Main screen.
-        if let main = NSScreen.main, let vm = delegate.viewModels[main] {
+        if let main = NSScreen.main, let id = delegate.displayID(for: main), let vm = delegate.viewModels[id] {
             return vm
         }
 
@@ -257,9 +258,10 @@ public final class CommandBarCoordinator {
 
         let target: NSWindow?
         if let screen = NSScreen.screens.first(where: { $0.localizedName == vm.screen }),
-           let w = delegate.windows[screen] {
+           let id = delegate.displayID(for: screen),
+           let w = delegate.windows[id] {
             target = w
-        } else if let main = NSScreen.main, let w = delegate.windows[main] {
+        } else if let main = NSScreen.main, let id = delegate.displayID(for: main), let w = delegate.windows[id] {
             target = w
         } else {
             target = delegate.window ?? delegate.windows.values.first

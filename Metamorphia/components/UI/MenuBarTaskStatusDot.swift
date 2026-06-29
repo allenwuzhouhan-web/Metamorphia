@@ -43,44 +43,26 @@ final class MenuBarTaskStatusStore: ObservableObject {
 
 struct MenuBarTaskStatusDot: View {
     @ObservedObject private var store = MenuBarTaskStatusStore.shared
-    @State private var pulsePhase: Double = 0
-    // Manually connected so the 30fps redraw only runs while a task is actually
-    // in progress. A steady .succeeded/.failed dot doesn't animate, so there's
-    // no reason to re-render the offscreen NSImage 30 times a second.
-    @State private var pulseConnection: Cancellable?
-    private let pulseTimer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common)
 
     var body: some View {
-        Image(nsImage: MenuBarTaskStatusImage.make(status: store.status, phase: pulsePhase))
+        // A STATIC dot — never animate a MenuBarExtra label. Every frame of a
+        // pulsing menu-bar image forces SwiftUI to re-host the label to an
+        // NSImage and AppKit to relayout the status item (NSStatusBarButton
+        // setImage: → NSStatusItem._adjustLength → NSButtonCell cellSize), all on
+        // the main thread. Driving that per display frame while a task runs pegs
+        // the main thread and freezes the entire UI for the task's duration. The
+        // status colour alone (yellow/green/red) signals activity; the image now
+        // changes only on a status transition, not per frame.
+        dotImage(phase: 0)
+            .frame(width: 18, height: 18)
+    }
+
+    private func dotImage(phase: Double) -> some View {
+        Image(nsImage: MenuBarTaskStatusImage.make(status: store.status, phase: phase))
             .resizable()
             .interpolation(.high)
             .renderingMode(.original)
             .accessibilityLabel(accessibilityLabel)
-        .frame(width: 18, height: 18)
-            .onReceive(pulseTimer) { date in
-                pulsePhase = date.timeIntervalSinceReferenceDate
-            }
-            .onAppear {
-                updatePulseConnection(for: store.status)
-            }
-            .onDisappear {
-                pulseConnection?.cancel()
-                pulseConnection = nil
-            }
-            .onChange(of: store.status) { _, newStatus in
-                updatePulseConnection(for: newStatus)
-            }
-    }
-
-    private func updatePulseConnection(for status: MenuBarTaskStatus) {
-        if status == .inProgress {
-            if pulseConnection == nil {
-                pulseConnection = pulseTimer.connect()
-            }
-        } else {
-            pulseConnection?.cancel()
-            pulseConnection = nil
-        }
     }
 
     private var accessibilityLabel: String {

@@ -205,6 +205,10 @@ final class Phase2cMiddlewareTests: XCTestCase {
         )
         let chain = MiddlewareChain()
         chain.add(mw)
+        // The frontmost app name is resolved once per task by `AgentLoop` and
+        // stashed in storage; the middleware reads it synchronously. Seed it
+        // here to mirror that wiring.
+        chain.persistentStorage[ImplicitContextMiddleware.appNameKey] = "Xcode"
 
         let messages: [ChatMessage] = [
             ChatMessage(role: "system", content: "base"),

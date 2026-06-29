@@ -106,9 +106,23 @@ extension AppDelegate {
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
-    var windows: [NSScreen: NSWindow] = [:]
-    var viewModels: [NSScreen: MetamorphiaViewModel] = [:]
+    // Keyed by stable CGDirectDisplayID rather than NSScreen, because macOS
+    // hands out fresh NSScreen instances on every display reconfiguration and
+    // those would never match a cached entry, orphaning the previous screen's
+    // window + view model and spawning a duplicate for the same display.
+    var windows: [CGDirectDisplayID: NSWindow] = [:]
+    var viewModels: [CGDirectDisplayID: MetamorphiaViewModel] = [:]
     var window: NSWindow?
+
+    /// Stable display identifier for keying `windows` / `viewModels`.
+    /// Returns `nil` only for screens without an `NSScreenNumber` (none in
+    /// practice), in which case the caller should skip that screen.
+    func displayID(for screen: NSScreen) -> CGDirectDisplayID? {
+        guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            return nil
+        }
+        return number.uint32Value
+    }
     let vm: MetamorphiaViewModel = .init()
 
     override init() {
@@ -136,6 +150,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
     private var windowsHiddenForLock = false
     private var optionalShortcutHandlersRegistered = false
+    private var audioTapObserversRegistered = false
+    private var audioTapWorkspaceObservers: [NSObjectProtocol] = []
     private weak var focusWithoutDevToolsMenuItem: NSMenuItem?
     private weak var focusUseDevToolsMenuItem: NSMenuItem?
     
@@ -208,6 +224,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     /// Setup observers for music player state changes to restart AudioTap capture
     private func setupAudioTapMusicObservers() {
+        // Install exactly once. This function is invoked at launch and again on
+        // every `enableRealTimeWaveform` toggle; without this guard each toggle
+        // would add two more permanently-registered workspace observers.
+        guard !audioTapObserversRegistered else { return }
+        audioTapObserversRegistered = true
+
         // Listen for app launches to restart capture when music apps are opened
         let targetBundleIDs = [
             "com.apple.Music",
@@ -221,7 +243,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             "com.coppertino.Vox",
         ]
         
-        NSWorkspace.shared.notificationCenter.addObserver(
+        let launchObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didLaunchApplicationNotification,
             object: nil,
             queue: .main
@@ -229,7 +251,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                   let bundleID = app.bundleIdentifier,
                   targetBundleIDs.contains(bundleID) else { return }
-            
+
             // A target music app was launched, restart capture to include it
             if Defaults[.enableRealTimeWaveform] {
                 print("🎵 [AudioTap] Music app launched: \(bundleID), restarting capture...")
@@ -239,9 +261,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
-        
+        audioTapWorkspaceObservers.append(launchObserver)
+
         // Also observe app terminations to restart capture
-        NSWorkspace.shared.notificationCenter.addObserver(
+        let terminateObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didTerminateApplicationNotification,
             object: nil,
             queue: .main
@@ -249,13 +272,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                   let bundleID = app.bundleIdentifier,
                   targetBundleIDs.contains(bundleID) else { return }
-            
+
             // A target music app was terminated, restart capture to update the list
             if Defaults[.enableRealTimeWaveform] {
                 print("🎵 [AudioTap] Music app terminated: \(bundleID), restarting capture...")
                 AudioTap.shared.restartCapture()
             }
         }
+        audioTapWorkspaceObservers.append(terminateObserver)
     }
     
     func applicationWillTerminate(_ notification: Notification) {
@@ -272,6 +296,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Cancel any pending window size updates
         windowSizeUpdateWorkItem?.cancel()
         NotificationCenter.default.removeObserver(self)
+        // The block-based workspace observers above live on the workspace
+        // notification center keyed by an opaque token, so the default-center
+        // `removeObserver(self)` call doesn't reach them — remove them by token.
+        for token in audioTapWorkspaceObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+        }
+        audioTapWorkspaceObservers.removeAll()
         extensionXPCServiceHost.stop()
         extensionRPCServer.stop()
         
@@ -534,7 +565,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard size.width > 0, size.height > 0 else { return }
 
         if Defaults[.showOnAllDisplays] {
-            for (screen, window) in windows {
+            for (displayID, window) in windows {
+                guard let screen = NSScreen.screens.first(where: { self.displayID(for: $0) == displayID }) else { continue }
                 let screenSize = adjustedSizeForScreen(size, screen: screen)
                 if force || window.frame.size != screenSize {
                     resizeWindow(window, on: screen, to: screenSize, animated: animated)
@@ -571,6 +603,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // DEBUG-only: detect main-thread hangs and capture the frozen stack.
+        FreezeDiagnostics.start()
+
         // Wire up Metamorphia AI features (command bar, agent loop, hotkey).
         MetamorphiaBootstrap.configure()
 
@@ -842,9 +877,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self.cleanupWindows(shouldInvert: true)
 
             if !Defaults[.showOnAllDisplays] {
+                guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
                 let viewModel = self.vm
                 let window = self.createMetamorphiaWindow(
-                    for: NSScreen.main ?? NSScreen.screens.first!, with: viewModel)
+                    for: screen, with: viewModel)
                 self.window = window
                 self.adjustWindowPosition(changeAlpha: true)
             } else {
@@ -881,7 +917,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if Defaults[.showOnAllDisplays] {
                 for screen in NSScreen.screens {
                     if screen.frame.contains(mouseLocation) {
-                        if let screenViewModel = self.viewModels[screen] {
+                        if let displayID = self.displayID(for: screen),
+                           let screenViewModel = self.viewModels[displayID] {
                             viewModel = screenViewModel
                             break
                         }
@@ -920,10 +957,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         registerOptionalShortcutHandlers()
         updateFeatureShortcutAvailability()
 
-        if !Defaults[.showOnAllDisplays] {
+        if !Defaults[.showOnAllDisplays], let screen = NSScreen.main ?? NSScreen.screens.first {
             let viewModel = self.vm
             let window = createMetamorphiaWindow(
-                for: NSScreen.main ?? NSScreen.screens.first!, with: viewModel)
+                for: screen, with: viewModel)
             self.window = window
             adjustWindowPosition(changeAlpha: true)
         } else {
@@ -1248,29 +1285,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     @objc func adjustWindowPosition(changeAlpha: Bool = false) {
         if Defaults[.showOnAllDisplays] {
-            let currentScreens = Set(NSScreen.screens)
-            
-            for screen in windows.keys where !currentScreens.contains(screen) {
-                if let window = windows[screen] {
+            let currentScreens = NSScreen.screens
+            let currentDisplayIDs = Set(currentScreens.compactMap { displayID(for: $0) })
+
+            for displayID in Array(windows.keys) where !currentDisplayIDs.contains(displayID) {
+                if let window = windows[displayID] {
                     window.close()
                     NotchSpaceManager.shared.notchSpace.windows.remove(window)
-                    windows.removeValue(forKey: screen)
-                    viewModels.removeValue(forKey: screen)
+                    windows.removeValue(forKey: displayID)
+                    viewModels.removeValue(forKey: displayID)
                 }
             }
-            
+
             for screen in currentScreens {
-                if windows[screen] == nil {
+                guard let displayID = displayID(for: screen) else { continue }
+                if windows[displayID] == nil {
                     let viewModel = MetamorphiaViewModel(screen: screen.localizedName)
                     let window = createMetamorphiaWindow(for: screen, with: viewModel)
-                    
-                    windows[screen] = window
-                    viewModels[screen] = viewModel
+
+                    windows[displayID] = window
+                    viewModels[displayID] = viewModel
                 }
-                
-                if let window = windows[screen], let viewModel = viewModels[screen] {
+
+                if let window = windows[displayID], let viewModel = viewModels[displayID] {
                     positionWindow(window, on: screen, changeAlpha: changeAlpha)
-                    
+
                     if viewModel.notchState == .closed {
                         viewModel.close()
                     }

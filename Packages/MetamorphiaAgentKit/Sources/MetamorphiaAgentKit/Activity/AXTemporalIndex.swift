@@ -186,7 +186,9 @@ public actor AXTemporalIndex {
         ring.snapshots.removeAll { $0.at < cutoff }
         let trimmedCount = before - ring.snapshots.count
         // Rebasing: if we trimmed non-baseline snapshots the first remaining one
-        // must be made into a baseline; handle by recomputing bytes after trim.
+        // must be made into a baseline. rebaseIfNeeded also reconciles byte
+        // counters, which is required here because removeAll above mutates the
+        // array without touching ring.bytes/totalBytes.
         if trimmedCount > 0 {
             rebaseIfNeeded(&ring)
         }
@@ -304,7 +306,13 @@ public actor AXTemporalIndex {
     /// When snapshots are trimmed, re-materialise the earliest remaining snapshot
     /// as a baseline so future queries don't need trimmed-away history.
     private func rebaseIfNeeded(_ ring: inout PidRing) {
-        guard !ring.snapshots.isEmpty, !ring.snapshots[0].baseline else { return }
+        // Reconcile byte counters against the current snapshots even when no
+        // rebase is required (e.g. age-trim left a baseline first); otherwise
+        // ring.bytes/totalBytes can drift away from the true sum.
+        guard !ring.snapshots.isEmpty, !ring.snapshots[0].baseline else {
+            reconcileBytes(&ring)
+            return
+        }
 
         // Materialise state up to first surviving snapshot's time.
         let firstDate = ring.snapshots[0].at
@@ -318,13 +326,16 @@ public actor AXTemporalIndex {
             updates: []
         )
 
-        // Recompute bytes: remove old cost of all snapshots, add new baseline.
-        let oldBytes = ring.snapshots.reduce(0) { $0 + $1.bytesEstimate }
         ring.snapshots = [newBaseline]
-        let newBytes = newBaseline.bytesEstimate
-        let delta = newBytes - oldBytes
-        ring.bytes += delta
-        totalBytes += delta
+        reconcileBytes(&ring)
+    }
+
+    /// Make `ring.bytes` (and `totalBytes`) authoritative by recomputing from the
+    /// current snapshots, applying the difference to the global counter.
+    private func reconcileBytes(_ ring: inout PidRing) {
+        let recomputed = ring.snapshots.reduce(0) { $0 + $1.bytesEstimate }
+        totalBytes += recomputed - ring.bytes
+        ring.bytes = recomputed
     }
 
     /// Evict the LRU pid while `totalBytes` exceeds `maxTotalBytes`.

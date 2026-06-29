@@ -125,6 +125,9 @@ class TimerManager: ObservableObject {
     private var timerInstance: Timer?
     private var cancellables = Set<AnyCancellable>()
     private var soundPlayer: AVAudioPlayer?
+    // Overtime safety: how long a fired timer is allowed to keep counting/ringing
+    // before it auto-silences and tears itself down (in case the user stepped away).
+    private let overtimeCap: TimeInterval = 5 * 60
     // Bumped every time a timer starts or stops. A scheduled smooth-close captures
     // the token at schedule time and bails if a newer timer has since started,
     // so a quickly-restarted timer can't be force-closed by a stale close.
@@ -190,12 +193,17 @@ class TimerManager: ObservableObject {
                         // Overtime - count negative
                         self.remainingTime -= 1
                         self.lastUpdated = Date()
+                        // Auto-silence and tear down a fired-and-forgotten timer
+                        // once it has been ringing past the overtime cap.
+                        if abs(self.remainingTime) >= self.overtimeCap {
+                            self.stopTimer()
+                        }
                     }
                 }
             }
         }
     }
-    
+
     func startDemoTimer(duration: TimeInterval) {
         startTimer(duration: duration, name: "Demo Timer")
     }
@@ -270,6 +278,11 @@ class TimerManager: ObservableObject {
                         // Overtime - count negative
                         self.remainingTime -= 1
                         self.lastUpdated = Date()
+                        // Auto-silence and tear down a fired-and-forgotten timer
+                        // once it has been ringing past the overtime cap.
+                        if abs(self.remainingTime) >= self.overtimeCap {
+                            self.stopTimer()
+                        }
                     }
                 }
             }
@@ -437,7 +450,7 @@ class TimerManager: ObservableObject {
         
         do {
             soundPlayer = try AVAudioPlayer(contentsOf: finalSoundURL)
-            soundPlayer?.numberOfLoops = -1 // Loop indefinitely
+            soundPlayer?.numberOfLoops = 9 // Ring a bounded number of times, not forever
             soundPlayer?.play()
         } catch {
             // Fallback to system sound if there's an error playing the custom sound

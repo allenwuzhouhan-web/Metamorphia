@@ -120,9 +120,10 @@ enum LocalCommandHelpers {
 
     // MARK: - AppleScript
 
-    /// Run an AppleScript string synchronously on a background thread.
-    /// Never call from MainActor — uses NSAppleScript which can block.
-    /// Returns the result string, or nil on error.
+    /// Runs an AppleScript string and returns the result, or nil on error.
+    /// NSAppleScript itself always executes on the main thread (see
+    /// `runAppleScriptDetailed`), so this is safe to call from any thread; the
+    /// Carbon OSA engine corrupts (EXC_BAD_ACCESS) if driven off-main.
     @discardableResult
     static func runAppleScript(_ source: String) -> String? {
         runAppleScriptDetailed(source).output

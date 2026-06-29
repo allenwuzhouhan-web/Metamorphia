@@ -7,6 +7,16 @@ import MetamorphiaPerception
 /// parameter. Schema-shape tests only (no live capture), so they run anywhere.
 final class ScreenPerceiveOCRTests: XCTestCase {
 
+    /// Bootstraps the process-global perception runtime before any perception
+    /// test runs; without it the pipeline traps in PerceptionHost and aborts the
+    /// whole test binary. Idempotent and process-global.
+    override class func setUp() {
+        super.setUp()
+        if !PerceptionRuntime.isBootstrapped {
+            PerceptionRuntime.bootstrapForTests()
+        }
+    }
+
     // MARK: - Schema
 
     func testScreenPerceiveTool_ocrParam_InSchema() {

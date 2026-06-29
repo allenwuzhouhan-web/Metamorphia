@@ -43,9 +43,12 @@ class CapsLockManager: ObservableObject {
             return event
         }
         
-        // Monitor flag changes globally (even when app is not focused)
+        // Monitor flag changes globally (even when app is not focused).
+        // The global monitor callback is delivered on the main thread, so we
+        // process inline via assumeIsolated instead of spawning a Task per
+        // event — .flagsChanged fires for every modifier transition system-wide.
         globalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 self?.handleFlagsChanged(event)
             }
         }

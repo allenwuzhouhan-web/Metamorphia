@@ -385,7 +385,15 @@ public enum TextFormatter {
         func ancestryPath(for el: ScreenElement) -> (key: String, path: String)? {
             var labels: [String] = []
             var current = el
-            while let pRef = current.parentRef, let parent = elementByRef[pRef] {
+            // Bound the parent-walk like the sibling helpers (ElementFilter
+            // uses steps < 24, QueryEngine uses steps < 32). A visited set plus
+            // a step cap guarantee termination even if a malformed ScreenMap
+            // contains a parentRef cycle (A.parent = B, B.parent = A).
+            var visited: Set<ElementRef> = [el.ref]
+            var steps = 0
+            while let pRef = current.parentRef, let parent = elementByRef[pRef],
+                  steps < 32, visited.insert(pRef).inserted {
+                steps += 1
                 if parent.role.isContainer && !parent.label.isEmpty {
                     labels.append(String(parent.label.prefix(40)))
                 }

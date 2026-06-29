@@ -223,4 +223,31 @@ final class AXTemporalIndexTests: XCTestCase {
         XCTAssertEqual(result.count, 1)
         XCTAssertEqual(result[0].identityHash, 1)
     }
+
+    // MARK: - Extra: age-trim keeps byte accounting authoritative
+
+    func testAgeTrimByteAccountingStaysAuthoritative() async {
+        // snapshotInterval < maxAgeSeconds so each ingest stores a snapshot and
+        // eventually trims older ones by age.
+        let idx = makeIndex(maxAgeSeconds: 120, snapshotInterval: 60)
+
+        // Ingest several snapshots across a span well beyond maxAgeSeconds so the
+        // age-trim path fires repeatedly.
+        for i in 0 ..< 6 {
+            let at = base.addingTimeInterval(Double(i) * 61)
+            await idx.ingest(pid: 21, elements: [element(seed: UInt64(i))], at: at)
+        }
+
+        // totalBytes must never drift negative after repeated age-trims.
+        let usage = await idx.memoryUsage()
+        XCTAssertGreaterThanOrEqual(usage.totalBytes, 0,
+                                    "totalBytes must never drift negative after age-trim")
+
+        // After forgetting the only pid, totalBytes must land exactly at 0.
+        await idx.forget(pid: 21)
+        let afterForget = await idx.memoryUsage()
+        XCTAssertEqual(afterForget.totalBytes, 0,
+                       "forget must zero totalBytes; any residual means byte accounting drifted")
+        XCTAssertEqual(afterForget.pidCount, 0)
+    }
 }

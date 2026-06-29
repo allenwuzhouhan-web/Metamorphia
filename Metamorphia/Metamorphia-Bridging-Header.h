@@ -14,5 +14,6 @@
 #define Metamorphia_Bridging_Header_h
 
 #import "audio/AudioBridge.h"
+#import "helpers/ExceptionTrap.h"
 
 #endif /* Metamorphia_Bridging_Header_h */

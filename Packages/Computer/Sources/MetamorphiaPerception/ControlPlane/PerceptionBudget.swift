@@ -96,6 +96,7 @@ public actor PerceptionBudget {
 
     private var battery: BatteryStateProvider?
     private var batteryToken: Any?
+    private var notificationTokens: [NSObjectProtocol] = []
     private var injectedThermal: ProcessInfo.ThermalState?
     private var injectedIdleSeconds: TimeInterval?
 
@@ -176,22 +177,33 @@ public actor PerceptionBudget {
     }
 
     public func start() {
-        NotificationCenter.default.addObserver(
+        // Idempotency: a double start (without an intervening stop) must not
+        // stack observers. If already started, this is a no-op.
+        guard notificationTokens.isEmpty else { return }
+
+        let thermalToken = NotificationCenter.default.addObserver(
             forName: ProcessInfo.thermalStateDidChangeNotification,
             object: nil, queue: nil
         ) { [weak self] _ in Task { await self?.recompute() } }
 
-        NotificationCenter.default.addObserver(
+        let powerToken = NotificationCenter.default.addObserver(
             forName: .NSProcessInfoPowerStateDidChange,
             object: nil, queue: nil
         ) { [weak self] _ in Task { await self?.recompute() } }
+
+        notificationTokens = [thermalToken, powerToken]
 
         startIdlePolling()
         recompute()
     }
 
     public func stop() {
-        NotificationCenter.default.removeObserver(self)
+        for token in notificationTokens {
+            NotificationCenter.default.removeObserver(token)
+        }
+        notificationTokens.removeAll()
+        batteryToken = nil
+        battery = nil
         idlePollTask?.cancel(); idlePollTask = nil
         pendingLowerTask?.cancel(); pendingLowerTask = nil
     }

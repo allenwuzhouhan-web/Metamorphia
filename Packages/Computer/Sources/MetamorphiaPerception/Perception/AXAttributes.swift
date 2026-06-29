@@ -44,21 +44,23 @@ enum AXAttributes {
 
     static func getPosition(_ element: AXUIElement) -> CGPoint? {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &value) == .success else { return nil }
         // Conditional cast — a force-cast here crashes the whole capture thread
-        // when an app hands back a non-AXValue type. Fall back to .zero.
-        guard let axValue = value, CFGetTypeID(axValue) == AXValueGetTypeID() else { return .zero }
+        // when an app hands back a non-AXValue type. Return nil instead.
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &value) == .success,
+              let v = value, CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
         var point = CGPoint.zero
-        AXValueGetValue(axValue as! AXValue, .cgPoint, &point)
+        AXValueGetValue(v as! AXValue, .cgPoint, &point)
         return point
     }
 
     static func getSize(_ element: AXUIElement) -> CGSize? {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &value) == .success else { return nil }
-        guard let axValue = value, CFGetTypeID(axValue) == AXValueGetTypeID() else { return .zero }
+        // Conditional cast — a force-cast here crashes the whole capture thread
+        // when an app hands back a non-AXValue type. Return nil instead.
+        guard AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &value) == .success,
+              let v = value, CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
         var size = CGSize.zero
-        AXValueGetValue(axValue as! AXValue, .cgSize, &size)
+        AXValueGetValue(v as! AXValue, .cgSize, &size)
         return size
     }
 
@@ -107,10 +109,10 @@ enum AXAttributes {
 
     static func getFocusedWindow(_ appElement: AXUIElement) -> AXUIElement? {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &value) == .success else { return nil }
         // Conditional cast — skip (return nil) rather than crash the capture
         // thread if the attribute isn't actually an AXUIElement.
-        guard let v = value, CFGetTypeID(v) == AXUIElementGetTypeID() else { return nil }
+        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &value) == .success,
+              let v = value, CFGetTypeID(v) == AXUIElementGetTypeID() else { return nil }
         return (v as! AXUIElement)
     }
 

@@ -254,7 +254,7 @@ public final class OpenAICompatibleService: LLMServiceProtocol, @unchecked Senda
         maxTokens: Int
     ) -> AsyncThrowingStream<StreamEvent, Error> {
         AsyncThrowingStream { [self] continuation in
-            Task {
+            let producer = Task {
                 do {
                     guard let apiKey = APIKeyManager.shared.getKey(for: provider) else {
                         continuation.finish(throwing: MetamorphiaError.apiError("No API key configured for \(provider.config.displayName)."))
@@ -305,6 +305,9 @@ public final class OpenAICompatibleService: LLMServiceProtocol, @unchecked Senda
                     var toolCallAccumulators: [Int: (id: String, name: String, arguments: String)] = [:]
 
                     for try await line in bytes.lines {
+                        // Unwind the byte stream and close the HTTP connection
+                        // promptly when the consumer abandons the stream.
+                        try Task.checkCancellation()
                         guard line.hasPrefix("data: ") else { continue }
                         let json = String(line.dropFirst(6))
                         if json == "[DONE]" { break }
@@ -371,6 +374,7 @@ public final class OpenAICompatibleService: LLMServiceProtocol, @unchecked Senda
                     continuation.finish(throwing: error)
                 }
             }
+            continuation.onTermination = { _ in producer.cancel() }
         }
     }
 }

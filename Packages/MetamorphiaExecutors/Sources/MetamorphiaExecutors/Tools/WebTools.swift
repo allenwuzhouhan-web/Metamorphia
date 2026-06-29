@@ -56,7 +56,7 @@ public struct FetchURLContentTool: ToolDefinition {
         let candidate = raw.contains("://") ? raw : "https://\(raw)"
         let url: URL
         do {
-            url = try URLSafetyValidator.validate(candidate)
+            url = try await URLSafetyValidator.validate(candidate)
         } catch let error as URLSafetyValidator.ValidationError {
             return "Error: \(error.localizedDescription)"
         }

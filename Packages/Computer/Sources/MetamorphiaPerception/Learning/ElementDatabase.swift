@@ -1,11 +1,11 @@
 import Foundation
 import SQLite3
 
-/// SQLite's `SQLITE_TRANSIENT` sentinel destructor. Tells SQLite to make its
-/// own private copy of the bound text immediately, so an autoreleased / temporary
-/// C string (e.g. `(value as NSString).utf8String`) staying valid past the bind
-/// call is not required. Passing `nil` (SQLITE_STATIC) instead would be a
-/// use-after-free because the NSString backing the pointer can be released before
+/// SQLite's `SQLITE_TRANSIENT` sentinel destructor. Tells SQLite to copy the
+/// bound bytes immediately, so no caller-side buffer lifetime is relied upon.
+/// Passing `nil` (SQLITE_STATIC) instead would trust the pointer to outlive the
+/// bind call, which a temporary String/NSString buffer does not — a
+/// use-after-free, since the backing buffer can be released before
 /// `sqlite3_step` runs.
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
@@ -598,15 +598,15 @@ public final class ElementDatabase: @unchecked Sendable {
     // MARK: - SQLite Helpers
 
     private func bindText(_ stmt: OpaquePointer?, _ index: Int32, _ value: String) {
-        // SQLITE_TRANSIENT (not nil/SQLITE_STATIC): the autoreleased C string from
-        // `(value as NSString).utf8String` is transient — SQLite must copy it now,
-        // otherwise `sqlite3_step` later reads freed memory.
-        sqlite3_bind_text(stmt, index, (value as NSString).utf8String, -1, SQLITE_TRANSIENT)
+        // `withCString` keeps the buffer valid for the duration of the closure, and
+        // SQLITE_TRANSIENT makes SQLite copy it immediately — so nothing relies on a
+        // temporary buffer surviving past the bind call.
+        value.withCString { sqlite3_bind_text(stmt, index, $0, -1, SQLITE_TRANSIENT) }
     }
 
     private func bindTextOrNull(_ stmt: OpaquePointer?, _ index: Int32, _ value: String?) {
         if let v = value {
-            sqlite3_bind_text(stmt, index, (v as NSString).utf8String, -1, SQLITE_TRANSIENT)
+            v.withCString { sqlite3_bind_text(stmt, index, $0, -1, SQLITE_TRANSIENT) }
         } else {
             sqlite3_bind_null(stmt, index)
         }

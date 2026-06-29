@@ -165,12 +165,24 @@ private func fullResolutionCGImage(from image: NSImage) -> CGImage? {
         return image.cgImage(forProposedRect: nil, context: nil, hints: nil)
     }
     ctx.interpolationQuality = .high   // OK here: upscaling vector art, not blending photo detail
-    let ns = NSGraphicsContext(cgContext: ctx, flipped: false)
-    NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = ns
-    image.draw(in: CGRect(x: 0, y: 0, width: pw, height: ph),
-               from: .zero, operation: .copy, fraction: 1.0)
-    NSGraphicsContext.restoreGraphicsState()
+
+    // Vector/PDF reps consult NSGraphicsContext/screen state and aren't documented
+    // thread-safe (PDFImageRep/EPS have historically been fragile off-main). Rasterize
+    // this fallback on the main thread; the fast NSBitmapImageRep.cgImage path above
+    // never reaches here, so normal images stay fully off-main.
+    let rasterize = {
+        let ns = NSGraphicsContext(cgContext: ctx, flipped: false)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = ns
+        image.draw(in: CGRect(x: 0, y: 0, width: pw, height: ph),
+                   from: .zero, operation: .copy, fraction: 1.0)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+    if Thread.isMainThread {
+        rasterize()
+    } else {
+        DispatchQueue.main.sync(execute: rasterize)
+    }
     return ctx.makeImage()
 }
 

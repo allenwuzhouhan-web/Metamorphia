@@ -366,6 +366,11 @@ class CalendarManager: ObservableObject {
                 try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
                 if Task.isCancelled { break }
                 guard self.hasCalendarAccess else { continue }
+                // Only poll while the screen is locked: lock-screen events are
+                // consumed solely by the lock-screen widget, and .EKEventStoreChanged
+                // already drives refreshes when the calendar actually changes. This
+                // avoids a steady 60s wakeup/EventKit fetch while the machine is in use.
+                guard LockScreenManager.shared.isLocked else { continue }
                 await self.updateLockScreenEvents(force: false)
             }
         }

@@ -66,6 +66,11 @@ final class SystemVolumeController {
     var onRouteChange: (() -> Void)?
 
     private let callbackQueue = DispatchQueue(label: "com.dynamicisland.volume-listener")
+    // Serializes access to the genuinely-shared device/element state below, which the
+    // main-thread public API (setVolume/setMuted/getVolume/...) and the callbackQueue
+    // device-change path both touch. CoreAudio syscalls are kept outside the lock by
+    // snapshotting the device ID/element under the lock first.
+    private let stateLock = NSLock()
     private var currentDeviceID: AudioDeviceID = 0
     private var listenersInstalled = false
     private var volumeElement: AudioObjectPropertyElement?
@@ -74,8 +79,8 @@ final class SystemVolumeController {
 
     /// Tracks the per-device property listener blocks we install so they can be
     /// removed before installing new ones on a default-device change. Without this
-    /// the blocks accumulate (and keep firing) on the old device every time the
-    /// system output device changes.
+    /// the blocks accumulate on the old device (and keep firing redundant state
+    /// notifications) every time the system output device changes.
     private struct InstalledListener {
         let deviceID: AudioDeviceID
         var address: AudioObjectPropertyAddress
@@ -188,6 +193,18 @@ final class SystemVolumeController {
 
     // MARK: - Private
 
+    private func withStateLock<T>(_ body: () -> T) -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return body()
+    }
+
+    // Snapshot the current device ID under the lock so CoreAudio syscalls run on a
+    // stable value even if a default-device change is interleaving on callbackQueue.
+    private func deviceIDSnapshot() -> AudioDeviceID {
+        withStateLock { currentDeviceID }
+    }
+
     private func resolveDefaultDevice() -> AudioDeviceID {
         var deviceID = AudioDeviceID()
         var size = UInt32(MemoryLayout.size(ofValue: deviceID))
@@ -230,7 +247,7 @@ final class SystemVolumeController {
         removeVolumeListeners()
 
         if let element = resolveElement(selector: kAudioDevicePropertyVolumeScalar, deviceID: deviceID) {
-            volumeElement = element
+            withStateLock { volumeElement = element }
             var address = makeAddress(selector: kAudioDevicePropertyVolumeScalar, element: element)
             let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
                 self?.notifyCurrentState()
@@ -241,7 +258,7 @@ final class SystemVolumeController {
         }
 
         if let element = resolveElement(selector: kAudioDevicePropertyMute, deviceID: deviceID) {
-            muteElement = element
+            withStateLock { muteElement = element }
             var address = makeAddress(selector: kAudioDevicePropertyMute, element: element)
             let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
                 self?.notifyCurrentState()
@@ -262,9 +279,13 @@ final class SystemVolumeController {
     private func handleDefaultDeviceChanged() {
         callbackQueue.async { [weak self] in
             guard let self else { return }
-            self.currentDeviceID = self.resolveDefaultDevice()
+            let newDeviceID = self.resolveDefaultDevice()
+            guard newDeviceID != self.deviceIDSnapshot() else { return }
+            self.withStateLock { self.currentDeviceID = newDeviceID }
             self.refreshPropertyElements()
-            self.installVolumeListeners(for: self.currentDeviceID)
+            // installVolumeListeners tears down the previous device's listeners
+            // before installing the new ones, so no separate removal is needed here.
+            self.installVolumeListeners(for: newDeviceID)
             self.notifyCurrentState()
             DispatchQueue.main.async {
                 self.onRouteChange?()
@@ -365,8 +386,13 @@ final class SystemVolumeController {
     }
 
     private func refreshPropertyElements() {
-        volumeElement = resolveElement(selector: kAudioDevicePropertyVolumeScalar, deviceID: currentDeviceID)
-        muteElement = resolveElement(selector: kAudioDevicePropertyMute, deviceID: currentDeviceID)
+        let deviceID = deviceIDSnapshot()
+        let resolvedVolume = resolveElement(selector: kAudioDevicePropertyVolumeScalar, deviceID: deviceID)
+        let resolvedMute = resolveElement(selector: kAudioDevicePropertyMute, deviceID: deviceID)
+        withStateLock {
+            volumeElement = resolvedVolume
+            muteElement = resolvedMute
+        }
     }
 
     private func resolveElement(selector: AudioObjectPropertySelector, deviceID: AudioDeviceID) -> AudioObjectPropertyElement? {
@@ -387,24 +413,28 @@ final class SystemVolumeController {
     }
 
     private func cachedElement(for selector: AudioObjectPropertySelector) -> AudioObjectPropertyElement? {
-        switch selector {
-        case kAudioDevicePropertyVolumeScalar:
-            return volumeElement
-        case kAudioDevicePropertyMute:
-            return muteElement
-        default:
-            return nil
+        withStateLock {
+            switch selector {
+            case kAudioDevicePropertyVolumeScalar:
+                return volumeElement
+            case kAudioDevicePropertyMute:
+                return muteElement
+            default:
+                return nil
+            }
         }
     }
 
     private func cache(element: AudioObjectPropertyElement, for selector: AudioObjectPropertySelector) {
-        switch selector {
-        case kAudioDevicePropertyVolumeScalar:
-            volumeElement = element
-        case kAudioDevicePropertyMute:
-            muteElement = element
-        default:
-            break
+        withStateLock {
+            switch selector {
+            case kAudioDevicePropertyVolumeScalar:
+                volumeElement = element
+            case kAudioDevicePropertyMute:
+                muteElement = element
+            default:
+                break
+            }
         }
     }
 
@@ -423,12 +453,13 @@ final class SystemVolumeController {
     }
 
     private func getData<T>(selector: AudioObjectPropertySelector, data: inout T) -> OSStatus {
+        let deviceID = deviceIDSnapshot()
         var lastStatus: OSStatus = kAudioHardwareUnspecifiedError
         for element in preferredElements(for: selector) {
             var address = makeAddress(selector: selector, element: element)
-            guard propertyExists(deviceID: currentDeviceID, address: &address) else { continue }
+            guard propertyExists(deviceID: deviceID, address: &address) else { continue }
             var size = UInt32(MemoryLayout<T>.size)
-            lastStatus = AudioObjectGetPropertyData(currentDeviceID, &address, 0, nil, &size, &data)
+            lastStatus = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &data)
             if lastStatus == noErr {
                 cache(element: element, for: selector)
                 return lastStatus
@@ -438,12 +469,13 @@ final class SystemVolumeController {
     }
 
     private func setData<T>(selector: AudioObjectPropertySelector, data: inout T) -> OSStatus {
+        let deviceID = deviceIDSnapshot()
         var lastStatus: OSStatus = kAudioHardwareUnspecifiedError
         for element in preferredElements(for: selector) {
             var address = makeAddress(selector: selector, element: element)
-            guard propertyExists(deviceID: currentDeviceID, address: &address) else { continue }
+            guard propertyExists(deviceID: deviceID, address: &address) else { continue }
             let size = UInt32(MemoryLayout<T>.size)
-            lastStatus = AudioObjectSetPropertyData(currentDeviceID, &address, 0, nil, size, &data)
+            lastStatus = AudioObjectSetPropertyData(deviceID, &address, 0, nil, size, &data)
             if lastStatus == noErr {
                 cache(element: element, for: selector)
                 return lastStatus
@@ -453,34 +485,38 @@ final class SystemVolumeController {
     }
 
     private func getData<T>(selector: AudioObjectPropertySelector, element: AudioObjectPropertyElement, data: inout T) -> OSStatus {
+        let deviceID = deviceIDSnapshot()
         var address = makeAddress(selector: selector, element: element)
-        guard propertyExists(deviceID: currentDeviceID, address: &address) else {
+        guard propertyExists(deviceID: deviceID, address: &address) else {
             return kAudioHardwareUnknownPropertyError
         }
         var size = UInt32(MemoryLayout<T>.size)
-        return AudioObjectGetPropertyData(currentDeviceID, &address, 0, nil, &size, &data)
+        return AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &data)
     }
 
     private func setData<T>(selector: AudioObjectPropertySelector, element: AudioObjectPropertyElement, data: inout T) -> OSStatus {
+        let deviceID = deviceIDSnapshot()
         var address = makeAddress(selector: selector, element: element)
-        guard propertyExists(deviceID: currentDeviceID, address: &address) else {
+        guard propertyExists(deviceID: deviceID, address: &address) else {
             return kAudioHardwareUnknownPropertyError
         }
         let size = UInt32(MemoryLayout<T>.size)
-        return AudioObjectSetPropertyData(currentDeviceID, &address, 0, nil, size, &data)
+        return AudioObjectSetPropertyData(deviceID, &address, 0, nil, size, &data)
     }
 
     private func volumeElements() -> [AudioObjectPropertyElement] {
-        candidateElements.filter { element in
+        let deviceID = deviceIDSnapshot()
+        return candidateElements.filter { element in
             var address = makeAddress(selector: kAudioDevicePropertyVolumeScalar, element: element)
-            return propertyExists(deviceID: currentDeviceID, address: &address)
+            return propertyExists(deviceID: deviceID, address: &address)
         }
     }
 
     private func muteElements() -> [AudioObjectPropertyElement] {
-        candidateElements.filter { element in
+        let deviceID = deviceIDSnapshot()
+        return candidateElements.filter { element in
             var address = makeAddress(selector: kAudioDevicePropertyMute, element: element)
-            return propertyExists(deviceID: currentDeviceID, address: &address)
+            return propertyExists(deviceID: deviceID, address: &address)
         }
     }
 }

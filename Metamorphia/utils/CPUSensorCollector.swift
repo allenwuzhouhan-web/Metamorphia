@@ -50,7 +50,9 @@ final class CPUSensorCollector {
     deinit {
         if let subscription {
             IOReportCreateSamples(subscription, nil, nil) // best-effort flush
+            IOReportFreeSubscription(subscription)
         }
+        subscription = nil
     }
 
     func readTemperature() -> CPUTemperatureMetrics {

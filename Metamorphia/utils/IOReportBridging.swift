@@ -64,6 +64,12 @@ func IOReportCreateSubscription(_ a: UnsafeMutableRawPointer?, _ b: CFMutableDic
 	return fn(a, b, c, d, e)
 }
 
+func IOReportFreeSubscription(_ subscription: IOReportSubscriptionRef?) {
+	typealias Fn = @convention(c) (IOReportSubscriptionRef?) -> Void
+	guard let fn: Fn = IOReportLoader.symbol("IOReportFreeSubscription", as: Fn.self) else { return }
+	fn(subscription)
+}
+
 func IOReportCreateSamples(_ subscription: IOReportSubscriptionRef?, _ channels: CFMutableDictionary?, _ client: CFTypeRef?) -> Unmanaged<CFDictionary>? {
 	typealias Fn = @convention(c) (IOReportSubscriptionRef?, CFMutableDictionary?, CFTypeRef?) -> Unmanaged<CFDictionary>?
 	guard let fn: Fn = IOReportLoader.symbol("IOReportCreateSamples", as: Fn.self) else { return nil }

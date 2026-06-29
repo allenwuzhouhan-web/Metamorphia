@@ -402,16 +402,22 @@ class MetamorphiaViewCoordinator: ObservableObject {
             return
         }
         DispatchQueue.main.async {
+            // Mutate a copy of the current value and assign it once so the
+            // property's didSet (and objectWillChange) fires a single time per
+            // presentation instead of once per mutated field. Copying the
+            // existing value (not a fresh one) preserves untouched fields.
+            var updated = self.sneakPeek
+            updated.show = status
+            updated.type = type
+            updated.value = value
+            updated.icon = icon
+            updated.title = title
+            updated.subtitle = subtitle
+            updated.accentColor = accentColor
+            updated.styleOverride = styleOverride
+            updated.targetScreenName = targetScreen?.localizedName
             withAnimation(.smooth(duration: 0.3)) {
-                self.sneakPeek.show = status
-                self.sneakPeek.type = type
-                self.sneakPeek.value = value
-                self.sneakPeek.icon = icon
-                self.sneakPeek.title = title
-                self.sneakPeek.subtitle = subtitle
-                self.sneakPeek.accentColor = accentColor
-                self.sneakPeek.styleOverride = styleOverride
-                self.sneakPeek.targetScreenName = targetScreen?.localizedName
+                self.sneakPeek = updated
             }
         }
     }

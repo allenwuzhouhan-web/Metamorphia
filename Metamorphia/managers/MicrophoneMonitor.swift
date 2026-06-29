@@ -36,7 +36,26 @@ private func microphonePropertyListener(
         print("MicrophoneMonitor: 📢 Microphone property changed")
         monitor.checkMicrophoneStatus()
     }
-    
+
+    return noErr
+}
+
+// MARK: - Default Input Device Change Callback
+// C function pointer fired when the system default input device changes
+private func defaultInputDeviceListener(
+    inObjectID: AudioObjectID,
+    inNumberAddresses: UInt32,
+    inAddresses: UnsafePointer<AudioObjectPropertyAddress>,
+    inClientData: UnsafeMutableRawPointer?
+) -> OSStatus {
+    guard let context = inClientData else { return noErr }
+    let monitor = Unmanaged<MicrophoneMonitor>.fromOpaque(context).takeUnretainedValue()
+
+    DispatchQueue.main.async {
+        print("MicrophoneMonitor: 📢 Default input device changed")
+        monitor.handleDefaultInputDeviceChange()
+    }
+
     return noErr
 }
 
@@ -50,6 +69,7 @@ class MicrophoneMonitor: ObservableObject {
     // MARK: - Private Properties
     private var defaultInputDevice: AudioDeviceID = 0
     private var isListenerRegistered: Bool = false
+    private var isDeviceChangeListenerRegistered: Bool = false
     private var cancellables = Set<AnyCancellable>()
     
     // MARK: - Configuration
@@ -61,23 +81,57 @@ class MicrophoneMonitor: ObservableObject {
     }
     
     deinit {
-        // Clean up listener synchronously
-        // Remove property listener
-        if isListenerRegistered, defaultInputDevice != 0 {
-            var address = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMaster
-            )
-            
-            let context = Unmanaged.passUnretained(self).toOpaque()
-            
-            AudioObjectRemovePropertyListener(
-                defaultInputDevice,
-                &address,
-                microphonePropertyListener,
-                context
-            )
+        // `deinit` is nonisolated and can run on any thread, so copy the
+        // listener state into locals here (the instance is being torn down,
+        // no other code can touch it) and hop the CoreAudio removals to the
+        // main thread to avoid touching main-actor state off the main actor.
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        // Read the device into a local first: referencing the main-actor
+        // property inside the `&&` autoclosure would cross actor isolation.
+        let device = defaultInputDevice
+        let removeRunningListener = isListenerRegistered && device != 0
+        let removeDeviceChangeListener = isDeviceChangeListenerRegistered
+
+        guard removeRunningListener || removeDeviceChangeListener else { return }
+
+        let cleanup: () -> Void = {
+            // Remove property listener
+            if removeRunningListener {
+                var address = AudioObjectPropertyAddress(
+                    mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+                    mScope: kAudioObjectPropertyScopeGlobal,
+                    mElement: kAudioObjectPropertyElementMaster
+                )
+
+                AudioObjectRemovePropertyListener(
+                    device,
+                    &address,
+                    microphonePropertyListener,
+                    context
+                )
+            }
+
+            // Remove default-input-device change listener
+            if removeDeviceChangeListener {
+                var address = AudioObjectPropertyAddress(
+                    mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                    mScope: kAudioObjectPropertyScopeGlobal,
+                    mElement: kAudioObjectPropertyElementMaster
+                )
+
+                AudioObjectRemovePropertyListener(
+                    AudioObjectID(kAudioObjectSystemObject),
+                    &address,
+                    defaultInputDeviceListener,
+                    context
+                )
+            }
+        }
+
+        if Thread.isMainThread {
+            cleanup()
+        } else {
+            DispatchQueue.main.async(execute: cleanup)
         }
     }
     
@@ -109,10 +163,13 @@ class MicrophoneMonitor: ObservableObject {
         
         // Setup event listener
         setupPropertyListener()
-        
+
+        // Observe default-input-device changes so we re-bind on switch
+        setupDeviceChangeListener()
+
         // Check initial state
         checkMicrophoneStatus()
-        
+
         print("MicrophoneMonitor: ✅ Started monitoring (event-driven only)")
     }
     
@@ -131,7 +188,12 @@ class MicrophoneMonitor: ObservableObject {
         if isListenerRegistered {
             removePropertyListener()
         }
-        
+
+        // Remove default-input-device change listener
+        if isDeviceChangeListenerRegistered {
+            removeDeviceChangeListener()
+        }
+
         // Reset state
         if isMicActive {
             isMicActive = false
@@ -251,7 +313,85 @@ class MicrophoneMonitor: ObservableObject {
             print("MicrophoneMonitor: ⚠️ Failed to remove property listener (status: \(status))")
         }
     }
-    
+
+    /// Setup listener for system default-input-device changes
+    private func setupDeviceChangeListener() {
+        guard !isDeviceChangeListenerRegistered else { return }
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMaster
+        )
+
+        let context = Unmanaged.passUnretained(self).toOpaque()
+
+        let status = AudioObjectAddPropertyListener(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            defaultInputDeviceListener,
+            context
+        )
+
+        if status == noErr {
+            isDeviceChangeListenerRegistered = true
+            print("MicrophoneMonitor: ✅ Device-change listener registered")
+        } else {
+            print("MicrophoneMonitor: ⚠️ Failed to register device-change listener (status: \(status))")
+        }
+    }
+
+    /// Remove listener for system default-input-device changes
+    private func removeDeviceChangeListener() {
+        guard isDeviceChangeListenerRegistered else { return }
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMaster
+        )
+
+        let context = Unmanaged.passUnretained(self).toOpaque()
+
+        let status = AudioObjectRemovePropertyListener(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            defaultInputDeviceListener,
+            context
+        )
+
+        if status == noErr {
+            isDeviceChangeListenerRegistered = false
+            print("MicrophoneMonitor: ✅ Device-change listener removed")
+        } else {
+            print("MicrophoneMonitor: ⚠️ Failed to remove device-change listener (status: \(status))")
+        }
+    }
+
+    /// Re-bind the running-somewhere listener after the default input device changes
+    func handleDefaultInputDeviceChange() {
+        guard isMonitoring else { return }
+
+        // Detach the listener from the old device before switching
+        if isListenerRegistered {
+            removePropertyListener()
+        }
+
+        // Refresh to the new default input device
+        defaultInputDevice = getDefaultInputDevice()
+        guard defaultInputDevice != 0 else {
+            print("MicrophoneMonitor: ⚠️ No input device found after change")
+            checkMicrophoneStatus()
+            return
+        }
+
+        print("MicrophoneMonitor: 🎤 Re-bound to input device ID: \(defaultInputDevice)")
+
+        // Re-register on the new device and refresh state
+        setupPropertyListener()
+        checkMicrophoneStatus()
+    }
+
     /// Check current microphone status
     func checkMicrophoneStatus() {
         guard defaultInputDevice != 0 else { return }

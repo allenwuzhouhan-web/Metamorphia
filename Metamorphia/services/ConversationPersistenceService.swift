@@ -196,6 +196,18 @@ public final class ConversationPersistenceService {
                 createdAt: now
             )
         }
+
+        // Cap the in-memory mirror so a long-running session can't grow
+        // `self.turns` without bound. Keep the most recent `mirrorCap` turns;
+        // the read paths (`decayedAndCapped`/`previousChatMessages`) cap
+        // further to a smaller `maxTurns` by strength, so trimming the tail of
+        // the full-text mirror here does not change what they return.
+        let mirrorCap = 40
+        if self.turns.count > mirrorCap {
+            self.turns.sort { $0.createdAt < $1.createdAt }
+            self.turns.removeFirst(self.turns.count - mirrorCap)
+        }
+
         scheduleWrite()
     }
 

@@ -43,10 +43,13 @@ struct DownloadArea: View {
     @EnvironmentObject var watcher: DownloadWatcher
 
     var body: some View {
-        if let first = watcher.downloadFiles.first {
+        guard let file = watcher.downloadFiles.first else {
+            return AnyView(EmptyView())
+        }
+        return AnyView(
             HStack(alignment: .center) {
                 HStack {
-                    if first.browser == .safari {
+                    if file.browser == .safari {
                         AppIcon(for: "com.apple.safari")
                     } else {
                         Image(.chrome).resizable().scaledToFit().frame(width: 30, height: 30)
@@ -59,11 +62,11 @@ struct DownloadArea: View {
                 Spacer()
                 HStack(spacing: 12) {
                     VStack(alignment: .trailing) {
-                        Text(first.formattedSize)
-                        Text(first.name).font(.caption2).foregroundStyle(.gray)
+                        Text(file.formattedSize)
+                        Text(file.name).font(.caption2).foregroundStyle(.gray)
                     }
                 }
             }
-        }
+        )
     }
 }
