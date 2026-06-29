@@ -19,6 +19,16 @@ struct PowerPointDesignRoute {
     let deckRestoreData: [PowerPointRestoreData]
 }
 
+struct PowerPointFinishRoute {
+    let filePath: String?
+    let commandContextBlock: String
+    let systemPromptSuffix: String
+    let slideCount: Int
+    let deckRestoreData: [PowerPointRestoreData]
+    let palette: PowerPointDesignPalette
+    let typography: PowerPointDesignTypography
+}
+
 struct PowerPointDeckReviewSnapshot: Sendable, Hashable {
     let presentationTitle: String
     let filePath: String?
@@ -123,6 +133,12 @@ enum PowerPointDirectEditPreparation {
 enum PowerPointDesignPreparation {
     case notPowerPointDesignIntent
     case route(PowerPointDesignRoute)
+    case failure(String)
+}
+
+enum PowerPointFinishPreparation {
+    case notPowerPointFinishIntent
+    case route(PowerPointFinishRoute)
     case failure(String)
 }
 
@@ -639,6 +655,296 @@ enum PowerPointCopilot {
             deckContext: deck,
             deckRestoreData: restoreItems
         ))
+    }
+
+    // MARK: - Finish deck (author missing/partial content in the deck's style)
+
+    /// "Finish this deck" intent: a finish verb plus a deck target (or PowerPoint
+    /// open), excluding create-from-scratch requests.
+    static func isFinishIntent(prompt: String) -> Bool {
+        let normalized = prompt.lowercased()
+        let finishVerbs = [
+            "finish it", "finish this deck", "finish the deck", "finish this presentation",
+            "finish the presentation", "finish the slides", "finish my deck",
+            "complete this deck", "complete the deck", "complete this presentation",
+            "complete the presentation", "fill in the deck", "fill in the missing slides",
+            "flesh out the deck", "flesh out the slides", "build out the rest",
+            "finish the rest", "complete the rest",
+        ]
+        let exclusions = ["create a deck", "make me a deck", "build a new deck", "new presentation", "from scratch", "speaker notes"]
+        guard !exclusions.contains(where: { normalized.contains($0) }) else { return false }
+        guard finishVerbs.contains(where: { normalized.contains($0) }) else { return false }
+        return isPowerPointFrontmost || isPowerPointOpen || normalized.contains("deck") || normalized.contains("presentation") || normalized.contains("slides")
+    }
+
+    /// Capture the open deck, detect what's missing/partial, extract the deck's own
+    /// palette + typography, and build a route asking the model to author the gaps
+    /// in that established style.
+    static func prepareFinishRoute(prompt: String) async -> PowerPointFinishPreparation {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, isFinishIntent(prompt: trimmed) else { return .notPowerPointFinishIntent }
+
+        let deck: PowerPointDeckContext
+        switch await captureDeck() {
+        case .success(let captured):
+            deck = captured
+        case .failure(let message):
+            return .failure(message)
+        }
+        guard !deck.slides.isEmpty else {
+            return .failure("The open PowerPoint deck has no slides to finish.")
+        }
+
+        let typography = extractedDeckTypography(from: deck)
+        let palette = extractedDeckPalette(from: deck)
+        let gapReport = finishGapReport(for: deck)
+        guard !gapReport.isEmpty else {
+            return .failure("This deck already looks complete — I couldn't find empty placeholders, partial slides, or uncovered outline sections to finish.")
+        }
+        let restoreItems = deck.slides.map(restoreData(for:))
+
+        let contextBlock = """
+        PowerPoint deck to finish:
+        - Presentation: \(deck.presentationTitle)
+        - File path: \(deck.filePath ?? "unavailable")
+        - Slide count: \(deck.slideCount)
+        - Active slide: \(deck.activeSlideIndex)
+        - User request: \(trimmed)
+
+        Established design language (author IN this style — do not introduce new fonts or colors):
+        - Palette: primary #\(palette.primary), secondary #\(palette.secondary), accent #\(palette.accent), text #\(palette.text), background #\(palette.background)
+        - Typography: title \(typography.titleFont) \(Int(typography.titleSize))pt, body \(typography.bodyFont) \(Int(typography.bodySize))pt
+
+        Gaps detected (author content for each):
+        \(gapReport.joined(separator: "\n"))
+        """
+
+        let systemPromptSuffix = """
+
+        ## PowerPoint Finish-Deck Mode
+        You are completing a half-finished Microsoft PowerPoint deck. Author the MISSING and
+        PARTIAL content the user has not written yet. Do NOT restyle, reorder, or rewrite slides
+        that are already complete.
+        Stay inside the deck's established design language given above — echo its palette and
+        typography tokens on every operation; never invent new fonts or colors.
+        Authoring rules:
+        - Match the voice, length, and density of the deck's existing complete slides.
+        - Body content is short, skim-friendly lines (use \\n between bullets) — never walls of text.
+        - Never invent data, statistics, names, quotes, or citations.
+        - For addSlide: write a title plus 3-5 concise body lines that deliver the named outline section.
+        - No accent stripes, title underlines, or color bars (they read as AI filler).
+        Start with a short human-readable summary paragraph.
+        Then emit exactly one machine-readable block with no code fence:
+        [PPT_FINISH]
+        {"presentationTitle":"\(escapeJSONString(deck.presentationTitle))","sourceFilePath":"\(escapeJSONString(deck.filePath ?? ""))","slideCount":\(deck.slideCount),"summary":"...","palette":{"name":"Deck","primary":"\(palette.primary)","secondary":"\(palette.secondary)","accent":"\(palette.accent)","background":"\(palette.background)","text":"\(palette.text)","mutedText":"\(palette.mutedText)"},"typography":{"titleFont":"\(escapeJSONString(typography.titleFont))","bodyFont":"\(escapeJSONString(typography.bodyFont))","titleSize":\(Int(typography.titleSize)),"bodySize":\(Int(typography.bodySize))},"operations":[{"kind":"fillPlaceholder|completeSlide|addSlide","slideIndex":4,"shapeIndex":3,"shapeName":"Content Placeholder 2","slideTitle":"","outlineReference":"","spans":[{"role":"title|body","text":"..."}],"titleFont":"\(escapeJSONString(typography.titleFont))","bodyFont":"\(escapeJSONString(typography.bodyFont))","titleSize":\(Int(typography.titleSize)),"bodySize":\(Int(typography.bodySize)),"textColorHex":"\(palette.text)","rationale":"..."}]}
+        [/PPT_FINISH]
+        """
+
+        return .route(PowerPointFinishRoute(
+            filePath: deck.filePath,
+            commandContextBlock: contextBlock,
+            systemPromptSuffix: systemPromptSuffix,
+            slideCount: deck.slideCount,
+            deckRestoreData: restoreItems,
+            palette: palette,
+            typography: typography
+        ))
+    }
+
+    /// Per-slide gap detection. Returns human-readable gap lines embedded in the
+    /// prompt; the model authors content for each rather than re-detecting.
+    private static func finishGapReport(for deck: PowerPointDeckContext) -> [String] {
+        var gaps: [String] = []
+        let markerPatterns = ["todo", "tbd", "wip", "lorem ipsum", "[ ]", "[insert", "[add", "[your", "click to add", "placeholder", "xxx"]
+
+        for slide in deck.slides {
+            let titleShape = slide.shapes.first(where: { $0.role == .title })
+            let bodyShapes = slide.shapes.filter { $0.role == .body }
+            let title = (slide.slideTitle ?? titleShape?.text ?? "Untitled").trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Marker scan.
+            for shape in slide.shapes {
+                let lower = shape.text.lowercased()
+                if markerPatterns.contains(where: { lower.contains($0) }) {
+                    gaps.append("- Slide \(slide.slideIndex) shape #\(shape.index) (\(shape.role.rawValue)) has a placeholder/marker: replace with real content.")
+                }
+            }
+
+            // Title-only / structurally thin slide.
+            let hasRealBody = bodyShapes.contains { $0.text.trimmingCharacters(in: .whitespacesAndNewlines).count >= 12 }
+            if titleShape != nil, !title.isEmpty, !hasRealBody {
+                gaps.append("- Slide \(slide.slideIndex) \"\(promptText(title))\" has a title but no body content: author supporting body text.")
+            }
+        }
+
+        gaps.append(contentsOf: outlineCoverageGaps(for: deck))
+        // De-duplicate while preserving order.
+        var seen = Set<String>()
+        return gaps.filter { seen.insert($0).inserted }
+    }
+
+    /// Find an agenda/outline slide and flag outline items that no later slide covers.
+    private static func outlineCoverageGaps(for deck: PowerPointDeckContext) -> [String] {
+        let outlineTitles = ["agenda", "outline", "overview", "contents", "table of contents", "roadmap", "what we'll cover", "what we will cover", "topics"]
+        guard let outlineSlide = deck.slides.first(where: { slide in
+            let title = (slide.slideTitle ?? slide.shapes.first(where: { $0.role == .title })?.text ?? "").lowercased()
+            return outlineTitles.contains { title.contains($0) }
+        }) else { return [] }
+
+        let bodyText = outlineSlide.shapes.filter { $0.role == .body }.map(\.text).joined(separator: "\n")
+        let items = bodyText
+            .components(separatedBy: .newlines)
+            .map { stripBulletMarker($0) }
+            .filter { $0.count >= 3 }
+        guard items.count >= 2 else { return [] }
+
+        var gaps: [String] = []
+        for item in items {
+            let covered = deck.slides.contains { slide in
+                guard slide.slideIndex != outlineSlide.slideIndex else { return false }
+                let haystack = ((slide.slideTitle ?? "") + " " + (slide.shapes.first(where: { $0.role == .body })?.text ?? "")).lowercased()
+                return tokenOverlap(item.lowercased(), haystack) >= 0.5
+            }
+            if !covered {
+                gaps.append("- Outline lists \"\(promptText(item))\" but no slide covers it: add a slide for this section.")
+            }
+        }
+        return gaps
+    }
+
+    private static func stripBulletMarker(_ line: String) -> String {
+        var trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        while let first = trimmed.first, "•-*◦▪·0123456789.()".contains(first) {
+            trimmed.removeFirst()
+            trimmed = trimmed.trimmingCharacters(in: .whitespaces)
+        }
+        return trimmed
+    }
+
+    /// Jaccard overlap of stop-word-stripped token sets — conservative coverage test.
+    private static func tokenOverlap(_ a: String, _ b: String) -> Double {
+        let stop: Set<String> = ["the", "and", "for", "with", "our", "your", "their", "a", "an", "of", "to", "in", "on", "is", "are"]
+        func tokens(_ s: String) -> Set<String> {
+            Set(s.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { $0.count > 2 && !stop.contains($0) })
+        }
+        let ta = tokens(a)
+        let tb = tokens(b)
+        guard !ta.isEmpty else { return 0 }
+        let shared = ta.intersection(tb).count
+        return Double(shared) / Double(ta.count)
+    }
+
+    private static func extractedDeckTypography(from deck: PowerPointDeckContext) -> PowerPointDesignTypography {
+        let allShapes = deck.slides.flatMap { $0.shapes }
+        let titleShapes = allShapes.filter { $0.role == .title }
+        let bodyShapes = allShapes.filter { $0.role == .body }
+        let titleFont = mostCommon(titleShapes.compactMap { $0.fontName }) ?? mostCommon(allShapes.compactMap { $0.fontName }) ?? "Calibri"
+        let bodyFont = mostCommon(bodyShapes.compactMap { $0.fontName }) ?? titleFont
+        let titleSize = mostCommon(titleShapes.compactMap { $0.fontSize.map { Int($0.rounded()) } }).map(Double.init) ?? 36
+        let bodySize = mostCommon(bodyShapes.compactMap { $0.fontSize.map { Int($0.rounded()) } }).map(Double.init) ?? 16
+        return PowerPointDesignTypography(titleFont: titleFont, bodyFont: bodyFont, titleSize: titleSize, bodySize: bodySize)
+    }
+
+    private static func extractedDeckPalette(from deck: PowerPointDeckContext) -> PowerPointDesignPalette {
+        let allShapes = deck.slides.flatMap { $0.shapes }
+        let textHexes = allShapes.compactMap { $0.fontColor.flatMap(hexFromCapturedColor) }
+        let dominantText = mostCommon(textHexes) ?? "111827"
+        return PowerPointDesignPalette(
+            name: "Deck",
+            primary: dominantText,
+            secondary: "E5E7EB",
+            accent: "2563EB",
+            background: "FFFFFF",
+            text: dominantText,
+            mutedText: "6B7280"
+        )
+    }
+
+    /// Captured PowerPoint colors may be 8-bit or 16-bit per channel; normalize to a 6-hex string.
+    private static func hexFromCapturedColor(_ rgb: [Int]) -> String? {
+        guard rgb.count == 3 else { return nil }
+        let scaled = rgb.map { channel -> Int in
+            let v = channel > 255 ? Int((Double(channel) / 257.0).rounded()) : channel
+            return min(255, max(0, v))
+        }
+        return String(format: "%02X%02X%02X", scaled[0], scaled[1], scaled[2])
+    }
+
+    private static func mostCommon<T: Hashable>(_ values: [T]) -> T? {
+        guard !values.isEmpty else { return nil }
+        var counts: [T: Int] = [:]
+        for value in values { counts[value, default: 0] += 1 }
+        return counts.max(by: { $0.value < $1.value })?.key
+    }
+
+    /// Clamp authored operations to the deck's real style, drop no-ops, and stamp
+    /// the deck-derived palette/typography + restore data onto the result.
+    static func resolvedFinish(
+        _ finish: PowerPointFinishResult,
+        route: PowerPointFinishRoute
+    ) -> PowerPointFinishResult {
+        let operations = finish.operations.compactMap { op -> PowerPointFinishOperation? in
+            guard !op.combinedText.isEmpty else { return nil }
+            return PowerPointFinishOperation(
+                kind: op.kind,
+                slideIndex: max(1, op.slideIndex),
+                shapeIndex: op.shapeIndex,
+                shapeName: op.shapeName,
+                slideTitle: op.slideTitle,
+                outlineReference: op.outlineReference,
+                spans: op.spans.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty },
+                titleFont: op.titleFont ?? route.typography.titleFont,
+                bodyFont: op.bodyFont ?? route.typography.bodyFont,
+                titleSize: op.titleSize ?? route.typography.titleSize,
+                bodySize: op.bodySize ?? route.typography.bodySize,
+                textColorHex: normalizedHexColor(op.textColorHex ?? route.palette.text, fallback: route.palette.text),
+                rationale: op.rationale
+            )
+        }
+        return PowerPointFinishResult(
+            presentationTitle: finish.presentationTitle,
+            sourceFilePath: route.filePath,
+            slideCount: route.slideCount,
+            summary: finish.summary,
+            palette: route.palette,
+            typography: route.typography,
+            operations: operations,
+            deckRestoreData: route.deckRestoreData
+        )
+    }
+
+    static func performFinishAction(
+        _ action: PowerPointFinishAction,
+        finish: PowerPointFinishResult
+    ) async -> PowerPointRewriteOutcome {
+        switch action {
+        case .jump(let slideIndex):
+            return await jump(toSlide: slideIndex, presentationTitle: finish.presentationTitle)
+
+        case .apply, .restore, .undo:
+            // STUB — pending validation against live PowerPoint.
+            //
+            // The authoring AppleScript is the one genuinely untestable surface
+            // (PowerPoint's slide-creation dictionary is version-sensitive), so it
+            // is intentionally not wired to mutate the user's deck in this build.
+            //
+            // Intended apply (per the approved plan): back up the .pptx via the
+            // DocumentCopilot.createBackup pattern, then for each operation —
+            //   fillPlaceholder / completeSlide:
+            //     set content of text range of text frame of (shape K of slide N) to <span text>
+            //     (or `make new shape` for a body box at the deck's canonical body rect),
+            //     then set font name/size/color from the op's tokens.
+            //   addSlide (duplicate-template strategy, per the locked decision):
+            //     duplicate a representative complete content slide, clear its body,
+            //     author the title + body spans into it, then set its slide index.
+            //   Name authored shapes/slides "Metamorphia Finish …" so Restore can sweep them.
+            // Wrap each step in `try`; on failure fall back to fill/complete only.
+            return PowerPointRewriteOutcome(
+                success: false,
+                message: "Finish preview is ready. Writing the authored slides into PowerPoint is pending validation against a live deck in an Xcode build, so I haven't modified \(finish.presentationTitle) yet. Use Jump to review the target slides."
+            )
+        }
     }
 
     static func resolvedRewrite(
@@ -2027,17 +2333,16 @@ enum PowerPointCopilot {
                 return ""
             }
         }()
-        let shapeBlocks = (1...maxDirectEditShapeSlots).map { shapeIndex in
-            """
-                if shapeCount >= \(shapeIndex) then
+        let shapeBlocks = """
+            repeat with shapeIndex from 1 to shapeCount
                     try
-                        set textRef to text range of text frame of shape \(shapeIndex) of slideRef
+                        set textRef to text range of text frame of shape shapeIndex of slideRef
                         set shapeText to content of textRef
                         if shapeText is not "" then
                             set fontRef to font of textRef
                             set shapeName to ""
                             try
-                                set shapeName to name of shape \(shapeIndex) of slideRef
+                                set shapeName to name of shape shapeIndex of slideRef
                             end try
                             set fontNameValue to ""
                             set fontSizeValue to "null"
@@ -2070,7 +2375,7 @@ enum PowerPointCopilot {
                             end try
                             if snapshotItems is not "" then set snapshotItems to snapshotItems & ","
                             set snapshotItems to snapshotItems & "{"
-                            set snapshotItems to snapshotItems & q & "shapeIndex" & q & ":" & \(shapeIndex) & ","
+                            set snapshotItems to snapshotItems & q & "shapeIndex" & q & ":" & shapeIndex & ","
                             set snapshotItems to snapshotItems & q & "shapeName" & q & ":" & q & my jsonEscape(shapeName) & q & ","
                             set snapshotItems to snapshotItems & q & "text" & q & ":" & q & my jsonEscape(shapeText) & q & ","
                             set snapshotItems to snapshotItems & q & "fontName" & q & ":" & q & my jsonEscape(fontNameValue) & q & ","
@@ -2082,21 +2387,20 @@ enum PowerPointCopilot {
                             set snapshotItems to snapshotItems & q & "fontColor" & q & ":" & colorValueJSON
                             set snapshotItems to snapshotItems & "}"
                             \(applyLine)
-                            set appliedItems to my appendIndex(appliedItems, \(shapeIndex))
+                            set appliedItems to my appendIndex(appliedItems, shapeIndex)
                         else
-                            set skippedItems to my appendIndex(skippedItems, \(shapeIndex))
+                            set skippedItems to my appendIndex(skippedItems, shapeIndex)
                         end if
                     on error errMsg number errNum
-                        set skippedItems to my appendIndex(skippedItems, \(shapeIndex))
+                        set skippedItems to my appendIndex(skippedItems, shapeIndex)
                         if errorCount < 5 then
                             if errorItems is not "" then set errorItems to errorItems & ","
-                            set errorItems to errorItems & q & "#" & \(shapeIndex) & " " & errNum & ": " & my jsonEscape(errMsg) & q
+                            set errorItems to errorItems & q & "#" & shapeIndex & " " & errNum & ": " & my jsonEscape(errMsg) & q
                             set errorCount to errorCount + 1
                         end if
                     end try
-                end if
-            """
-        }.joined(separator: "\n")
+            end repeat
+        """
 
         return """
         on replaceText(findText, replacementText, sourceText)
@@ -2596,59 +2900,89 @@ enum PowerPointCopilot {
             .joined(separator: " & linefeed & ")
     }
 
-    private static var deckCaptureScript: String {
-        let shapeBlocks = (1...maxDirectEditShapeSlots).map { shapeIndex in
-            """
-                    if shapeCount >= \(shapeIndex) then
+    /// One bounded loop over a slide's shapes, building the shape JSON. Replaces a
+    /// 200x-unrolled block that produced a ~9,600-line script and crashed the OSA
+    /// engine (SIGBUS). Uses proper PowerPoint geometry properties, not raw codes.
+    private static let shapeCaptureLoop = """
+            repeat with shapeIndex from 1 to shapeCount
+                try
+                    set shp to shape shapeIndex of slideRef
+                    set shapeText to ""
+                    try
+                        set shapeText to content of text range of text frame of shp
+                    end try
+                    if shapeText is not "" then
+                        set shapeName to ""
+                        set fontNameValue to ""
+                        set fontSizeValue to "null"
+                        set boldValue to "null"
+                        set italicValue to "null"
+                        set underlineValue to "null"
+                        set alignmentValue to "null"
+                        set colorValueJSON to "null"
+                        set leftValue to "0"
+                        set topValue to "0"
+                        set widthValue to "0"
+                        set heightValue to "0"
                         try
-                            set shp to shape \(shapeIndex) of slideRef
-                            set textRef to text range of text frame of shp
-                            set shapeText to content of textRef
-                            if shapeText is not "" then
-                                set shapeName to ""
-                                set fontNameValue to ""
-                                set fontSizeValue to "null"
-                                set boldValue to "null"
-                                set italicValue to "null"
-                                set underlineValue to "null"
-                                set alignmentValue to "null"
-                                set colorValueJSON to "null"
-                                try
-                                    set shapeName to name of shp
-                                end try
-                                try
-                                    set fontRef to font of textRef
-                                    set fontNameValue to name of fontRef
-                                    set fontSizeValue to font size of fontRef as text
-                                    set boldValue to my jsonBool(bold of fontRef)
-                                    set italicValue to my jsonBool(italic of fontRef)
-                                    set underlineValue to my jsonBool(underline of fontRef)
-                                    set alignmentValue to alignment of paragraph format of textRef as integer as text
-                                    set fontColorValue to font color of fontRef
-                                    set colorValueJSON to "[" & (item 1 of fontColorValue) & "," & (item 2 of fontColorValue) & "," & (item 3 of fontColorValue) & "]"
-                                end try
-                                if shapeJSON is not "" then set shapeJSON to shapeJSON & ","
-                                set shapeJSON to shapeJSON & "{"
-                                set shapeJSON to shapeJSON & q & "index" & q & ":" & \(shapeIndex) & ","
-                                set shapeJSON to shapeJSON & q & "name" & q & ":" & q & my jsonEscape(shapeName) & q & ","
-                                set shapeJSON to shapeJSON & q & "text" & q & ":" & q & my jsonEscape(shapeText) & q & ","
-                                set shapeJSON to shapeJSON & q & "left" & q & ":" & («property plft» of shp) & ","
-                                set shapeJSON to shapeJSON & q & "top" & q & ":" & («property ptop» of shp) & ","
-                                set shapeJSON to shapeJSON & q & "width" & q & ":" & («property pwid» of shp) & ","
-                                set shapeJSON to shapeJSON & q & "height" & q & ":" & («property hght» of shp) & ","
-                                set shapeJSON to shapeJSON & q & "fontName" & q & ":" & q & my jsonEscape(fontNameValue) & q & ","
-                                set shapeJSON to shapeJSON & q & "fontSize" & q & ":" & fontSizeValue & ","
-                                set shapeJSON to shapeJSON & q & "bold" & q & ":" & boldValue & ","
-                                set shapeJSON to shapeJSON & q & "italic" & q & ":" & italicValue & ","
-                                set shapeJSON to shapeJSON & q & "underline" & q & ":" & underlineValue & ","
-                                set shapeJSON to shapeJSON & q & "alignment" & q & ":" & alignmentValue & ","
-                                set shapeJSON to shapeJSON & q & "fontColor" & q & ":" & colorValueJSON
-                                set shapeJSON to shapeJSON & "}"
-                            end if
+                            set shapeName to name of shp
                         end try
+                        try
+                            set leftValue to (left position of shp) as text
+                            set topValue to (top of shp) as text
+                            set widthValue to (width of shp) as text
+                            set heightValue to (height of shp) as text
+                        end try
+                        try
+                            set textRef to text range of text frame of shp
+                            set fontRef to font of textRef
+                            try
+                                set fontNameValue to name of fontRef
+                            end try
+                            try
+                                set fontSizeValue to (font size of fontRef) as text
+                            end try
+                            try
+                                set boldValue to my jsonBool(bold of fontRef)
+                            end try
+                            try
+                                set italicValue to my jsonBool(italic of fontRef)
+                            end try
+                            try
+                                set underlineValue to my jsonBool(underline of fontRef)
+                            end try
+                            try
+                                set alignmentValue to (alignment of paragraph format of textRef as integer) as text
+                            end try
+                            try
+                                set fontColorValue to font color of fontRef
+                                set colorValueJSON to "[" & (item 1 of fontColorValue) & "," & (item 2 of fontColorValue) & "," & (item 3 of fontColorValue) & "]"
+                            end try
+                        end try
+                        if shapeJSON is not "" then set shapeJSON to shapeJSON & ","
+                        set shapeJSON to shapeJSON & "{"
+                        set shapeJSON to shapeJSON & q & "index" & q & ":" & shapeIndex & ","
+                        set shapeJSON to shapeJSON & q & "name" & q & ":" & q & my jsonEscape(shapeName) & q & ","
+                        set shapeJSON to shapeJSON & q & "text" & q & ":" & q & my jsonEscape(shapeText) & q & ","
+                        set shapeJSON to shapeJSON & q & "left" & q & ":" & leftValue & ","
+                        set shapeJSON to shapeJSON & q & "top" & q & ":" & topValue & ","
+                        set shapeJSON to shapeJSON & q & "width" & q & ":" & widthValue & ","
+                        set shapeJSON to shapeJSON & q & "height" & q & ":" & heightValue & ","
+                        set shapeJSON to shapeJSON & q & "fontName" & q & ":" & q & my jsonEscape(fontNameValue) & q & ","
+                        set shapeJSON to shapeJSON & q & "fontSize" & q & ":" & fontSizeValue & ","
+                        set shapeJSON to shapeJSON & q & "bold" & q & ":" & boldValue & ","
+                        set shapeJSON to shapeJSON & q & "italic" & q & ":" & italicValue & ","
+                        set shapeJSON to shapeJSON & q & "underline" & q & ":" & underlineValue & ","
+                        set shapeJSON to shapeJSON & q & "alignment" & q & ":" & alignmentValue & ","
+                        set shapeJSON to shapeJSON & q & "fontColor" & q & ":" & colorValueJSON
+                        set shapeJSON to shapeJSON & "}"
                     end if
-            """
-        }.joined(separator: "\n")
+                end try
+            end repeat
+    """
+
+    private static var deckCaptureScript: String {
+        let shapeBlocks = shapeCaptureLoop
 
         return """
         on replaceText(findText, replacementText, sourceText)
@@ -2695,7 +3029,12 @@ enum PowerPointCopilot {
             set presName to name of presRef
             set presPath to ""
             try
-                set presPath to POSIX path of (full name of presRef as alias)
+                set rawPath to (full name of presRef) as text
+            if rawPath starts with "/" then
+                set presPath to rawPath
+            else
+                set presPath to POSIX path of rawPath
+            end if
             end try
             set activeSlideIndex to 1
             try
@@ -2730,58 +3069,7 @@ enum PowerPointCopilot {
     }
 
     private static var currentSlideCaptureScript: String {
-        let shapeBlocks = (1...maxDirectEditShapeSlots).map { shapeIndex in
-            """
-                if shapeCount >= \(shapeIndex) then
-                    try
-                        set shp to shape \(shapeIndex) of slideRef
-                        set textRef to text range of text frame of shp
-                        set shapeText to content of textRef
-                        if shapeText is not "" then
-                            set shapeName to ""
-                            set fontNameValue to ""
-                            set fontSizeValue to "null"
-                            set boldValue to "null"
-                            set italicValue to "null"
-                            set underlineValue to "null"
-                            set alignmentValue to "null"
-                            set colorValueJSON to "null"
-                            try
-                                set shapeName to name of shp
-                            end try
-                            try
-                                set fontRef to font of textRef
-                                set fontNameValue to name of fontRef
-                                set fontSizeValue to font size of fontRef as text
-                                set boldValue to my jsonBool(bold of fontRef)
-                                set italicValue to my jsonBool(italic of fontRef)
-                                set underlineValue to my jsonBool(underline of fontRef)
-                                set alignmentValue to alignment of paragraph format of textRef as integer as text
-                                set fontColorValue to font color of fontRef
-                                set colorValueJSON to "[" & (item 1 of fontColorValue) & "," & (item 2 of fontColorValue) & "," & (item 3 of fontColorValue) & "]"
-                            end try
-                            if shapeJSON is not "" then set shapeJSON to shapeJSON & ","
-                            set shapeJSON to shapeJSON & "{"
-                            set shapeJSON to shapeJSON & q & "index" & q & ":" & \(shapeIndex) & ","
-                            set shapeJSON to shapeJSON & q & "name" & q & ":" & q & my jsonEscape(shapeName) & q & ","
-                            set shapeJSON to shapeJSON & q & "text" & q & ":" & q & my jsonEscape(shapeText) & q & ","
-                            set shapeJSON to shapeJSON & q & "left" & q & ":" & («property plft» of shp) & ","
-                            set shapeJSON to shapeJSON & q & "top" & q & ":" & («property ptop» of shp) & ","
-                            set shapeJSON to shapeJSON & q & "width" & q & ":" & («property pwid» of shp) & ","
-                            set shapeJSON to shapeJSON & q & "height" & q & ":" & («property hght» of shp) & ","
-                            set shapeJSON to shapeJSON & q & "fontName" & q & ":" & q & my jsonEscape(fontNameValue) & q & ","
-                            set shapeJSON to shapeJSON & q & "fontSize" & q & ":" & fontSizeValue & ","
-                            set shapeJSON to shapeJSON & q & "bold" & q & ":" & boldValue & ","
-                            set shapeJSON to shapeJSON & q & "italic" & q & ":" & italicValue & ","
-                            set shapeJSON to shapeJSON & q & "underline" & q & ":" & underlineValue & ","
-                            set shapeJSON to shapeJSON & q & "alignment" & q & ":" & alignmentValue & ","
-                            set shapeJSON to shapeJSON & q & "fontColor" & q & ":" & colorValueJSON
-                            set shapeJSON to shapeJSON & "}"
-                        end if
-                    end try
-                end if
-            """
-        }.joined(separator: "\n")
+        let shapeBlocks = shapeCaptureLoop
 
         return """
         on replaceText(findText, replacementText, sourceText)
@@ -2828,7 +3116,12 @@ enum PowerPointCopilot {
             set presName to name of presRef
             set presPath to ""
             try
-                set presPath to POSIX path of (full name of presRef as alias)
+                set rawPath to (full name of presRef) as text
+            if rawPath starts with "/" then
+                set presPath to rawPath
+            else
+                set presPath to POSIX path of rawPath
+            end if
             end try
 
             set slideIdx to 0

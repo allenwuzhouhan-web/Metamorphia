@@ -662,7 +662,7 @@ public enum GestureExecutor {
         if env["OMNI_CI"] != nil || env["CI"] != nil || env["GITHUB_ACTIONS"] != nil {
             return
         }
-        guard AXIsProcessTrusted() else {
+        guard AXIsProcessTrusted() || requestAccessibilityTrust(showPrompt: true) else {
             throw GestureError.accessibilityNotTrusted
         }
     }

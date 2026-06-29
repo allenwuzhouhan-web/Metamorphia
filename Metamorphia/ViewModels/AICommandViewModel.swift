@@ -143,8 +143,8 @@ public final class AICommandViewModel: ObservableObject {
     public var isProcessing: Bool {
         switch inputBarState {
         case .ready, .result, .error, .researchChoice, .browserChoice,
-             .thoughtRecall, .newsBriefing, .coworkingSuggestion, .healthCard,
-             .voiceListening:
+             .purposeQuestion, .thoughtRecall, .newsBriefing, .coworkingSuggestion,
+             .healthCard, .voiceListening:
             return false
         case .processing, .planning, .executing, .streaming:
             return true
@@ -496,19 +496,36 @@ public final class AICommandViewModel: ObservableObject {
             return
         }
 
-        let powerPointDesignRoute: PowerPointDesignRoute?
-        switch await PowerPointCopilot.prepareDesignRoute(prompt: prompt) {
-        case .notPowerPointDesignIntent:
-            powerPointDesignRoute = nil
+        // Finish-deck runs before design so "finish this deck" isn't swallowed by
+        // the design verb list.
+        let powerPointFinishRoute: PowerPointFinishRoute?
+        switch await PowerPointCopilot.prepareFinishRoute(prompt: prompt) {
+        case .notPowerPointFinishIntent:
+            powerPointFinishRoute = nil
         case .route(let route):
-            powerPointDesignRoute = route
+            powerPointFinishRoute = route
         case .failure(let message):
             showModeError(message, prompt: prompt)
             return
         }
 
+        let powerPointDesignRoute: PowerPointDesignRoute?
+        if powerPointFinishRoute != nil {
+            powerPointDesignRoute = nil
+        } else {
+            switch await PowerPointCopilot.prepareDesignRoute(prompt: prompt) {
+            case .notPowerPointDesignIntent:
+                powerPointDesignRoute = nil
+            case .route(let route):
+                powerPointDesignRoute = route
+            case .failure(let message):
+                showModeError(message, prompt: prompt)
+                return
+            }
+        }
+
         let powerPointRewriteRoute: PowerPointRewriteRoute?
-        if powerPointDesignRoute != nil {
+        if powerPointFinishRoute != nil || powerPointDesignRoute != nil {
             powerPointRewriteRoute = nil
         } else {
             switch await PowerPointCopilot.prepareRewriteRoute(prompt: prompt) {
@@ -523,14 +540,59 @@ public final class AICommandViewModel: ObservableObject {
         }
 
         let documentReviewRoute: DocumentReviewRoute?
-        if powerPointDesignRoute != nil || powerPointRewriteRoute != nil {
+        if powerPointFinishRoute != nil || powerPointDesignRoute != nil || powerPointRewriteRoute != nil {
             documentReviewRoute = nil
+        } else if DocumentCopilot.isRecheckRequest(prompt) {
+            // Post-deletion verification pass. Purpose comes from the answer
+            // round-trip, else from the most recent review in this conversation.
+            let suppliedPurpose = pendingReviewPurpose ?? mostRecentReviewPurpose()
+            pendingReviewPurpose = nil
+            switch await DocumentCopilot.prepareRecheckRoute(prompt: prompt, purpose: suppliedPurpose) {
+            case .route(let route):
+                documentReviewRoute = route
+            case .commentsRemain(let message):
+                appendDocumentActionTurn(prompt: prompt, result: message, success: true)
+                return
+            case .failure(let message):
+                showModeError(message, prompt: prompt)
+                return
+            }
         } else {
-            switch await DocumentCopilot.prepareReviewRoute(prompt: prompt, attachedFiles: attachedFiles) {
+            // Consume any purpose supplied by the purpose-question round-trip.
+            let suppliedPurpose = pendingReviewPurpose
+            pendingReviewPurpose = nil
+            switch await DocumentCopilot.prepareReviewRoute(
+                prompt: prompt,
+                attachedFiles: attachedFiles,
+                purpose: suppliedPurpose
+            ) {
             case .notDocumentIntent:
                 documentReviewRoute = nil
             case .route(let route):
                 documentReviewRoute = route
+            case .needsPurpose(let pending):
+                // Ask once, then replay the original prompt with the answer.
+                inputBarState = .purposeQuestion(
+                    question: pending.question,
+                    originalPrompt: pending.originalPrompt
+                )
+                return
+            case .failure(let message):
+                showModeError(message, prompt: prompt)
+                return
+            }
+        }
+
+        let excelAnalysisRoute: ExcelAnalysisRoute?
+        if powerPointFinishRoute != nil || powerPointDesignRoute != nil
+            || powerPointRewriteRoute != nil || documentReviewRoute != nil {
+            excelAnalysisRoute = nil
+        } else {
+            switch await ExcelCopilot.prepareAnalysisRoute(prompt: prompt) {
+            case .notExcelAnalysisIntent:
+                excelAnalysisRoute = nil
+            case .route(let route):
+                excelAnalysisRoute = route
             case .failure(let message):
                 showModeError(message, prompt: prompt)
                 return
@@ -633,6 +695,9 @@ public final class AICommandViewModel: ObservableObject {
             agent: currentAgent
         )
         var primedPrompt = primedSystemPrompt(base: agentShapedPrompt, query: agentPrompt)
+        if let powerPointFinishRoute {
+            primedPrompt += powerPointFinishRoute.systemPromptSuffix
+        }
         if let powerPointDesignRoute {
             primedPrompt += powerPointDesignRoute.systemPromptSuffix
         }
@@ -642,6 +707,9 @@ public final class AICommandViewModel: ObservableObject {
         if let documentReviewRoute {
             primedPrompt += documentReviewRoute.systemPromptSuffix
         }
+        if let excelAnalysisRoute {
+            primedPrompt += excelAnalysisRoute.systemPromptSuffix
+        }
         if functionSpec != nil {
             primedPrompt += "\n\nThe user entered a mathematical function. A graph is being rendered. Briefly describe the function's shape and key properties. 2-3 sentences."
         }
@@ -649,6 +717,9 @@ public final class AICommandViewModel: ObservableObject {
 
         let commandWithAttachments: String
         var sections: [String] = [agentPrompt]
+        if let powerPointFinishRoute {
+            sections.append(powerPointFinishRoute.commandContextBlock)
+        }
         if let powerPointDesignRoute {
             sections.append(powerPointDesignRoute.commandContextBlock)
         }
@@ -657,6 +728,9 @@ public final class AICommandViewModel: ObservableObject {
         }
         if let documentReviewRoute {
             sections.append(documentReviewRoute.commandContextBlock)
+        }
+        if let excelAnalysisRoute {
+            sections.append(excelAnalysisRoute.commandContextBlock)
         }
         if !attachedFiles.isEmpty {
             let cappedFiles = FileContentExtractor.enforceTotalCap(attachedFiles)
@@ -693,12 +767,16 @@ public final class AICommandViewModel: ObservableObject {
             conversation[idx].isStreaming = false
             conversation[idx].trace = outcome.trace
             let parsed: RichParseResult?
-            if powerPointDesignRoute != nil {
+            if powerPointFinishRoute != nil {
+                parsed = RichResultParser.parsePowerPointFinish(in: outcome.text) ?? RichResultParser.parse(outcome.text)
+            } else if powerPointDesignRoute != nil {
                 parsed = RichResultParser.parsePowerPointDesign(in: outcome.text) ?? RichResultParser.parse(outcome.text)
             } else if powerPointRewriteRoute != nil {
                 parsed = RichResultParser.parsePowerPointRewrite(in: outcome.text) ?? RichResultParser.parse(outcome.text)
             } else if documentReviewRoute != nil {
                 parsed = RichResultParser.parseDocumentReview(in: outcome.text) ?? RichResultParser.parse(outcome.text)
+            } else if excelAnalysisRoute != nil {
+                parsed = RichResultParser.parseExcelAnalysis(in: outcome.text) ?? RichResultParser.parse(outcome.text)
             } else {
                 parsed = RichResultParser.parse(outcome.text)
             }
@@ -706,7 +784,23 @@ public final class AICommandViewModel: ObservableObject {
             if let parsed {
                 let resolvedContent: RichTurnContent?
                 let resolveFailure: String?
-                if case .powerPointDesign(let design) = parsed.content,
+                if case .excelAnalysis(let plan) = parsed.content,
+                   let excelAnalysisRoute {
+                    // Deterministic Swift math fills the placeholder plan.
+                    let full = ExcelCopilot.computeResult(plan: plan, route: excelAnalysisRoute)
+                    resolvedContent = .excelAnalysis(full)
+                    resolveFailure = nil
+                } else if case .powerPointFinish(let finish) = parsed.content,
+                   let powerPointFinishRoute {
+                    let resolvedFinish = PowerPointCopilot.resolvedFinish(finish, route: powerPointFinishRoute)
+                    if resolvedFinish.operations.isEmpty {
+                        resolvedContent = nil
+                        resolveFailure = "I drafted a finish plan, but none of the authored operations survived validation. Re-run \"finish this deck.\""
+                    } else {
+                        resolvedContent = .powerPointFinish(resolvedFinish)
+                        resolveFailure = nil
+                    }
+                } else if case .powerPointDesign(let design) = parsed.content,
                    let powerPointDesignRoute {
                     let resolvedDesign = PowerPointCopilot.resolvedDesign(design, route: powerPointDesignRoute)
                     resolvedContent = .powerPointDesign(resolvedDesign)
@@ -725,8 +819,20 @@ public final class AICommandViewModel: ObservableObject {
                         resolveFailure = nil
                     }
                 } else if case .documentReview(let review) = parsed.content,
+                   let documentReviewRoute, documentReviewRoute.isRecheck {
+                    // Verification pass: present pass/fail, never auto-insert comments.
+                    let withPurpose = review.withPurpose(documentReviewRoute.purpose)
+                    resolvedContent = .documentRecheck(DocumentCopilot.recheckResult(from: withPurpose))
+                    resolveFailure = nil
+                } else if case .documentReview(let review) = parsed.content,
                    let documentReviewRoute {
-                    resolvedContent = .documentReview(review.withSourceFilePath(documentReviewRoute.filePath))
+                    // Cap each comment to <=15 words and drop findings without an exact
+                    // replacement before anything renders or syncs to Word. Carry the
+                    // user-stated purpose from the route onto the result.
+                    let capped = review.enforcingFindingLimits()
+                        .withSourceFilePath(documentReviewRoute.filePath)
+                        .withPurpose(documentReviewRoute.purpose)
+                    resolvedContent = .documentReview(capped)
                     resolveFailure = nil
                 } else {
                     resolvedContent = parsed.content
@@ -745,6 +851,11 @@ public final class AICommandViewModel: ObservableObject {
                        documentReviewRoute.autoInsertNativeComments,
                        case .documentReview(let review) = resolvedContent {
                         let syncOutcome = await DocumentCopilot.insertReviewComments(review)
+                        if syncOutcome.success {
+                            // Arm the auto re-check: when the user later clears these
+                            // comments, the command bar offers/runs the verification pass.
+                            armRecheck(for: documentReviewRoute, review: review)
+                        }
                         if syncOutcome.success && documentReviewRoute.preferCompactDelivery {
                             conversation[idx].richContent = nil
                             conversation[idx].result = syncOutcome.message
@@ -755,6 +866,24 @@ public final class AICommandViewModel: ObservableObject {
                         }
                     }
                 }
+                protectedTerminalTurnIDs.insert(conversation[idx].id)
+            } else if excelAnalysisRoute != nil,
+                      outcome.text.contains("[XL_ANALYSIS]") {
+                let failureMessage = """
+                I picked an analysis, but I couldn't parse the structured plan block needed to run it. Re-run the analysis request.
+                """
+                conversation[idx].result = failureMessage
+                conversation[idx].isError = true
+                inputBarState = .error(message: failureMessage)
+                protectedTerminalTurnIDs.insert(conversation[idx].id)
+            } else if powerPointFinishRoute != nil,
+                      outcome.text.contains("[PPT_FINISH]") {
+                let failureMessage = """
+                I drafted a finish plan, but I couldn't parse the structured block needed to preview it. Re-run "finish this deck."
+                """
+                conversation[idx].result = failureMessage
+                conversation[idx].isError = true
+                inputBarState = .error(message: failureMessage)
                 protectedTerminalTurnIDs.insert(conversation[idx].id)
             } else if powerPointDesignRoute != nil,
                       outcome.text.contains("[PPT_DESIGN]") {
@@ -1019,6 +1148,80 @@ public final class AICommandViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Document review: purpose round-trip
+
+    /// Purpose answer captured from the purpose-question card, consumed by the
+    /// next `submit` at the document-review call site (then cleared).
+    private var pendingReviewPurpose: String?
+
+    /// Replay the original proofread request now that the user has told us what
+    /// the document is for. The purpose is held out-of-band (not in the prompt)
+    /// so it survives any characters and never re-triggers the question.
+    public func submitReviewWithPurpose(originalPrompt: String, purpose: String) {
+        let trimmedPurpose = purpose.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPurpose.isEmpty else { return }
+        pendingReviewPurpose = trimmedPurpose
+        inputBarState = .processing
+        Task { [weak self] in
+            guard let self else { return }
+            await self.submit(prompt: originalPrompt, systemPrompt: Self.defaultSystemPrompt)
+        }
+    }
+
+    // MARK: - Document re-check (verification pass)
+
+    /// The reviewed document we're watching, so the command bar can fire the
+    /// verification pass once the user clears its comments.
+    private var armedRecheckURL: URL?
+
+    /// Most recent review's purpose, so a typed "re-check" or the auto pass keeps
+    /// the same framing without asking again.
+    private func mostRecentReviewPurpose() -> String? {
+        for turn in conversation.reversed() {
+            if case .documentReview(let review)? = turn.richContent {
+                return review.purpose
+            }
+        }
+        return nil
+    }
+
+    /// Remember the reviewed file after comments were inserted, so we can notice
+    /// when they're all gone and offer the clean-up verification pass.
+    private func armRecheck(for route: DocumentReviewRoute, review: DocumentReviewResult) {
+        guard let path = route.filePath, !review.findings.isEmpty else {
+            armedRecheckURL = nil
+            return
+        }
+        armedRecheckURL = URL(fileURLWithPath: path)
+    }
+
+    /// Manual "Re-check" button on a review card. Re-runs the verification pass
+    /// scoped to that review's purpose.
+    public func handleRecheck(turnID: UUID) async {
+        guard let turn = conversation.first(where: { $0.id == turnID }) else { return }
+        guard case .documentReview(let review)? = turn.richContent else { return }
+        pendingReviewPurpose = review.purpose
+        inputBarState = .processing
+        await submit(prompt: "re-check this document", systemPrompt: Self.defaultSystemPrompt)
+    }
+
+    /// Auto-detect: when the command bar reappears (e.g. after the user deleted
+    /// comments in Word), if the armed document now has zero Metamorphia comments,
+    /// run the verification pass once and disarm.
+    public func checkArmedRecheckOnAppear() {
+        guard let url = armedRecheckURL else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            await DocumentCopilot.nudgeWordSave()
+            let remaining = (try? DocumentCopilot.metamorphiaCommentCount(in: url)) ?? -1
+            guard remaining == 0 else { return }
+            self.armedRecheckURL = nil
+            self.pendingReviewPurpose = self.mostRecentReviewPurpose()
+            self.inputBarState = .processing
+            await self.submit(prompt: "re-check this document", systemPrompt: Self.defaultSystemPrompt)
+        }
+    }
+
     // MARK: - T7: Research / browser choice submission
 
     /// Re-submit with the user-chosen research depth. Prepends a bracketed
@@ -1059,7 +1262,8 @@ public final class AICommandViewModel: ObservableObject {
     /// tweaking and re-submission.
     public func cancelChoice() {
         switch inputBarState {
-        case .researchChoice, .browserChoice:
+        case .researchChoice, .browserChoice, .purposeQuestion:
+            pendingReviewPurpose = nil
             inputBarState = .ready
         default:
             break
@@ -1369,9 +1573,18 @@ public final class AICommandViewModel: ObservableObject {
             await self.submit(prompt: prefixed, systemPrompt: Self.defaultSystemPrompt)
         }
     }
+    public func submitReviewWithPurpose(originalPrompt: String, purpose: String) {
+        inputBarState = .processing
+        Task { [weak self] in
+            guard let self else { return }
+            await self.submit(prompt: originalPrompt, systemPrompt: Self.defaultSystemPrompt)
+        }
+    }
+    public func handleRecheck(turnID: UUID) async {}
+    public func checkArmedRecheckOnAppear() {}
     public func cancelChoice() {
         switch inputBarState {
-        case .researchChoice, .browserChoice:
+        case .researchChoice, .browserChoice, .purposeQuestion:
             inputBarState = .ready
         default:
             break
@@ -1583,6 +1796,49 @@ public final class AICommandViewModel: ObservableObject {
         }
 
         let outcome = await PowerPointCopilot.performDirectEditAction(action, result: result)
+        appendDocumentActionTurn(
+            prompt: label,
+            result: outcome.message,
+            success: outcome.success
+        )
+    }
+
+    public func handlePowerPointFinishAction(turnID: UUID, action: PowerPointFinishAction) async {
+        guard let turn = conversation.first(where: { $0.id == turnID }) else { return }
+        guard case .powerPointFinish(let finish)? = turn.richContent else { return }
+
+        let label: String
+        switch action {
+        case .jump(let slideIndex):
+            label = "Finish deck: Jump to slide \(slideIndex)"
+        case .apply:
+            label = "Finish deck: Apply \(finish.operations.count) operation(s)"
+        case .restore:
+            label = "Finish deck: Restore"
+        case .undo:
+            label = "Finish deck: Undo"
+        }
+
+        let outcome = await PowerPointCopilot.performFinishAction(action, finish: finish)
+        appendDocumentActionTurn(
+            prompt: label,
+            result: outcome.message,
+            success: outcome.success
+        )
+    }
+
+    public func handleExcelAnalysisAction(turnID: UUID, action: ExcelAnalysisAction) async {
+        guard let turn = conversation.first(where: { $0.id == turnID }) else { return }
+        guard case .excelAnalysis(let result)? = turn.richContent else { return }
+
+        let label: String
+        switch action {
+        case .writeAnalysisSheet: label = "Excel: Write analysis to \(result.workbookName)"
+        case .jumpToSource:       label = "Excel: Jump to \(result.sourceAddress)"
+        case .copySummary:        label = "Excel: Copy summary"
+        }
+
+        let outcome = await ExcelCopilot.performAction(action, result: result)
         appendDocumentActionTurn(
             prompt: label,
             result: outcome.message,

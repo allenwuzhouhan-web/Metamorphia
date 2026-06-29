@@ -16,6 +16,7 @@ enum CommandBarStateHelpers {
         case .voiceListening:       return "mic.fill"
         case .researchChoice:       return "magnifyingglass"
         case .browserChoice:        return "globe"
+        case .purposeQuestion:      return "questionmark.circle"
         case .thoughtRecall:        return "brain.fill"
         case .result:               return "checkmark.circle.fill"
         case .error:                return "xmark.circle.fill"
@@ -66,6 +67,7 @@ enum CommandBarStateHelpers {
         case .error:                    return ""
         case .researchChoice:           return "What kind of research?"
         case .browserChoice:            return "Watch or run in background?"
+        case .purposeQuestion:          return "What's this document for?"
         case .thoughtRecall(let s):     return s.isEmpty ? "Welcome back" : s
         case .newsBriefing:             return "Morning briefing"
         case .coworkingSuggestion(let t): return t

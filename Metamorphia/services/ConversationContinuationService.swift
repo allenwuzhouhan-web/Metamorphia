@@ -106,7 +106,12 @@ public final class ConversationContinuationService {
                 return .cancelled
             }
 
-            let placed = try await placeDraft(approvedText, basedOn: draft, preferredAppName: preferredAppName)
+            let placed: Int
+            do {
+                placed = try await placeDraft(approvedText, basedOn: draft, preferredAppName: preferredAppName)
+            } catch {
+                throw ConversationContinuationError.draftingFailed(Self.describePlacementError(error))
+            }
             return .placed(appName: draft.appName, characterCount: placed)
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -126,11 +131,11 @@ public final class ConversationContinuationService {
 
         do {
             let appName = try await activateOrOpenWeChat()
-            try GestureExecutor.keyCombo(keys: [.character("f")], modifiers: .command)
+            try GestureExecutor.keyCombo(keys: [.keyCode(0x03)], modifiers: .command)
             try await Task.sleep(nanoseconds: 120_000_000)
-            try GestureExecutor.keyCombo(keys: [.character("a")], modifiers: .command)
+            try GestureExecutor.keyCombo(keys: [.keyCode(0x00)], modifiers: .command)
             try GestureExecutor.keyPress(.delete)
-            try await GestureExecutor.typeString(request.recipient)
+            try await pasteTextAtCurrentFocus(request.recipient)
             try await Task.sleep(nanoseconds: 220_000_000)
             try GestureExecutor.keyPress(.enter)
             try await Task.sleep(nanoseconds: 650_000_000)
@@ -141,7 +146,7 @@ public final class ConversationContinuationService {
             )
             return .placedDirect(appName: appName, recipient: request.recipient, characterCount: count)
         } catch {
-            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            let message = Self.describePlacementError(error)
             await presentFailure(message)
             return .failure(message)
         }
@@ -153,13 +158,14 @@ public final class ConversationContinuationService {
         sourcePrompt: String?,
         preferredAppName: String?
     ) async throws -> ConversationDraft {
+        let targetAppName = await activatePreferredMessagingApp(named: preferredAppName)
         let rawMap = await DefaultComputerPerception.shared.capture(
             forceOCR: false,
-            appFilter: preferredAppName,
+            appFilter: targetAppName,
             ocrOverride: .auto
         )
         let map = rawMap.redactedForLLM()
-        let target = try resolveMessagingTarget(in: map, preferredAppName: preferredAppName)
+        let target = try resolveMessagingTarget(in: map, preferredAppName: targetAppName)
         let compose = try findComposeInput(in: map)
         let screenContext = TextFormatter.format(map, maxElements: 90)
         let prompt = buildDraftPrompt(
@@ -363,6 +369,28 @@ public final class ConversationContinuationService {
             .trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”‘’"))
     }
 
+    private static func describePlacementError(_ error: Error) -> String {
+        if let error = error as? GestureError {
+            switch error {
+            case .accessibilityNotTrusted:
+                AccessibilityPermissionStore.shared.requestAuthorizationPrompt()
+                return "Metamorphia needs Accessibility permission to focus and paste into the chat. If macOS does not show a prompt, open System Settings -> Privacy & Security -> Accessibility and enable Metamorphia."
+            case .pointOutOfBounds(let point):
+                return "The detected chat compose point was off-screen: (\(Int(point.x)), \(Int(point.y))). Click the chat input once and try again."
+            case .invalidKey(let key):
+                return "Metamorphia could not synthesize the key \"\(key)\". The draft was not placed."
+            case .eventCreationFailed:
+                return "macOS rejected a synthetic keyboard or mouse event while placing the draft. Click the chat input once and try again."
+            }
+        }
+
+        if case SemanticExecutor.TypeError.gesture(let inner) = error {
+            return describePlacementError(inner)
+        }
+
+        return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
+
     private static func isUsableRecipient(_ text: String) -> Bool {
         let lower = text.lowercased()
         guard !lower.isEmpty else { return false }
@@ -421,13 +449,14 @@ public final class ConversationContinuationService {
         preferredAppName: String?,
         fallbackPoint: CGPoint? = nil
     ) async throws -> Int {
+        let targetAppName = await activatePreferredMessagingApp(named: preferredAppName)
         let rawMap = await DefaultComputerPerception.shared.capture(
             forceOCR: false,
-            appFilter: preferredAppName,
+            appFilter: targetAppName,
             ocrOverride: .auto
         )
         let map = rawMap.redactedForLLM()
-        _ = try resolveMessagingTarget(in: map, preferredAppName: preferredAppName)
+        _ = try resolveMessagingTarget(in: map, preferredAppName: targetAppName)
         let compose = try findComposeInput(in: map)
         let clearFirst = !compose.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
@@ -435,15 +464,42 @@ public final class ConversationContinuationService {
             return try await placeDraftByClickingFallback(text, at: point)
         }
 
-        let result = try await SemanticExecutor.shared.type(
-            ref: compose.ref,
-            text: text,
-            pressEnter: false,
-            clearFirst: clearFirst,
-            in: map,
-            stabilizer: PerceptionPipeline.shared.refStabilizer
-        )
-        return result.charactersTyped
+        if let point = compose.clickPoint ?? compose.bounds.map({ CGPoint(x: $0.midX, y: $0.midY) }) {
+            return try await pasteDraftByClickingCompose(text, at: point, clearFirst: clearFirst)
+        }
+
+        do {
+            let result = try await SemanticExecutor.shared.type(
+                ref: compose.ref,
+                text: text,
+                pressEnter: false,
+                clearFirst: clearFirst,
+                in: map,
+                stabilizer: PerceptionPipeline.shared.refStabilizer
+            )
+            return result.charactersTyped
+        } catch {
+            throw ConversationContinuationError.draftingFailed(Self.describePlacementError(error))
+        }
+    }
+
+    private func activatePreferredMessagingApp(named preferredAppName: String?) async -> String? {
+        guard let preferredAppName = preferredAppName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !preferredAppName.isEmpty else {
+            return nil
+        }
+
+        let app = NSWorkspace.shared.runningApplications.first { candidate in
+            guard let name = candidate.localizedName else { return false }
+            return name.localizedCaseInsensitiveCompare(preferredAppName) == .orderedSame ||
+                name.localizedCaseInsensitiveContains(preferredAppName) ||
+                preferredAppName.localizedCaseInsensitiveContains(name)
+        }
+
+        guard let app else { return preferredAppName }
+        app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        return app.localizedName ?? preferredAppName
     }
 
     private func activateOrOpenWeChat() async throws -> String {
@@ -497,10 +553,45 @@ public final class ConversationContinuationService {
     }
 
     private func placeDraftByClickingFallback(_ text: String, at point: CGPoint) async throws -> Int {
+        try await pasteDraftByClickingCompose(text, at: point, clearFirst: false)
+    }
+
+    private func pasteDraftByClickingCompose(_ text: String, at point: CGPoint, clearFirst: Bool) async throws -> Int {
         try GestureExecutor.click(at: point, button: .left, count: 1)
         try await Task.sleep(nanoseconds: 120_000_000)
-        try await GestureExecutor.typeString(text)
+        if clearFirst {
+            try GestureExecutor.keyCombo(keys: [.keyCode(0x00)], modifiers: .command)
+            try GestureExecutor.keyPress(.delete)
+            try await Task.sleep(nanoseconds: 40_000_000)
+        }
+        try await pasteTextAtCurrentFocus(text)
         return text.count
+    }
+
+    private func pasteTextAtCurrentFocus(_ text: String) async throws {
+        let snapshot = ClipboardSnapshot.capture()
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        try GestureExecutor.keyCombo(keys: [.keyCode(0x09)], modifiers: .command)
+        try await Task.sleep(nanoseconds: 250_000_000)
+        snapshot.restore()
+    }
+
+    private struct ClipboardSnapshot {
+        let items: [NSPasteboardItem]
+
+        static func capture() -> ClipboardSnapshot {
+            ClipboardSnapshot(items: NSPasteboard.general.pasteboardItems ?? [])
+        }
+
+        func restore() {
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            if !items.isEmpty {
+                _ = pasteboard.writeObjects(items)
+            }
+        }
     }
 
     // MARK: - Target + compose resolution

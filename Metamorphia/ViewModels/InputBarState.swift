@@ -29,6 +29,9 @@ public enum InputBarState: Equatable {
     case voiceListening(partial: String)
     case researchChoice(query: String)
     case browserChoice(query: String)
+    /// Awaiting the user's one-line answer to "what is this document for?" before
+    /// running a proofread. `originalPrompt` is replayed once the answer arrives.
+    case purposeQuestion(question: String, originalPrompt: String)
     case thoughtRecall(summary: String)
     case newsBriefing(headlines: [String])
     case coworkingSuggestion(title: String)

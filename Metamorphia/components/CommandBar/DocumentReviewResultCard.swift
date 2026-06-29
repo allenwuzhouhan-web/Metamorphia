@@ -3,8 +3,10 @@ import SwiftUI
 struct DocumentReviewResultCard: View {
     let result: DocumentReviewResult
     let onAction: ((DocumentReviewAction) async -> Void)?
+    var onRecheck: (() async -> Void)? = nil
 
     @State private var activeActionKey: String?
+    @State private var isRechecking = false
 
     private var severityCounts: [DocumentReviewSeverity: Int] {
         Dictionary(grouping: result.findings, by: \.severity).mapValues(\.count)
@@ -25,6 +27,13 @@ struct DocumentReviewResultCard: View {
                         .font(.system(size: 10))
                         .foregroundStyle(.white.opacity(0.45))
                         .lineLimit(2)
+                    if let purpose = result.purpose,
+                       !purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("For: \(purpose)")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.white.opacity(0.45))
+                            .lineLimit(2)
+                    }
                 }
                 Spacer()
                 chip(result.documentKind.displayName, tint: .white.opacity(0.14))
@@ -63,7 +72,7 @@ struct DocumentReviewResultCard: View {
 
                         if let suggestedRevision = finding.suggestedRevision,
                            !suggestedRevision.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            Text("Suggested rewrite: \(suggestedRevision)")
+                            Text("Change to: \(suggestedRevision)")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.white.opacity(0.6))
                                 .fixedSize(horizontal: false, vertical: true)
@@ -107,6 +116,34 @@ struct DocumentReviewResultCard: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.white.opacity(0.5))
                     .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if onRecheck != nil, result.documentKind == .document {
+                HStack {
+                    Spacer()
+                    Button {
+                        guard !isRechecking, let onRecheck else { return }
+                        isRechecking = true
+                        Task {
+                            await onRecheck()
+                            await MainActor.run { isRechecking = false }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: isRechecking ? "hourglass" : "checkmark.circle")
+                                .font(.system(size: 9, weight: .semibold))
+                            Text("Re-check when done")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                        .foregroundStyle(.white.opacity(0.84))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(Color.white.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isRechecking)
+                }
+                .padding(.top, 2)
             }
         }
         .padding(10)

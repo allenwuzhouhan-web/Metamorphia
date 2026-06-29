@@ -15,6 +15,7 @@ public enum LLMProvider: String, CaseIterable, Codable, Sendable {
     case kimi
     case kimiCN
     case minimax
+    case cerebras
 }
 
 // MARK: - Provider Config
@@ -146,6 +147,21 @@ public extension LLMProvider {
                 authStyle: .bearer,
                 signupURL: "platform.minimax.io",
                 keyPlaceholder: "eyJ..."
+            )
+        case .cerebras:
+            return LLMProviderConfig(
+                displayName: "Cerebras",
+                baseURL: "https://api.cerebras.ai/v1/chat/completions",
+                defaultModel: "llama-3.3-70b",
+                availableModels: [
+                    "llama-3.3-70b",
+                    "llama3.1-8b",
+                    "qwen-3-32b",
+                    "llama-4-scout-17b-16e-instruct",
+                ],
+                authStyle: .bearer,
+                signupURL: "cloud.cerebras.ai",
+                keyPlaceholder: "csk-..."
             )
         }
     }

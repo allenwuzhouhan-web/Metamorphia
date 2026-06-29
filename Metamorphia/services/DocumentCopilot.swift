@@ -10,6 +10,18 @@ struct DocumentReviewRoute {
     let consumesAttachmentText: Bool
     let autoInsertNativeComments: Bool
     let preferCompactDelivery: Bool
+    /// The document's purpose, woven into the prompt and shown on the result card.
+    let purpose: String?
+    /// True when this route is the post-deletion verification pass. The result is
+    /// rendered as a recheck (clean / remaining) and comments are never auto-inserted.
+    var isRecheck: Bool = false
+}
+
+/// Carries everything needed to resume a review after the user answers the
+/// one-time purpose question, without re-resolving the document.
+struct PendingDocumentReview: Equatable {
+    let originalPrompt: String
+    let question: String
 }
 
 private struct ResolvedDocumentContext {
@@ -63,7 +75,8 @@ enum DocumentCopilot {
 
     static func prepareReviewRoute(
         prompt: String,
-        attachedFiles: [CommandBarAttachedFile]
+        attachedFiles: [CommandBarAttachedFile],
+        purpose: String? = nil
     ) async -> DocumentReviewPreparation {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .notDocumentIntent }
@@ -74,22 +87,38 @@ enum DocumentCopilot {
             return .failure("I couldn't find a saved Word or PowerPoint \(noun) to review. Open the file in Microsoft Word or PowerPoint, or attach a .docx or .pptx file.")
         }
 
+        // Only now that a real document is resolved do we ask the one-time
+        // purpose question (if the user hasn't already stated it).
+        let resolvedPurpose = purpose ?? statedPurpose(in: trimmed)
+        if resolvedPurpose == nil {
+            return .needsPurpose(pending: PendingDocumentReview(
+                originalPrompt: trimmed,
+                question: "What's this document for — who reads it and what should it achieve?"
+            ))
+        }
+
         let toneHint = inferredToneHint(from: trimmed)
+        let purposeLine = resolvedPurpose.map {
+            "Frame every comment to serve this purpose: \($0). Raise severity for anything that undermines it."
+        } ?? "Prioritize clarity, concision, wording, and audience fit."
         let systemPromptSuffix = """
 
         ## Document Copilot Review Mode
-        You are reviewing an existing \(context.kind.displayName.lowercased()).
-        Prioritize clarity, hierarchy, pacing, redundancy, wording, and audience fit.
-        Base every finding on the supplied document content. Do not invent slides, sections, or claims that are not supported by the text.
-        Start with a short human-readable summary paragraph.
+        You are proofreading an existing \(context.kind.displayName.lowercased()).
+        \(purposeLine)
+        Base every finding strictly on the supplied document content. Never invent slides, sections, or claims.
+        Start with one short summary sentence.
         Then emit exactly one machine-readable block with no code fence:
         [DOC_REVIEW]
         {"documentTitle":"...","documentKind":"\(context.kind.rawValue)","sourceDescription":"\(escapeJSONString(context.sourceDescription))","summary":"...","nextStep":"...","findings":[{"title":"...","location":"...","severity":"high|medium|low","rationale":"...","anchorText":"...","suggestedRevision":"..."}]}
         [/DOC_REVIEW]
-        Include 3 to 6 findings. Keep locations specific, like "Slide 2" or "Opening section".
-        anchorText must be a short exact phrase copied verbatim from the document near the issue so the app can jump back to the right place later.
-        Keep each rationale to one or two direct sentences. Suggested revisions must be short, concrete rewrites, not vague advice.
-        Write finding titles as compact labels, not full sentences. Prefer "RMSE direction is backwards" over "RMSE sentence in Section 5 is numerically confusing".
+        Include 3 to 6 findings. Rules for EVERY finding:
+        - rationale: AT MOST 15 words. State the exact problem, not vague advice. No hedging, no preamble.
+        - suggestedRevision: REQUIRED. The verbatim replacement text — what the passage should literally become, ready to paste in. Never a description of a change.
+        - anchorText: a short exact phrase copied verbatim from the document near the issue so the app can locate the spot.
+        - location: specific, like "Slide 2" or "Opening paragraph".
+        - title: a compact label, not a sentence. Prefer "RMSE direction is backwards" over a full sentence.
+        Every finding must be unambiguous and directly actionable. If you cannot give an exact replacement, drop the finding.
         \(toneHint.map { "Bias the review toward making the document feel \($0)." } ?? "")
         """
 
@@ -117,8 +146,170 @@ enum DocumentCopilot {
             systemPromptSuffix: systemPromptSuffix,
             consumesAttachmentText: context.usesAttachmentText,
             autoInsertNativeComments: context.kind == .document && !context.usesAttachmentText,
-            preferCompactDelivery: context.kind == .document && !context.usesAttachmentText
+            preferCompactDelivery: context.kind == .document && !context.usesAttachmentText,
+            purpose: resolvedPurpose
         ))
+    }
+
+    /// Returns the user's prompt as purpose context when they already named an
+    /// audience or goal, so we can skip the one-time purpose question. A loose
+    /// heuristic: a false negative just asks one question; a false positive uses
+    /// the prompt itself as the purpose, which is acceptable.
+    private static func statedPurpose(in prompt: String) -> String? {
+        let normalized = prompt.lowercased()
+        // Bias toward ASKING: only skip the question when the user clearly named an
+        // audience or goal. Generic phrases like "for me" must NOT count.
+        let markers = [
+            " for a ", " for an ", " for the ", " for my ", " for our ",
+            " aimed at ", " intended for ", " so that ", " so it ",
+            " audience", " readers", " reader ", " to convince", " to persuade",
+            " to win", " to pitch", " to inform", " to impress",
+        ]
+        guard markers.contains(where: { normalized.contains($0) }) else { return nil }
+        return prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: - Post-deletion re-check
+
+    /// True when the user is asking for the clean-up verification pass.
+    static func isRecheckRequest(_ prompt: String) -> Bool {
+        let normalized = prompt.lowercased()
+        let verbs = [
+            "re-check", "recheck", "check again", "verify", "i'm done", "im done",
+            "is it clean", "another pass", "final pass", "confirm it's", "confirm its",
+            "double-check", "double check",
+        ]
+        return verbs.contains { normalized.contains($0) }
+    }
+
+    /// Build the verification route: confirm comments are gone, then run a strict
+    /// pass scoped to the same purpose. Returns `.commentsRemain` (no model call)
+    /// when Metamorphia comments are still present.
+    static func prepareRecheckRoute(prompt: String, purpose: String?) async -> DocumentRecheckPreparation {
+        guard let document = await resolveCurrentEditableDocument(requestedKind: .document) else {
+            return .failure("Open the Word document you want me to re-check and bring it to the front.")
+        }
+
+        // Best-effort save so the on-disk comments.xml reflects the user's deletions.
+        await saveWordDocument(appName: document.appName)
+
+        let remaining = (try? metamorphiaCommentCount(in: document.fileURL)) ?? 0
+        if remaining > 0 {
+            let noun = remaining == 1 ? "comment" : "comments"
+            return .commentsRemain(message: "\(document.title) still has \(remaining) Metamorphia \(noun). Address or delete them in Word, then ask me to re-check.")
+        }
+
+        guard let extracted = await FileContentExtractor.shared.extract(from: document.fileURL) else {
+            return .failure("I couldn't read \(document.title) to re-check it. Make sure it's saved and try again.")
+        }
+
+        let purposeLine = purpose.map {
+            "The document's purpose is: \($0). Judge whether it now fully serves that purpose."
+        } ?? "Judge whether the document now reads cleanly for its audience."
+
+        let systemPromptSuffix = """
+
+        ## Document Copilot Re-check Mode
+        This is a strict verification pass AFTER the author addressed your earlier comments.
+        \(purposeLine)
+        Base every finding strictly on the supplied document content. Never invent content.
+        If the document now fully serves its purpose with no remaining issues, return ZERO findings.
+        Start with one short summary sentence (say it is clean if it is).
+        Then emit exactly one machine-readable block with no code fence:
+        [DOC_REVIEW]
+        {"documentTitle":"...","documentKind":"document","sourceDescription":"\(escapeJSONString(document.title))","summary":"...","nextStep":"...","findings":[{"title":"...","location":"...","severity":"high|medium|low","rationale":"...","anchorText":"...","suggestedRevision":"..."}]}
+        [/DOC_REVIEW]
+        Only list issues that genuinely remain. For each: rationale AT MOST 15 words; suggestedRevision REQUIRED and verbatim; anchorText copied verbatim from the document.
+        Do not raise trivial stylistic nits — this pass confirms the document is ready.
+        """
+
+        let contextLines: [String] = [
+            "Document under re-check:",
+            "- Title: \(document.title)",
+            "- Kind: Document",
+            "- File path: \(document.fileURL.path)",
+            purpose.map { "- Purpose: \($0)" } ?? "- Purpose: (not specified)",
+            "- User request: \(prompt.trimmingCharacters(in: .whitespacesAndNewlines))",
+            "",
+            "--- Document text: \(document.title) ---",
+            extracted.extractedText,
+            "--- End document text ---",
+        ]
+        let contextBlock = contextLines.joined(separator: "\n")
+
+        let route = DocumentReviewRoute(
+            kind: .document,
+            sourceDescription: document.title,
+            filePath: document.fileURL.path,
+            commandContextBlock: contextBlock,
+            systemPromptSuffix: systemPromptSuffix,
+            consumesAttachmentText: false,
+            autoInsertNativeComments: false,
+            preferCompactDelivery: false,
+            purpose: purpose,
+            isRecheck: true
+        )
+        return .route(route)
+    }
+
+    /// Counts comments authored by "Metamorphia" in the .docx, independent of
+    /// whether they still carry an anchor or revision — the reliable "are my
+    /// comments gone?" signal for the re-check (and the auto-detect poll).
+    static func metamorphiaCommentCount(in fileURL: URL) throws -> Int {
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("metamorphia-count-comments-\(UUID().uuidString)", isDirectory: true)
+        let extracted = root.appendingPathComponent("doc", isDirectory: true)
+        try fm.createDirectory(at: extracted, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        try runProcess(
+            executable: "/usr/bin/unzip",
+            arguments: ["-qq", fileURL.path, "-d", extracted.path],
+            currentDirectory: root
+        )
+
+        let commentsURL = extracted.appendingPathComponent("word/comments.xml")
+        guard fm.fileExists(atPath: commentsURL.path) else { return 0 }
+        let commentsXML = try XMLDocument(contentsOf: commentsURL, options: [])
+        let comments = ((try? commentsXML.nodes(forXPath: "//*[local-name()='comment']")) as? [XMLElement]) ?? []
+        return comments.reduce(into: 0) { count, comment in
+            let author = attributeValue(named: "author", in: comment) ?? ""
+            if author.caseInsensitiveCompare("Metamorphia") == .orderedSame { count += 1 }
+        }
+    }
+
+    /// Convert a verification-pass review into a recheck result (clean if empty).
+    static func recheckResult(from review: DocumentReviewResult) -> DocumentRecheckResult {
+        let capped = review.enforcingFindingLimits()
+        let clean = capped.findings.isEmpty
+        return DocumentRecheckResult(
+            documentTitle: capped.documentTitle,
+            purpose: capped.purpose,
+            isClean: clean,
+            summary: clean
+                ? "All clear — nothing left to fix. The document reads cleanly for its purpose."
+                : capped.summary,
+            remainingFindings: capped.findings
+        )
+    }
+
+    private static func saveWordDocument(appName: String) async {
+        let script = """
+        tell application "\(appName)"
+            try
+                save active document
+            end try
+        end tell
+        """
+        _ = try? await AppleScriptHelper.executeVoid(script)
+    }
+
+    /// Best-effort save of the active Word document. Used by the auto re-check so
+    /// the on-disk comment count reflects the user's deletions. Does not activate
+    /// Word, so it won't steal focus from the command bar.
+    static func nudgeWordSave() async {
+        await saveWordDocument(appName: "Microsoft Word")
     }
 
     private static func detectIntent(in prompt: String) -> DetectedIntent? {
@@ -126,6 +317,7 @@ enum DocumentCopilot {
         let reviewVerbs = [
             "audit", "review", "comment", "critique", "revise", "rewrite",
             "finish", "improve", "polish", "tighten",
+            "proofread", "proof read", "proof-read", "spell", "grammar",
         ]
         let hasReviewVerb = reviewVerbs.contains { normalized.contains($0) }
         let requestedKind = requestedKind(in: normalized)
@@ -368,7 +560,12 @@ enum DocumentCopilot {
         set presName to name of presRef
         set presPath to ""
         try
-            set presPath to POSIX path of (full name of presRef as alias)
+            set rawPath to (full name of presRef) as text
+            if rawPath starts with "/" then
+                set presPath to rawPath
+            else
+                set presPath to POSIX path of rawPath
+            end if
         end try
         return presName & linefeed & presPath
     end tell
@@ -381,7 +578,12 @@ enum DocumentCopilot {
         set docName to name of docRef
         set docPath to ""
         try
-            set docPath to POSIX path of (full name of docRef as alias)
+            set rawPath to (full name of docRef) as text
+            if rawPath starts with "/" then
+                set docPath to rawPath
+            else
+                set docPath to POSIX path of rawPath
+            end if
         end try
         return docName & linefeed & docPath
     end tell
@@ -711,17 +913,12 @@ enum DocumentCopilot {
     }
 
     private static func buildCommentText(for finding: DocumentReviewFinding) -> String {
-        var parts = [
-            "\(finding.severity.displayName.uppercased()) · \(finding.location)",
-            compactLine(finding.title, maxCharacters: 84),
-            "",
-            "Issue: \(compactLine(finding.rationale, maxCharacters: 220))",
-        ]
-        if let revision = finding.trimmedSuggestedRevision {
-            parts.append("")
-            parts.append("Rewrite: \(cleanSuggestedRevision(revision))")
-        }
-        return parts.joined(separator: "\n")
+        // Tight two-line comment: a <=15-word note, then the exact replacement.
+        // The finding's rationale is already capped to <=15 words upstream
+        // (DocumentReviewResult.enforcingFindingLimits); compactLine is a length safety net.
+        let note = compactLine(finding.rationale, maxCharacters: 120)
+        guard let revision = finding.trimmedSuggestedRevision else { return note }
+        return "\(note)\nChange to: \(cleanSuggestedRevision(revision))"
     }
 
     private static func compactLine(_ string: String, maxCharacters: Int) -> String {
@@ -1438,7 +1635,7 @@ enum DocumentCopilot {
         for line in text.components(separatedBy: .newlines) {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             let lowered = trimmed.lowercased()
-            let labels = ["rewrite:", "suggested rewrite:"]
+            let labels = ["change to:", "rewrite:", "suggested rewrite:"]
             for label in labels where lowered.hasPrefix(label) {
                 let start = trimmed.index(trimmed.startIndex, offsetBy: label.count)
                 let revision = cleanSuggestedRevision(String(trimmed[start...]))
@@ -1513,5 +1710,12 @@ private struct DetectedIntent {
 enum DocumentReviewPreparation {
     case notDocumentIntent
     case route(DocumentReviewRoute)
+    case needsPurpose(pending: PendingDocumentReview)
+    case failure(String)
+}
+
+enum DocumentRecheckPreparation {
+    case route(DocumentReviewRoute)
+    case commentsRemain(message: String)
     case failure(String)
 }

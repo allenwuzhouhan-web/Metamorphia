@@ -15,7 +15,7 @@ enum MenuBarTaskStatus: Equatable {
         case .error:
             self = .failed
         case .ready, .result, .voiceListening, .researchChoice, .browserChoice,
-             .thoughtRecall, .newsBriefing, .coworkingSuggestion, .healthCard:
+             .purposeQuestion, .thoughtRecall, .newsBriefing, .coworkingSuggestion, .healthCard:
             self = .succeeded
         }
     }

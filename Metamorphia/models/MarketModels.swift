@@ -191,7 +191,10 @@ public enum RichTurnContent: Sendable, Hashable {
     case eventResult(EventResult)
     case listResult(ListResult)
     case documentReview(DocumentReviewResult)
+    case documentRecheck(DocumentRecheckResult)
     case powerPointRewrite(PowerPointRewriteResult)
     case powerPointDesign(PowerPointDesignResult)
     case powerPointDirectEdit(PowerPointDirectEditResult)
+    case powerPointFinish(PowerPointFinishResult)
+    case excelAnalysis(ExcelAnalysisResult)
 }
