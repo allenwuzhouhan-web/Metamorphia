@@ -26,9 +26,13 @@ enum MetamorphiaIntentEngine {
 
     /// Fire an agent run and return the final text. If `showNotch` is true,
     /// the command bar is summoned so the user sees the turn stream live.
+    /// `sessionID` — when non-nil, threads the phone's CloudKit session id
+    /// into the run so interim + final TurnResult writes correlate to one
+    /// thread. Nil for local/AppIntent-originated turns.
     static func run(
         prompt: String,
         systemPrompt: String = defaultSystemPrompt,
+        sessionID: String? = nil,
         showNotch: Bool = true
     ) async -> String {
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -40,12 +44,28 @@ enum MetamorphiaIntentEngine {
 
         if showNotch, let vm, !vm.isProcessing {
             CommandBarCoordinator.shared.summon()
-            await vm.submit(prompt: prompt, systemPrompt: systemPrompt)
+            await vm.submit(prompt: prompt, systemPrompt: systemPrompt, sessionID: sessionID)
             return vm.conversation.last?.result ?? ""
         }
 
         if let loop = MetamorphiaBootstrap.loop {
-            let outcome = await loop.submit(command: prompt, systemPrompt: systemPrompt)
+            // M9 fix (1): pass sessionID directly into submit so concurrent runs
+            // each carry their own id; no shared mutable runSessionIdOverride needed.
+            // FileConversationStore is injected at MetamorphiaBootstrap:~578.
+            // Load the session's persisted history so phone turns continue the
+            // same thread rather than starting from scratch each time.
+            let previousMessages: [ChatMessage]
+            if let sid = sessionID {
+                previousMessages = await loop.loadMessages(sessionId: sid)
+            } else {
+                previousMessages = []
+            }
+            let outcome = await loop.submit(
+                command: prompt,
+                systemPrompt: systemPrompt,
+                previousMessages: previousMessages,
+                runSessionId: sessionID
+            )
             return outcome.text
         }
 #endif

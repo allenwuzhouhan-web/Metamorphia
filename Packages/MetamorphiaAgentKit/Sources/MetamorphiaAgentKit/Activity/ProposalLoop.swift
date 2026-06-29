@@ -67,6 +67,13 @@ public enum ProposalGoal: String, Sendable, Hashable, Codable {
     /// activity signal (VC app, unread notification). Surface "Draft a
     /// reply?" so the workflow recorder can jump-start a template.
     case replyToMessage
+    /// A ritual window has recurred enough times to be compiled into a skill.
+    /// This goal is never emitted by `ProposalLoop` itself — it is surfaced
+    /// directly by `AmbientProposalPresenter.presentLearned(_:skill:)` after
+    /// `RitualCompilationSweep` promotes and compiles the window. The
+    /// `ProposalGoal` case exists so the presenter's `runDefaultAction` switch
+    /// is exhaustive and the skill side-channel can be keyed by `noveltyKey`.
+    case addSkill
 }
 
 // MARK: - ProposalLoop
@@ -160,6 +167,12 @@ public actor ProposalLoop {
     /// `PerceptionBudget.shared.current.rawValue`.
     private var attentionScoreProvider: @Sendable () async -> Double = { 0.7 }
     private var budgetTierProvider: @Sendable () async -> Int = { 3 }
+    /// Injected at `start(…)`. Returns `true` when the user is in a Focus
+    /// mode that should suppress ambient proposals. Wired by
+    /// MetamorphiaBootstrap to the durable Defaults[.focusFilterActive]
+    /// signal (falling back to DoNotDisturbManager.isDoNotDisturbActive).
+    /// Default `false` keeps the loop fully active when unwired (tests).
+    private var focusActiveProvider: @Sendable () async -> Bool = { false }
 
     // MARK: - Public API
 
@@ -187,10 +200,12 @@ public actor ProposalLoop {
         stream: ActivityStream,
         attentionScore: @escaping @Sendable () async -> Double,
         budgetTier: @escaping @Sendable () async -> Int,
+        focusActive: @escaping @Sendable () async -> Bool = { false },
         tunables: Tunables = Tunables()
     ) {
         self.attentionScoreProvider = attentionScore
         self.budgetTierProvider = budgetTier
+        self.focusActiveProvider = focusActive
         self.tunables = tunables
         guard !started else { return }
         started = true
@@ -421,6 +436,10 @@ public actor ProposalLoop {
         // downstream perception/suggestion work has headroom.
         let tier = await budgetTierProvider()
         guard tier >= 2 else { return false }
+
+        // (2b) Focus filter. When the user is in a suppressing Focus mode,
+        // hold all ambient proposals — same intent as DND for notifications.
+        guard await focusActiveProvider() == false else { return false }
 
         // (3) Rate limit.
         let sinceLast = now.timeIntervalSince(lastEmissionAt)

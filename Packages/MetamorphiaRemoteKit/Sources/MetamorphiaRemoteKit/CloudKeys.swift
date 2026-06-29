@@ -8,6 +8,7 @@ public enum CloudKeys {
 
     public enum RecordType {
         public static let pendingCommand = "PendingCommand"
+        public static let turnResult     = "TurnResult"
     }
 
     public enum Field {
@@ -15,5 +16,11 @@ public enum CloudKeys {
         public static let payload   = "payload"
         public static let createdAt = "createdAt"
         public static let senderID  = "senderID"
+
+        // TurnResult record fields
+        public static let sessionID = "sessionID"
+        public static let text      = "text"
+        public static let status    = "status"
+        public static let updatedAt = "updatedAt"
     }
 }

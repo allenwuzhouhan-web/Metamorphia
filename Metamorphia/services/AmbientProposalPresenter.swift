@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import Combine
 import MetamorphiaAgentKit
+import MetamorphiaExecutors
 import MetamorphiaPerception
 import SwiftUI
 
@@ -123,6 +124,13 @@ public final class AmbientProposalPresenter {
     private var cancellable: AnyCancellable?
     private var currentProposal: Proposal?
 
+    /// Side-channel store for `.addSkill` proposals. `RitualCompilationSweep`
+    /// cannot embed a `CompiledSkill` in `Proposal` (the struct is payload-free
+    /// by design). Instead the sweep calls `presentLearned(_:skill:)` which
+    /// stores the skill here keyed by `noveltyKey`, then presents the proposal
+    /// normally. `runAddSkill(for:)` retrieves and removes the entry on accept.
+    private var pendingSkills: [String: CompiledSkill] = [:]
+
     /// Monotonic token bumped on every `present(_:)`. The `hide()` fade's
     /// completion handler captures the value at dismissal-start and skips
     /// the `orderOut` if the token has drifted — i.e., a new proposal was
@@ -148,6 +156,18 @@ public final class AmbientProposalPresenter {
             .sink { [weak self] proposal in
                 self?.present(proposal)
             }
+    }
+
+    /// Surface a learned-skill proposal. Stores `skill` in the side-channel
+    /// keyed by `proposal.noveltyKey`, then presents the proposal card exactly
+    /// as `ProposalLoop`-driven proposals are presented. On user acceptance,
+    /// `runDefaultAction` retrieves the skill from the side-channel and calls
+    /// `CompiledSkillCatalog.shared.addSkill(_:)` to persist and register it.
+    ///
+    /// Must be called on the main actor (this class is `@MainActor`).
+    public func presentLearned(_ proposal: Proposal, skill: CompiledSkill) {
+        pendingSkills[proposal.noveltyKey] = skill
+        present(proposal)
     }
 
     /// Tear down. Clears the on-screen card and the subscription.
@@ -249,6 +269,8 @@ public final class AmbientProposalPresenter {
             // calendar event's URL, save-download could spawn a "Move to
             // …" panel. Until that UI exists, acceptance is a silent no-op.
             await runNoOp(goal: proposal.goal)
+        case .addSkill:
+            await runAddSkill(for: proposal)
         }
     }
 
@@ -260,6 +282,25 @@ public final class AmbientProposalPresenter {
         #if DEBUG
         NSLog("[AmbientProposalPresenter] no-op runner for goal=\(goal.rawValue)")
         #endif
+    }
+
+    /// Accept an `.addSkill` proposal: retrieve the `CompiledSkill` from the
+    /// side-channel store and hand it to `CompiledSkillCatalog` which persists
+    /// it to the `workflows` SQLite table and registers a `CompiledSkillTool`
+    /// with the live `ToolRegistry`.
+    private static func runAddSkill(for proposal: Proposal) async {
+        // Retrieve and remove from the side-channel. `runDefaultAction` is
+        // `static`; reach the instance store via `shared` on the main actor.
+        let skill = await MainActor.run {
+            shared.pendingSkills.removeValue(forKey: proposal.noveltyKey)
+        }
+        guard let skill else {
+            #if DEBUG
+            NSLog("[AmbientProposalPresenter] runAddSkill: no pending skill for key=\(proposal.noveltyKey)")
+            #endif
+            return
+        }
+        await CompiledSkillCatalog.shared.addSkill(skill)
     }
 
     private static func runPasteLink() async {

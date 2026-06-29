@@ -208,6 +208,12 @@ public final class AICommandViewModel: ObservableObject {
     /// the minimized view's pulse dot color (blue pulsing → solid green).
     @Published public var hasUnseenCompletion: Bool = false
 
+    /// Brief glanceable summary of the last completed run ("Done · 3 edits"),
+    /// shown as the Pulse result chip for ~2s after a turn finishes. Nil while
+    /// idle/running. Computed from `AgentLoop.Outcome.toolsUsed`; cleared at the
+    /// start of the next submit.
+    @Published public private(set) var lastResultSummary: String?
+
     /// Files the user has dragged onto the command bar, pending injection into
     /// the next submitted prompt. Cleared after each submission. Not persisted.
     @Published public private(set) var attachedFiles: [CommandBarAttachedFile] = []
@@ -232,10 +238,21 @@ public final class AICommandViewModel: ObservableObject {
     /// machine path.
     private var streamingBuffer: String = ""
 
+    /// M9: non-nil only while a phone-originated turn streams. Drives the
+    /// throttled interim TurnResult writes in the progress sink below.
+    private var remoteStreamSessionID: String?
+    private var remoteStreamLastWrite: Date = .distantPast
+    /// Throttle floor for interim CloudKit writes — ~1/sec to avoid hammering.
+    private let remoteStreamThrottle: TimeInterval = 1.0
+
     /// Guards against auto-exporting the same research turn twice — the
     /// terminal `.result` state can be re-entered (e.g. rich-content
     /// post-processing).
     private var lastAutoExportedTurnID: UUID?
+
+    /// Token used to cancel a stale `lastResultSummary` clear task when a new
+    /// submit arrives before the 2s linger period expires.
+    private var lingerToken: UUID?
 
     /// Reserved id the view model uses for the Oracle root node the agent
     /// loop opens via `treeStarted(.oracle)`.
@@ -407,7 +424,9 @@ public final class AICommandViewModel: ObservableObject {
     /// are stripped from the user-visible prompt before it reaches the LLM.
     /// The turn's displayed prompt preserves the original (slashes included)
     /// so the conversation history reflects what the user actually typed.
-    public func submit(prompt: String, systemPrompt: String) async {
+    /// `sessionID` — when non-nil (phone-originated turn), arms throttled
+    /// interim TurnResult writes so the iPhone sees partial text live.
+    public func submit(prompt: String, systemPrompt: String, sessionID: String? = nil) async {
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
         if ConversationContinuationService.parseWeChatDirectMessageRequest(prompt) != nil {
@@ -649,6 +668,8 @@ public final class AICommandViewModel: ObservableObject {
         lastExecutingToolName = ""
         lastExecutingStep = 0
         lastExecutingTotal = 0
+        lastResultSummary = nil
+        MenuBarTaskStatusStore.shared.updateResultSummary(nil)
         // New turn — if the user had compacted the bar reading the previous
         // reply, bring it back to full size so they see the fresh stream.
         if isResponseCompacted {
@@ -678,6 +699,11 @@ public final class AICommandViewModel: ObservableObject {
         // LLM call. Posts to NotificationCenter; Phase 2 (InterestGraphStore)
         // will subscribe.
         await extractAndPostEntities(from: prompt, source: .userTurn)
+
+        // M4: pre-fetch the temporal-recall block off the async path so the
+        // synchronous RetraceRecallMiddleware can read it from persistentStorage
+        // on iteration 0. Suppressed when the focused field is sensitive.
+        await prefetchRetraceRecall(for: agentPrompt)
 
         let functionSpec = FunctionDetector.detect(in: agentPrompt)
         let turn = Turn(
@@ -713,7 +739,16 @@ public final class AICommandViewModel: ObservableObject {
         if functionSpec != nil {
             primedPrompt += "\n\nThe user entered a mathematical function. A graph is being rendered. Briefly describe the function's shape and key properties. 2-3 sentences."
         }
-        let priorMessages = persistence?.previousChatMessages() ?? []
+        // M9 fix (3): when the turn originates from the phone, load the
+        // persisted thread so the agent continues the same conversation
+        // rather than starting from scratch. For local turns, fall through
+        // to the notch history provided by ConversationPersistenceService.
+        let priorMessages: [ChatMessage]
+        if let sid = sessionID {
+            priorMessages = await loop.loadMessages(sessionId: sid)
+        } else {
+            priorMessages = persistence?.previousChatMessages() ?? []
+        }
 
         let commandWithAttachments: String
         var sections: [String] = [agentPrompt]
@@ -750,12 +785,26 @@ public final class AICommandViewModel: ObservableObject {
 
         let runTrace = AgentTrace(goal: commandWithAttachments)
 
+        // M9 fix (1+3): arm throttled TurnResult writebacks for phone turns.
+        // The sessionID is now passed directly into loop.submit as runSessionId
+        // so the ConversationStore persists under the phone's thread id without
+        // any shared mutable state on the loop. setRunSessionId is removed.
+        if let sessionID {
+            remoteStreamSessionID = sessionID
+            remoteStreamLastWrite = .distantPast
+        }
+
         let outcome = await loop.submit(
             command: commandWithAttachments,
             systemPrompt: primedPrompt,
             previousMessages: priorMessages,
-            trace: runTrace
+            trace: runTrace,
+            runSessionId: sessionID
         )
+
+        if sessionID != nil {
+            remoteStreamSessionID = nil
+        }
 
         if !outcome.wasCancelled, let scorer = intentScorer {
             scorer.recordOutcome(query: agentPrompt, toolsUsed: outcome.toolsUsed)
@@ -912,6 +961,15 @@ public final class AICommandViewModel: ObservableObject {
                 conversation[idx].isError = true
                 inputBarState = .error(message: failureMessage)
                 protectedTerminalTurnIDs.insert(conversation[idx].id)
+            } else if conversation[idx].richContent == nil,
+                      let agentParsed = RichResultParser.parse(outcome.text) {
+                // T11 — opportunistic rich-content parse for agent-tool-embedded blocks.
+                // The copilot tools embed a fully-resolved [PPT_DESIGN]/[PPT_REWRITE]/
+                // [DOC_REVIEW] block in their return string; RichResultParser reconstructs
+                // the bespoke result card here — Apply/Restore/Undo buttons and all.
+                conversation[idx].richContent = agentParsed.content
+                conversation[idx].result = agentParsed.displayText
+                protectedTerminalTurnIDs.insert(conversation[idx].id)
             }
             for pillIdx in conversation[idx].toolPills.indices {
                 conversation[idx].toolPills[pillIdx].isComplete = true
@@ -930,6 +988,25 @@ public final class AICommandViewModel: ObservableObject {
         agentTree = nil
         currentlyRunningNodeId = nil
         streamingBuffer = ""
+
+        // Pulse result chip — set a brief glanceable summary so the Pulse
+        // lingers with a "Done" chip for ~2s after the run finishes.
+        if !outcome.wasCancelled && errorMessage == nil {
+            let edits = outcome.toolsUsed.filter {
+                $0 == "edit_file" || $0 == "write_file"
+            }.count
+            let summary = edits > 0 ? "Done · \(edits) edit\(edits == 1 ? "" : "s")" : "Done"
+            lastResultSummary = summary
+            MenuBarTaskStatusStore.shared.updateResultSummary(summary)
+            let turnToken = UUID()
+            lingerToken = turnToken
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                guard let self, self.lingerToken == turnToken else { return }
+                self.lastResultSummary = nil
+                MenuBarTaskStatusStore.shared.updateResultSummary(nil)
+            }
+        }
 
         // Chain observer — surface the "save as skill" banner when this run
         // crossed the "long workflow" threshold. Runs only on successful
@@ -1000,15 +1077,31 @@ public final class AICommandViewModel: ObservableObject {
     /// categories, formatted as confidence-tagged bullets. Soft prior — does
     /// not constrain the model.
     private func primedSystemPrompt(base: String, query: String) -> String {
-        guard let scorer = intentScorer else { return base }
+        // Build the office-app soft hint once so it appears in both the early
+        // return (no scored categories) and the full return below.
+        let officeHint: String = {
+            guard let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else {
+                return ""
+            }
+            switch bundle {
+            case "com.microsoft.Powerpoint":
+                return "\n\nPowerPoint is frontmost. For simple slide-wide formatting (bold, italic, font size, color, alignment), call direct_edit. To restyle or rewrite the open slide/deck, call capture_deck first (for exact shape indices), then design_deck or rewrite_slides."
+            case "com.microsoft.Word":
+                return "\n\nMicrosoft Word is frontmost. To critique the open document or apply tracked comments, use review_document or edit_word_comments."
+            default:
+                return ""
+            }
+        }()
+
+        guard let scorer = intentScorer else { return base + officeHint }
         let top = scorer.scoreIntent(query: query)
             .filter { $0.score >= 0.4 }
             .prefix(4)
-        guard !top.isEmpty else { return base }
+        guard !top.isEmpty else { return base + officeHint }
         let bullets = top
             .map { "- \($0.category.rawValue) (confidence \(String(format: "%.2f", $0.score)))" }
             .joined(separator: "\n")
-        return base + "\n\n## Likely Tool Categories\n" + bullets
+        return base + "\n\n## Likely Tool Categories\n" + bullets + officeHint
     }
 
     public func setActiveAgent(_ profile: AgentProfile) {
@@ -1032,48 +1125,6 @@ public final class AICommandViewModel: ObservableObject {
     /// without touching the LLM. Appends the turn to `conversation`, transitions
     /// `inputBarState` to `.result`, and attaches a synthetic `AgentTrace` so
     /// the T12 trace sheet can display the local hit.
-    @MainActor
-    private func finalizeLocalTurn(_ hit: LocalCommandHit, prompt: String) {
-        let pill = ToolCallPill(
-            toolName: "local:\(hit.matcherName)",
-            stepIndex: 1,
-            totalSteps: 1,
-            isComplete: true,
-            isSuccess: true
-        )
-
-        // Build a synthetic trace so the T12 trace button lights up.
-        let trace = AgentTrace(goal: prompt)
-        trace.append(TraceEntry(
-            kind: .toolCall(
-                name: "local:\(hit.matcherName)",
-                arguments: hit.arguments,
-                result: hit.message,
-                durationMs: hit.elapsed * 1000,
-                success: true
-            )
-        ))
-        trace.finalOutcome = .success
-        trace.endTime = Date()
-
-        let turn = Turn(
-            prompt: prompt,
-            result: hit.message,
-            toolPills: [pill],
-            isStreaming: false,
-            richContent: nil,
-            isStaged: false,
-            isError: false,
-            trace: trace
-        )
-        conversation.append(turn)
-        inputBarState = .result(message: hit.message)
-
-        if AppDelegate.shared?.vm.notchState == .minimized {
-            hasUnseenCompletion = true
-        }
-    }
-
     @MainActor
     private func finalizePowerPointDirectEditTurn(_ result: PowerPointDirectEditResult, prompt: String) {
         currentInput = ""
@@ -1112,6 +1163,48 @@ public final class AICommandViewModel: ObservableObject {
         )
         conversation.append(turn)
         protectedTerminalTurnIDs.insert(turn.id)
+
+        if AppDelegate.shared?.vm.notchState == .minimized {
+            hasUnseenCompletion = true
+        }
+    }
+
+    @MainActor
+    private func finalizeLocalTurn(_ hit: LocalCommandHit, prompt: String) {
+        let pill = ToolCallPill(
+            toolName: "local:\(hit.matcherName)",
+            stepIndex: 1,
+            totalSteps: 1,
+            isComplete: true,
+            isSuccess: true
+        )
+
+        // Build a synthetic trace so the T12 trace button lights up.
+        let trace = AgentTrace(goal: prompt)
+        trace.append(TraceEntry(
+            kind: .toolCall(
+                name: "local:\(hit.matcherName)",
+                arguments: hit.arguments,
+                result: hit.message,
+                durationMs: hit.elapsed * 1000,
+                success: true
+            )
+        ))
+        trace.finalOutcome = .success
+        trace.endTime = Date()
+
+        let turn = Turn(
+            prompt: prompt,
+            result: hit.message,
+            toolPills: [pill],
+            isStreaming: false,
+            richContent: nil,
+            isStaged: false,
+            isError: false,
+            trace: trace
+        )
+        conversation.append(turn)
+        inputBarState = .result(message: hit.message)
 
         if AppDelegate.shared?.vm.notchState == .minimized {
             hasUnseenCompletion = true
@@ -1282,6 +1375,45 @@ public final class AICommandViewModel: ObservableObject {
         NotificationCenter.default.post(
             Notification.continuumEntitiesExtracted(entities: entities, source: source, text: text)
         )
+    }
+
+    // MARK: - M4: Temporal recall pre-fetch
+
+    /// M4: Fetches the temporal-recall block via the bootstrap-wired closure and
+    /// stashes it (plus the sensitivity suppress flag) into the loop's middleware
+    /// persistentStorage so RetraceRecallMiddleware can read it synchronously.
+    ///
+    /// Fix (4) + (5): ALWAYS write BOTH keys every turn so stale values from a
+    /// prior turn can never bleed through. A sensitive turn writes suppress=true
+    /// + block=""; a non-sensitive turn writes suppress=false + block=<fetched
+    /// value or "">. The empty-string guard in RetraceRecallMiddleware already
+    /// skips injection when block is blank, so "" is safe for the no-fetch path.
+    private func prefetchRetraceRecall(for query: String) async {
+        // Privacy gate — never recall while a sensitive field is focused.
+        let sensitive = await MetamorphiaBootstrap.focusedFieldIsSensitive()
+        if sensitive {
+            // Suppress and clear any leftover block from a prior turn.
+            await loop.setMiddlewareStorage([
+                RetraceRecallMiddleware.suppressKey: true,
+                RetraceRecallMiddleware.recallBlockKey: "",
+            ])
+            return
+        }
+
+        // Non-sensitive path: fetch the recall block (may be nil/absent).
+        let block: String
+        if let fetch = MetamorphiaBootstrap.retraceRecallFetch,
+           let fetched = await fetch(query) {
+            block = fetched
+        } else {
+            block = ""
+        }
+        // Write both keys so a previously-set suppress=true is cleared and a
+        // previously-set block from a different turn is replaced.
+        await loop.setMiddlewareStorage([
+            RetraceRecallMiddleware.suppressKey: false,
+            RetraceRecallMiddleware.recallBlockKey: block,
+        ])
     }
 
     // MARK: - Slash suggestions
@@ -1502,10 +1634,6 @@ public final class AICommandViewModel: ObservableObject {
         // Package not linked yet — placeholder for compile-in-isolation.
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         if await ModeRouter.tryHandle(prompt, viewModel: self) { return }
-        if DocumentCopilot.isApplyAuditRequest(prompt) {
-            await runApplyAuditTurn(prompt: prompt)
-            return
-        }
         // T13 — local command pipeline (stub path).
         if let hit = await LocalCommandPipeline.handle(prompt: prompt) {
             let pill = ToolCallPill(
@@ -1899,6 +2027,7 @@ public final class AICommandViewModel: ObservableObject {
         }
     }
 
+
     private func appendDocumentActionTurn(
         prompt: String,
         result: String,
@@ -1988,6 +2117,25 @@ extension AICommandViewModel: AgentProgressSink {
                 default:
                     self.streamingBuffer += chunk
                     self.inputBarState = .streaming(partialText: self.streamingBuffer)
+                    // M9: throttled interim push so the phone sees live partial text.
+                    // Interim writes use status "streaming"; the final "complete" write
+                    // is emitted by RemoteCommandListener.perform after the loop returns.
+                    // NOTE: interim writes create one CKRecord per ~1s tick — a future
+                    // sweep should prune status:"streaming" rows after the "complete"
+                    // write lands, or switch to overwriting a single record keyed by
+                    // CKRecord.ID(recordName: sessionID).
+                    if let sid = self.remoteStreamSessionID {
+                        let now = Date()
+                        if now.timeIntervalSince(self.remoteStreamLastWrite) >= self.remoteStreamThrottle {
+                            self.remoteStreamLastWrite = now
+                            let snapshot = self.streamingBuffer
+                            Task { @MainActor in
+                                await RemoteCommandListener.shared.writeInterimTurnResult(
+                                    sessionID: sid, text: snapshot
+                                )
+                            }
+                        }
+                    }
                 }
 
             case .completed, .error, .cancelled:

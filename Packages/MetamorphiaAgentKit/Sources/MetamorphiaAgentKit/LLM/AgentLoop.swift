@@ -129,19 +129,38 @@ public actor AgentLoop {
         self.treeSink = sink
     }
 
+    /// Merge keys into the middleware chain's persistent storage. Used by the
+    /// host to pre-seed values (e.g. the M4 recall block) that a synchronous
+    /// middleware will read on iteration 0. The merge is done under a single
+    /// lock acquisition via `MiddlewareChain.mergeStorage`.
+    public func setMiddlewareStorage(_ values: [String: Any]) {
+        middlewareChain.mergeStorage(values)
+    }
+
     // MARK: - Public API
 
     /// Submit a new command. Cancels any in-flight run, then starts fresh.
     /// Returns the final outcome once the run completes.
+    ///
+    /// - Parameter runSessionId: When non-nil, the completed thread is
+    ///   persisted under this id (not the constructor default). Pass the
+    ///   phone's CloudKit session id for phone-originated turns so the
+    ///   conversation store can be resumed across launches.
     public func submit(
         command: String,
         systemPrompt: String,
         previousMessages: [ChatMessage] = [],
         agent: AgentProfile = .general,
         complexity: TaskComplexity? = nil,
-        trace: AgentTrace? = nil
+        trace: AgentTrace? = nil,
+        runSessionId: String? = nil
     ) async -> Outcome {
         cancelInFlight()
+
+        // Capture the effective session id at call time so concurrent
+        // submissions each carry their own id into the detached Task — no
+        // shared mutable override is needed.
+        let effectiveSessionId: String? = runSessionId ?? sessionId
 
         let effective = complexity ?? Self.classifyComplexity(command)
         middlewareChain.reset()
@@ -178,11 +197,20 @@ public actor AgentLoop {
 
         // Persist the completed thread so sessions can resume across launches.
         // Failures are swallowed — a save error must never break the caller's run.
-        if let store = conversationStore, let id = sessionId, !outcome.wasCancelled {
+        if let store = conversationStore, let id = effectiveSessionId, !outcome.wasCancelled {
             try? await store.save(sessionId: id, messages: outcome.messages)
         }
 
         return outcome
+    }
+
+    /// Load persisted messages for the given session from the injected
+    /// `ConversationStore`. Returns an empty array when no store is configured
+    /// or no prior session exists. Used by callers that want to hydrate
+    /// `previousMessages` before submitting a continuation turn.
+    public func loadMessages(sessionId: String) async -> [ChatMessage] {
+        guard let store = conversationStore else { return [] }
+        return (try? await store.load(sessionId: sessionId)) ?? []
     }
 
     /// Cancel any in-flight run. The current `submit(...)` will return an
@@ -773,7 +801,8 @@ public actor AgentLoop {
         session: SessionProvider = NullSessionProvider(),
         toolCatalog: ToolCatalog,
         adaptiveResponseStorageURL: URL? = nil,
-        interestGraph: InterestGraphStore? = nil
+        interestGraph: InterestGraphStore? = nil,
+        retraceRecall: @escaping @Sendable (String) async -> String? = { _ in nil }
     ) -> MiddlewareChain {
         let chain = MiddlewareChain()
         // Infrastructure
@@ -797,6 +826,10 @@ public actor AgentLoop {
             clipboard: clipboard,
             session: session
         ))
+        // M4: temporal recall — injects a pre-fetched "earlier context" block
+        // on iteration 0. Sits after ImplicitContext so screen/clipboard context
+        // appears first; the closure is unused by the sync hook (host pre-fetches).
+        chain.add(RetraceRecallMiddleware(recall: retraceRecall))
         chain.add(AdaptiveResponseMiddleware(engagementStorageURL: adaptiveResponseStorageURL))
         // Interest graph potentiation — runs before CorrectionDetector so tool
         // subjects are recorded even when the LLM gets corrected immediately after.

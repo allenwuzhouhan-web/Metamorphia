@@ -30,6 +30,16 @@ import Foundation
 ///
 /// Does NOT handle "play Shape of You by Taylor Swift" — song-library matching
 /// is out of scope for T13.
+///
+/// NOTE — no ToolRegistry equivalent:
+///   Unlike TimerLocalMatcher and NoteLocalMatcher (which route through
+///   `LocalCommandPipeline.registry?.executeDirectly`), this matcher runs
+///   AppleScript directly.  There is currently no registered agent tool
+///   (e.g. play_music / pause_music / next_track) in MetamorphiaExecutors that
+///   wraps Music.app transport; `MusicPlaySongTool` referenced in ToolRegistry.swift
+///   is only a doc-comment placeholder and is not registered.  Until such a tool
+///   is added to the ToolRegistry this AppleScript path is intentional, not an
+///   oversight.
 enum MusicLocalMatcher {
 
     static func handle(_ normalized: String) async -> LocalCommandHit? {

@@ -12,6 +12,7 @@ public enum Command: Codable, Equatable, Sendable {
     case nextTrack
     case previousTrack
     case setKeepAwake(Bool)
+    case askAgent(prompt: String, sessionID: String)
 
     /// Stable identifier written to `PendingCommand.kind`. Decoupled from
     /// `CodingKeys` so Swift refactors can't silently break records that the
@@ -25,6 +26,7 @@ public enum Command: Codable, Equatable, Sendable {
         case .nextTrack:       return "next_track"
         case .previousTrack:   return "previous_track"
         case .setKeepAwake:    return "set_keep_awake"
+        case .askAgent:        return "ask_agent"
         }
     }
 
@@ -34,6 +36,8 @@ public enum Command: Codable, Equatable, Sendable {
         switch self {
         case .setKeepAwake(let on):
             return try? JSONEncoder().encode(SetKeepAwakePayload(on: on))
+        case .askAgent(let prompt, let sessionID):
+            return try? JSONEncoder().encode(AskAgentPayload(prompt: prompt, sessionID: sessionID))
         case .sleepMac, .lockMac, .playMusic, .pauseMusic, .nextTrack, .previousTrack:
             return nil
         }
@@ -54,6 +58,11 @@ public enum Command: Codable, Equatable, Sendable {
                   let body = try? JSONDecoder().decode(SetKeepAwakePayload.self, from: payload)
             else { return nil }
             return .setKeepAwake(body.on)
+        case "ask_agent":
+            guard let payload,
+                  let body = try? JSONDecoder().decode(AskAgentPayload.self, from: payload)
+            else { return nil }
+            return .askAgent(prompt: body.prompt, sessionID: body.sessionID)
         default:
             return nil
         }
@@ -62,4 +71,25 @@ public enum Command: Codable, Equatable, Sendable {
 
 private struct SetKeepAwakePayload: Codable {
     let on: Bool
+}
+
+private struct AskAgentPayload: Codable {
+    let prompt: String
+    let sessionID: String
+}
+
+/// Result of an agent turn, written back to the result channel
+/// (`CloudKeys.RecordType.turnResult`) by the Mac host and read by the iPhone.
+public struct TurnResult: Codable, Equatable, Sendable {
+    public let sessionID: String
+    public let text: String
+    public let status: String
+    public let updatedAt: Date
+
+    public init(sessionID: String, text: String, status: String, updatedAt: Date) {
+        self.sessionID = sessionID
+        self.text = text
+        self.status = status
+        self.updatedAt = updatedAt
+    }
 }

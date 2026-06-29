@@ -55,6 +55,13 @@ final class RemoteCommandListener {
         // iCloud entitlement is absent from the running binary.
         guard Self.hasICloudEntitlement else { return }
         registerSystemObservers()
+        // M9: register a CKQuerySubscription so iCloud pushes a silent
+        // notification the instant the phone writes a PendingCommand — superseding
+        // the 30s poll for latency. The poll loop below is kept as the fallback
+        // for when push is unavailable (no APNs token, Low Power Mode, background
+        // throttling). Push delivery requires the host to call
+        // NSApplication.shared.registerForRemoteNotifications() at launch.
+        Task { [weak self] in await self?.registerPushSubscription() }
         pollTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
@@ -238,6 +245,105 @@ final class RemoteCommandListener {
             MusicManager.shared.previousTrack()
         case .setKeepAwake(let on):
             KeepAwake.shared.setEnabled(on)
+        case .askAgent(let prompt, let sessionID):
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let text = await MetamorphiaIntentEngine.run(
+                    prompt: prompt,
+                    systemPrompt: MetamorphiaIntentEngine.defaultSystemPrompt,
+                    sessionID: sessionID,
+                    showNotch: true
+                )
+                await self.writeTurnResult(
+                    TurnResult(
+                        sessionID: sessionID,
+                        text: text,
+                        status: "complete",
+                        updatedAt: Date()
+                    )
+                )
+            }
+        }
+    }
+
+    /// M9: throttled interim write during streaming. Same record type as the
+    /// final result but with status "streaming" and a fresh `updatedAt` so the
+    /// phone's "newest by updatedAt" sort surfaces the latest partial. The caller
+    /// (AICommandViewModel progress sink) is responsible for the ~1/sec throttle.
+    /// Push is best-effort; the 30s Mac poll + 1s phone poll are the guaranteed
+    /// delivery paths — these writes are additive only.
+    func writeInterimTurnResult(sessionID: String, text: String) async {
+        await writeTurnResult(
+            TurnResult(sessionID: sessionID, text: text, status: "streaming", updatedAt: Date())
+        )
+    }
+
+    /// M9: public entry point so the app's push notification handler can
+    /// trigger an immediate poll when APNs delivers a silent push for a
+    /// PendingCommand CKQuerySubscription event. The 30s loop runs regardless
+    /// as the guaranteed fallback; this only shortens latency.
+    /// NOTE: for silent pushes to arrive, the Mac host must call
+    /// NSApplication.shared.registerForRemoteNotifications() at launch.
+    func handleRemotePush() async { await pollOnce() }
+
+    private func writeTurnResult(_ result: TurnResult) async {
+        // Use a deterministic record name so every write for the same session
+        // targets the same CKRecord, preventing unbounded record growth from
+        // ~1/sec interim streaming writes.
+        let recordName = "turnresult-\(result.sessionID)"
+        let recordID   = CKRecord.ID(recordName: recordName)
+        let record     = CKRecord(recordType: CloudKeys.RecordType.turnResult, recordID: recordID)
+        record[CloudKeys.Field.sessionID] = result.sessionID as CKRecordValue
+        record[CloudKeys.Field.text]      = result.text      as CKRecordValue
+        record[CloudKeys.Field.status]    = result.status    as CKRecordValue
+        record[CloudKeys.Field.updatedAt] = result.updatedAt as CKRecordValue
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let op = CKModifyRecordsOperation(recordsToSave: [record], recordIDsToDelete: nil)
+            // .changedKeys treats the supplied record as a full overwrite of only
+            // the named fields, creating the record if absent. This avoids the
+            // server-side conflict path that would surface when we try to save a
+            // brand-new local CKRecord whose recordName already exists in iCloud.
+            op.savePolicy = .changedKeys
+            op.modifyRecordsResultBlock = { [weak self] result in
+                guard let self else { continuation.resume(); return }
+                switch result {
+                case .success:
+                    Logger.log("[RemoteCommands] Wrote TurnResult for session \(record[CloudKeys.Field.sessionID] as? String ?? "?")", category: .network)
+                case .failure(let error):
+                    Logger.log("[RemoteCommands] TurnResult write failed: \(error.localizedDescription)", category: .error)
+                }
+                continuation.resume()
+            }
+            database.add(op)
+        }
+    }
+
+    /// M9: register a CKQuerySubscription on PendingCommand so iCloud pushes a
+    /// silent notification the moment the phone writes a command — superseding
+    /// the 30s poll for latency. The poll loop is deliberately kept running as
+    /// a fallback for when push is unavailable (no APNs token, Low Power Mode,
+    /// background throttling). `hasICloudEntitlement` is already guarded by the
+    /// caller. CKQuerySubscription save is idempotent per subscriptionID, so a
+    /// re-run on relaunch is a cheap no-op server-side.
+    private func registerPushSubscription() async {
+        guard await iCloudIsAvailable() else { return }
+        let subscriptionID = "pending-command-sub"
+        let subscription = CKQuerySubscription(
+            recordType: CloudKeys.RecordType.pendingCommand,
+            predicate: NSPredicate(value: true),
+            subscriptionID: subscriptionID,
+            options: [.firesOnRecordCreation]
+        )
+        let info = CKSubscription.NotificationInfo()
+        info.shouldSendContentAvailable = true   // silent push; we re-poll on wake
+        subscription.notificationInfo = info
+        do {
+            _ = try await database.save(subscription)
+            Logger.log("[RemoteCommands] Push subscription registered", category: .network)
+        } catch let ckErr as CKError where ckErr.code == .serverRejectedRequest {
+            // Already exists from a prior launch — fine.
+        } catch {
+            Logger.log("[RemoteCommands] Subscription register failed (poll still active): \(error.localizedDescription)", category: .warning)
         }
     }
 

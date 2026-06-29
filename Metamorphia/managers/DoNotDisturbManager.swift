@@ -53,6 +53,19 @@ final class DoNotDisturbManager: ObservableObject {
 
     @Published private(set) var monitoringMode: FocusMonitoringMode = Defaults[.focusMonitoringMode]
 
+    /// Durable, OS-contract focus signal preferred over notification/poll
+    /// scraping. The Focus Filter intent (`MetamorphiaFocusFilter`) writes
+    /// `Defaults[.focusFilterActive]`; when the user has attached
+    /// Metamorphia to a Focus, that flag is authoritative. When no Focus
+    /// Filter is configured the flag is its `false` default and we fall
+    /// back to the observed `isDoNotDisturbActive`.
+    ///
+    /// Read by ProposalLoop's focus provider (wired in MetamorphiaBootstrap).
+    var focusSuppressionActive: Bool {
+        if Defaults[.focusFilterActive] { return true }
+        return isDoNotDisturbActive
+    }
+
     /// Timestamp of the last notification-driven state change.
     /// Used to suppress assertions polling from overriding a fresh notification for a short window.
     private var lastNotificationTimestamp: Date = .distantPast

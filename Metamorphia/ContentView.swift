@@ -53,6 +53,9 @@ struct ContentView: View {
     @ObservedObject var extensionLiveActivityManager = ExtensionLiveActivityManager.shared
     // Continuum Phase 7: meeting pre-brief.
     @ObservedObject var calendarLens = CalendarLens.shared
+    // Agent presence: subscribe so the Pulse branch re-evaluates when
+    // isProcessing or lastResultSummary changes while the notch is closed.
+    @ObservedObject var agentStatusStore = MenuBarTaskStatusStore.shared
     @ObservedObject var extensionNotchExperienceManager = ExtensionNotchExperienceManager.shared
     @ObservedObject var localSendService = LocalSendService.shared
     @State private var downloadManager = DownloadManager.shared
@@ -849,6 +852,18 @@ struct ContentView: View {
                       } else if !coordinator.expandingView.show && vm.notchState == .closed && calendarLens.upcomingBrief != nil && !doNotDisturbManager.isDoNotDisturbActive && !vm.hideOnClosed {
                           // Continuum Phase 7: meeting pre-brief flash.
                           MeetingBriefLiveActivity()
+                      } else if !coordinator.expandingView.show && vm.notchState == .closed && (agentStatusStore.status == .inProgress || agentStatusStore.lastResultSummary != nil) && !vm.hideOnClosed {
+                          // The Pulse: transient agent presence. Renders ONLY while the
+                          // agent is working and is mutually exclusive with the idle
+                          // face below (this branch wins, suppressing the face). When
+                          // the agent goes idle the chain falls through to the face.
+                          // agentStatusStore (an @ObservedObject) drives the re-render;
+                          // AgentPresenceLiveActivity's own @ObservedObject on the VM
+                          // drives its internal posture / chip updates.
+                          if let agentVM = CommandBarCoordinator.shared.viewModel {
+                              AgentPresenceLiveActivity(agentViewModel: agentVM)
+                                  .transition(.blurReplace.animation(.interactiveSpring(dampingFraction: 1.2)))
+                          }
                       } else if !coordinator.expandingView.show && vm.notchState == .closed && (!musicManager.isPlaying && musicManager.isPlayerIdle) && Defaults[.showNotHumanFace] && !vm.hideOnClosed  {
                           MetamorphiaFaceAnimation().animation(.interactiveSpring, value: musicManager.isPlayerIdle)
                       } else if vm.notchState == .open {
@@ -1010,6 +1025,8 @@ struct ContentView: View {
                                         vm.setAutoCloseSuppression(active, token: scratchpadDragToken)
                                     }
                                 )
+                            case .capabilities:
+                                CapabilitiesView()
                           }
                       }
                       .id(coordinator.currentView)

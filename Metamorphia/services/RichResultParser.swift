@@ -23,6 +23,7 @@ public enum RichResultParser {
 
         if let powerPointDesign = parsePowerPointDesign(in: trimmed) { return powerPointDesign }
         if let powerPoint = parsePowerPointRewrite(in: trimmed) { return powerPoint }
+        if let powerPointDirectEdit = parsePowerPointDirectEdit(in: trimmed) { return powerPointDirectEdit }
         if let document = parseDocumentReview(in: trimmed) { return document }
         if let event = parseEvent(in: trimmed) {
             return RichParseResult(content: .eventResult(event), displayText: trimmed)
@@ -388,6 +389,33 @@ public enum RichResultParser {
             originalText: firstExtractedJSONStringValue(forKeys: ["originalText", "original_text", "before"], in: objectPayload) ?? "",
             replacementText: replacementText,
             rationale: firstExtractedJSONStringValue(forKeys: ["rationale", "reason", "why"], in: objectPayload)
+        )
+    }
+
+    // MARK: - PowerPoint direct-edit marker: [PPT_DIRECT] ... [/PPT_DIRECT]
+
+    public static func parsePowerPointDirectEdit(in text: String) -> RichParseResult? {
+        guard let payload = extractMarkedPayload(
+            in: text,
+            startToken: "[PPT_DIRECT]",
+            endToken: "[/PPT_DIRECT]"
+        ) else { return nil }
+
+        let normalized = normalizeDocumentReviewPayload(payload)
+        guard let data = normalized.data(using: .utf8),
+              let result = try? JSONDecoder().decode(PowerPointDirectEditResult.self, from: data) else {
+            return nil
+        }
+
+        let cleaned = removeMarkedPayload(
+            from: text,
+            startToken: "[PPT_DIRECT]",
+            endToken: "[/PPT_DIRECT]"
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayText = cleaned.isEmpty ? result.summary : cleaned
+        return RichParseResult(
+            content: .powerPointDirectEdit(result),
+            displayText: displayText
         )
     }
 

@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import UniformTypeIdentifiers
+import MetamorphiaAgentKit
 
 /// Exposes "Send to Metamorphia" in the macOS Services submenu so a right-click
 /// on any file in Finder (or any selected text in any app) can hand it straight
@@ -65,6 +66,56 @@ final class MetamorphiaServicesProvider: NSObject {
 
         Task { @MainActor in
             _ = await MetamorphiaIntentEngine.run(prompt: prompt, showNotch: true)
+        }
+    }
+
+    // MARK: - Writing Tools services
+
+    @objc func proofreadService(
+        _ pboard: NSPasteboard,
+        userData: String?,
+        error: AutoreleasingUnsafeMutablePointer<NSString>
+    ) { runWritingService(.proofread, pboard, error) }
+
+    @objc func rewriteService(
+        _ pboard: NSPasteboard,
+        userData: String?,
+        error: AutoreleasingUnsafeMutablePointer<NSString>
+    ) { runWritingService(.rewriteProfessional, pboard, error) }
+
+    @objc func summarizeService(
+        _ pboard: NSPasteboard,
+        userData: String?,
+        error: AutoreleasingUnsafeMutablePointer<NSString>
+    ) { runWritingService(.summarize, pboard, error) }
+
+    @objc func replyService(
+        _ pboard: NSPasteboard,
+        userData: String?,
+        error: AutoreleasingUnsafeMutablePointer<NSString>
+    ) { runWritingService(.smartReply, pboard, error) }
+
+    private func runWritingService(
+        _ action: AIAction,
+        _ pboard: NSPasteboard,
+        _ error: AutoreleasingUnsafeMutablePointer<NSString>
+    ) {
+        guard let text = pboard.string(forType: .string),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            error.pointee = "No text on the pasteboard."
+            return
+        }
+        Task { @MainActor in
+            // The Services path receives the selection via pasteboard (the OS
+            // serializes it before invoking us). Collect the stream into a
+            // complete result, then run it through the main agent path so the
+            // result appears in the notch and is placed back into the source app.
+            guard let result = try? await AIActionRunner.run(
+                action: action,
+                input: text,
+                context: nil
+            ) else { return }
+            _ = await MetamorphiaIntentEngine.run(prompt: result, showNotch: true)
         }
     }
 

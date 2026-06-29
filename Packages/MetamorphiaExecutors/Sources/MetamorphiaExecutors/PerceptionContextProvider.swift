@@ -99,7 +99,8 @@ public final class PerceptionContextProvider: SystemContextProvider, @unchecked 
             wifiNetworkName: base.wifiNetworkName,
             activeDisplayCount: base.activeDisplayCount,
             focusMode: base.focusMode,
-            perceptionSummary: summary
+            perceptionSummary: summary,
+            islandState: base.islandState
         )
     }
 

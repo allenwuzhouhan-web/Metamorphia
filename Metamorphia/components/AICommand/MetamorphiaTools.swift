@@ -301,6 +301,150 @@ public struct GetSystemStatsTool: ToolDefinition {
     }
 }
 
+// MARK: - Graphing
+
+public struct PlotFunctionTool: ToolDefinition {
+    public let name = "plot_function"
+    public let description = "Render a graph of a mathematical function of x, e.g. 'sin(x)' or 'x^2 - 3x + 2'. Opens the graph in the command bar result."
+    public var parameters: [String: Any] {
+        JSONSchema.object(properties: [
+            "expression": JSONSchema.string(description: "Function of x to plot, e.g. 'sin(x)'"),
+            "x_min": JSONSchema.number(description: "Optional lower x bound (default -10)"),
+            "x_max": JSONSchema.number(description: "Optional upper x bound (default 10)"),
+        ], required: ["expression"])
+    }
+    /// App bootstrap wires this to seed a `.functionGraph` rich turn.
+    public static var present: (@Sendable (_ spec: FunctionGraphSpec) async -> Void)?
+    public init() {}
+    public func execute(arguments: String) async throws -> String {
+        let args = try parseArguments(arguments)
+        let expr = try requiredString("expression", from: args)
+        guard let spec = FunctionDetector.detect(in: expr)
+               ?? FunctionDetector.detect(in: "y = \(expr)") else {
+            return "Could not parse '\(expr)' as a function of x."
+        }
+        await Self.present?(spec)
+        return "Plotted \(expr)."
+    }
+}
+
+// MARK: - LaTeX
+
+public struct RenderLatexTool: ToolDefinition {
+    public let name = "render_latex"
+    public let description = "Render a LaTeX math expression and show it in the command bar result. Use for equations the user wants typeset."
+    public var parameters: [String: Any] {
+        JSONSchema.object(properties: [
+            "latex": JSONSchema.string(description: "LaTeX source, e.g. '\\\\int_0^1 x^2 dx'"),
+        ], required: ["latex"])
+    }
+    /// App bootstrap wires this to seed a `.latexMath` rich turn (M2 dependency).
+    public static var present: (@Sendable (_ latex: String) async -> Void)?
+    public init() {}
+    public func execute(arguments: String) async throws -> String {
+        let args = try parseArguments(arguments)
+        let latex = try requiredString("latex", from: args)
+        await Self.present?(latex)
+        return "Rendered LaTeX: \(latex)"
+    }
+}
+
+// MARK: - Scratchpad
+
+/// Tiny `@MainActor` backing store for the agent scratchpad.
+/// Persisted via `Defaults[.scratchpadContents]`.
+@MainActor
+public final class ScratchpadStore {
+    public static let shared = ScratchpadStore()
+    private init() {}
+
+    public var contents: String {
+        get { Defaults[.scratchpadContents] }
+    }
+
+    public func append(_ text: String) {
+        let current = Defaults[.scratchpadContents]
+        Defaults[.scratchpadContents] = current.isEmpty ? text : current + "\n" + text
+    }
+
+    public func clear() {
+        Defaults[.scratchpadContents] = ""
+    }
+}
+
+public struct WriteScratchpadTool: ToolDefinition {
+    public let name = "write_scratchpad"
+    public let description = "Append text to the user's scratchpad — a transient free-text buffer for working notes."
+    public var parameters: [String: Any] {
+        JSONSchema.object(properties: [
+            "text": JSONSchema.string(description: "Text to append"),
+        ], required: ["text"])
+    }
+    public init() {}
+    public func execute(arguments: String) async throws -> String {
+        let args = try parseArguments(arguments)
+        let text = try requiredString("text", from: args)
+        await MainActor.run { ScratchpadStore.shared.append(text) }
+        return "Appended \(text.count) chars to scratchpad."
+    }
+}
+
+public struct ReadScratchpadTool: ToolDefinition {
+    public let name = "read_scratchpad"
+    public let description = "Read the current contents of the user's scratchpad buffer."
+    public var parameters: [String: Any] { JSONSchema.object(properties: [:]) }
+    public init() {}
+    public func execute(arguments: String) async throws -> String {
+        let body = await MainActor.run { ScratchpadStore.shared.contents }
+        return body.isEmpty ? "Scratchpad is empty." : body
+    }
+}
+
+// MARK: - App Control
+
+public struct OpenTabTool: ToolDefinition {
+    public let name = "open_tab"
+    public let description = "Switch the notch to a specific tab/view (home, shelf, timer, stats, color_picker, notes, clipboard, terminal, markets, news, retrace)."
+    public var parameters: [String: Any] {
+        JSONSchema.object(properties: [
+            "tab": JSONSchema.enumString(
+                description: "Which tab to show",
+                values: ["home", "shelf", "timer", "stats", "color_picker", "notes", "clipboard", "terminal", "markets", "news", "retrace"]
+            ),
+        ], required: ["tab"])
+    }
+    public init() {}
+    public func execute(arguments: String) async throws -> String {
+        let args = try parseArguments(arguments)
+        let raw = try requiredString("tab", from: args)
+        let view: NotchViews? = {
+            switch raw {
+            case "home":         return .home
+            case "shelf":        return .shelf
+            case "timer":        return .timer
+            case "stats":        return .stats
+            case "color_picker": return .colorPicker
+            case "notes":        return .notes
+            case "clipboard":    return .clipboard
+            case "terminal":     return .terminal
+            case "markets":      return .markets
+            case "news":         return .news
+            case "retrace":      return .retrace
+            default:             return nil
+            }
+        }()
+        guard let view else { return "Unknown tab '\(raw)'." }
+        await MainActor.run { MetamorphiaViewCoordinator.shared.currentView = view }
+        // Re-read after set: minimalistic UI may revert non-home/commandBar tabs.
+        let actual = await MainActor.run { MetamorphiaViewCoordinator.shared.currentView }
+        if actual == view {
+            return "Opened \(raw) tab."
+        } else {
+            return "Could not switch to \(raw) tab (minimalistic UI is active)."
+        }
+    }
+}
+
 // MARK: - Registrar
 
 public enum MetamorphiaTools {
@@ -317,6 +461,11 @@ public enum MetamorphiaTools {
         (PickColorFromScreenTool(), .productivity),
         (ReadMetamorphiaCalendarTool(), .productivity),
         (GetSystemStatsTool(), .systemInfo),
+        (PlotFunctionTool(), .productivity),
+        (RenderLatexTool(), .productivity),
+        (WriteScratchpadTool(), .productivity),
+        (ReadScratchpadTool(), .productivity),
+        (OpenTabTool(), .appControl),
     ]
 
     public static func register(into registry: ToolRegistry) {
