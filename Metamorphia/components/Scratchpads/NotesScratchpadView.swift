@@ -28,16 +28,16 @@ import AppKit
         ZStack(alignment: .topLeading) {
             if text.isEmpty {
                 Text("Jot a note… or type 100/5=")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.white.opacity(0.3))
+                    .font(.custom("Bradley Hand", size: 17))
+                    .foregroundStyle(.black.opacity(0.35))
                     .padding(.horizontal, 12)
                     .padding(.vertical, 11)
                     .allowsHitTesting(false)
             }
             SmartListTextView(
                 text: $text,
-                fontSize: 14,
-                textColor: NSColor.white.withAlphaComponent(0.95)
+                font: NSFont(name: "Bradley Hand", size: 17) ?? .systemFont(ofSize: 16),
+                textColor: .black
             )
             .onChange(of: text) { _, newValue in autoComplete(newValue) }
             .padding(6)
@@ -45,24 +45,18 @@ import AppKit
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(stickyTint)
+                .fill(stickyNoteYellow)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+                .strokeBorder(Color.black.opacity(0.08), lineWidth: 1)
         )
     }
 
-    /// A faint warm wash so the pad reads like a sticky note.
-    private var stickyTint: LinearGradient {
-        LinearGradient(
-            colors: [
-                Color(red: 0.99, green: 0.86, blue: 0.42).opacity(0.10),
-                Color(red: 0.99, green: 0.78, blue: 0.34).opacity(0.05)
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
+    /// Classic bright sticky-note yellow — fully opaque, so the pad reads like a
+    /// real Post-it rather than a tinted panel.
+    private var stickyNoteYellow: Color {
+        Color(red: 1.0, green: 0.906, blue: 0.34)
     }
 
     // MARK: Footer

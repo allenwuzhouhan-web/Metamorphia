@@ -234,6 +234,7 @@ struct SmartListTextView: NSViewRepresentable {
     @Binding var text: String
     var controller: SmartListController? = nil
     var fontSize: CGFloat = 13
+    var font: NSFont? = nil
     var textColor: NSColor = .white
     var isEditable: Bool = true
     var autofocus: Bool = false
@@ -241,25 +242,26 @@ struct SmartListTextView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSTextView.scrollableTextView()
-        scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
+        // Build the scroll view + text view by hand so vertical scrolling is
+        // wired correctly (the text view grows with content inside the clip view).
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
 
-        // Swap in our ghost-drawing subclass, wired to the same text storage.
-        let base = scroll.documentView as! NSTextView
-        let textView = SmartListNSTextView(frame: base.frame, textContainer: base.textContainer)
-        scroll.documentView = textView
-
+        let textView = SmartListNSTextView(frame: .zero)
         textView.delegate = context.coordinator
         textView.isRichText = false
         textView.isEditable = isEditable
         textView.allowsUndo = true
         textView.drawsBackground = false
         textView.backgroundColor = .clear
-        textView.font = .systemFont(ofSize: fontSize)
+        let resolvedFont = font ?? .systemFont(ofSize: fontSize)
+        textView.font = resolvedFont
         textView.textColor = textColor
-        textView.insertionPointColor = textColor.withAlphaComponent(0.8)
+        textView.insertionPointColor = textColor.withAlphaComponent(0.85)
         textView.textContainerInset = NSSize(width: 5, height: 8)
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
@@ -267,14 +269,26 @@ struct SmartListTextView: NSViewRepresentable {
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.string = text
 
+        // Vertical growth: the text view is unbounded in height and tracks the
+        // scroll view's width, so long notes scroll instead of clipping.
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = 3
         textView.defaultParagraphStyle = paragraph
         textView.typingAttributes = [
-            .font: NSFont.systemFont(ofSize: fontSize),
+            .font: resolvedFont,
             .foregroundColor: textColor,
             .paragraphStyle: paragraph
         ]
+
+        scrollView.documentView = textView
 
         controller?.textView = textView
 
@@ -283,7 +297,7 @@ struct SmartListTextView: NSViewRepresentable {
                 textView.window?.makeFirstResponder(textView)
             }
         }
-        return scroll
+        return scrollView
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
