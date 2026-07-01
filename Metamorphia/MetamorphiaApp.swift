@@ -147,6 +147,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var closeNotchWorkItem: DispatchWorkItem?
     private var previousScreens: [NSScreen]?
     private var onboardingWindowController: NSWindowController?
+    private var licenseWindowController: NSWindowController?
     private var cancellables = Set<AnyCancellable>()
     private var windowsHiddenForLock = false
     private var optionalShortcutHandlersRegistered = false
@@ -605,6 +606,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // DEBUG-only: detect main-thread hangs and capture the frozen stack.
         FreezeDiagnostics.start()
+
+        // Members-only gate: without a valid license, show the activation window
+        // and wire up NOTHING else — no notch, no hotkeys, no agent — until the
+        // user enters a valid key and relaunches.
+        guard LicenseManager.shared.isActivated else {
+            showLicenseActivationWindow()
+            return
+        }
 
         // Wire up Metamorphia AI features (command bar, agent loop, hotkey).
         MetamorphiaBootstrap.configure()
@@ -1404,6 +1413,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         onboardingWindowController?.window?.makeKeyAndOrderFront(nil)
         onboardingWindowController?.window?.orderFrontRegardless()
+    }
+
+    // MARK: - Members-only licensing
+
+    private func showLicenseActivationWindow() {
+        NSApp.setActivationPolicy(.regular)
+        if licenseWindowController == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 440, height: 380),
+                styleMask: [.titled, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            window.center()
+            window.title = "Metamorphia"
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+            window.isReleasedWhenClosed = false
+            window.isRestorable = false
+            window.contentView = NSHostingView(rootView: LicenseActivationView(onRelaunch: { [weak self] in
+                self?.relaunchApp()
+            }))
+            licenseWindowController = NSWindowController(window: window)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        licenseWindowController?.window?.makeKeyAndOrderFront(nil)
+        licenseWindowController?.window?.orderFrontRegardless()
+    }
+
+    private func relaunchApp() {
+        guard let bundleIdentifier = Bundle.main.bundleIdentifier,
+              let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else {
+            NSApplication.shared.terminate(nil)
+            return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: appURL, configuration: configuration)
+        NSApplication.shared.terminate(nil)
     }
 }
 
