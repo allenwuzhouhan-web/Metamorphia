@@ -126,6 +126,7 @@ struct TabSelectionView: View {
 
                 // Render the tab button
                 TabButton(label: tab.label, icon: tab.icon, selected: isSelected) {
+                    if coordinator.currentView != tab.view { Haptics.select() }
                     if tab.view == .extensionExperience {
                         coordinator.selectedExtensionExperienceID = tab.experienceID
                     }

@@ -1107,6 +1107,9 @@ struct NoteEditorView: View {
 
     @FocusState private var isContentFocused: Bool
     @State private var previewImage: NSImage?
+    @StateObject private var listController = SmartListController()
+    @State private var runningAction: AIAction?
+    @State private var toolError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1185,17 +1188,18 @@ struct NoteEditorView: View {
                         .allowsHitTesting(false)
                 }
                 
-                TextEditor(text: $content)
-                    .font(.system(size: 13, design: .rounded))
-                    .foregroundStyle(.white)
-                    .lineSpacing(4)
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
-                    .padding(.bottom, 20)
-                    .padding(.trailing, imageData != nil ? 75 : 0) // Reduced from 100
-                    .focused($isContentFocused)
-                    .frame(maxHeight: .infinity)
-                    .background(Color.white.opacity(0.05))
+                SmartListTextView(
+                    text: $content,
+                    controller: listController,
+                    fontSize: 13,
+                    textColor: .white,
+                    autofocus: isNew
+                )
+                .padding(8)
+                .padding(.bottom, 20)
+                .padding(.trailing, imageData != nil ? 75 : 0) // Reduced from 100
+                .frame(maxHeight: .infinity)
+                .background(Color.white.opacity(0.05))
                 
                 // Image Overlay in Bottom Right
                 if let nsImage = previewImage {
@@ -1248,6 +1252,13 @@ struct NoteEditorView: View {
                     .allowsHitTesting(false)
                 }
             }
+            .overlay(alignment: .bottom) {
+                writingToolsBar
+            }
+            .animation(.spring(response: 0.32, dampingFraction: 0.86), value: listController.selectedText.isEmpty)
+            .onChange(of: listController.selectedText) { _, _ in
+                if runningAction == nil { toolError = nil }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity) // Ensure VStack takes full space
         .background(Color.black) // Ensure solid background
@@ -1260,6 +1271,85 @@ struct NoteEditorView: View {
             // Decode the attached image once when it changes instead of on every
             // body recompute (the TextEditor binding makes body run on each keystroke).
             previewImage = newData.flatMap { NSImage(data: $0) }
+        }
+    }
+
+    // MARK: - Inline Writing Tools
+
+    /// The curated set surfaced on the selection bar — the rest of the AIAction
+    /// catalog stays in the full Writing Tools panel.
+    private static let inlineActions: [AIAction] = [
+        .proofread, .rewriteConcise, .rewriteProfessional, .makeList, .summarize
+    ]
+
+    /// A compact glass bar that floats up when text is selected, running an
+    /// AIAction on the selection in place.
+    @ViewBuilder
+    private var writingToolsBar: some View {
+        let hasSelection = !listController.selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if hasSelection || runningAction != nil {
+            HStack(spacing: 6) {
+                if let running = runningAction {
+                    ProgressView().controlSize(.small)
+                    Text(running.title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.9))
+                } else if let error = toolError {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(error)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .lineLimit(1)
+                } else {
+                    ForEach(Self.inlineActions) { action in
+                        Button {
+                            run(action)
+                        } label: {
+                            Image(systemName: action.systemImage)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.9))
+                                .frame(width: 26, height: 26)
+                        }
+                        .buttonStyle(.plain)
+                        .help(action.title)
+                    }
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5)
+                    )
+            )
+            .padding(.bottom, 14)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+
+    private func run(_ action: AIAction) {
+        let input = listController.selectedText
+        guard !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        toolError = nil
+        runningAction = action
+        Task {
+            do {
+                let result = try await AIActionRunner.run(action: action, input: input, context: nil)
+                await MainActor.run {
+                    listController.replaceSelection(with: result)
+                    runningAction = nil
+                    Haptics.confirm()
+                }
+            } catch {
+                await MainActor.run {
+                    toolError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    runningAction = nil
+                }
+            }
         }
     }
 }

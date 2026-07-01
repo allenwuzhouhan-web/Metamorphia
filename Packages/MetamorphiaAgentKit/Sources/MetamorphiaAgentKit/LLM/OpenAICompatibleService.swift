@@ -32,6 +32,30 @@ public final class OpenAICompatibleService: LLMServiceProtocol, @unchecked Senda
         tools: [[String: AnyCodable]]?,
         maxTokens: Int = 2048
     ) async throws -> LLMResponse {
+        // Log this call at its boundary. `defer` guarantees one entry whether the
+        // request returns or throws; the success/token fields are filled in below.
+        let logStartedAt = Date()
+        let logInputChars = messages.reduce(0) { $0 + ($1.content?.count ?? 0) }
+        var logOutputChars = 0
+        var logPromptTokens: Int? = nil
+        var logCompletionTokens: Int? = nil
+        var logSucceeded = false
+        defer {
+            APICallLog.shared.record(APICallLogEntry(
+                date: logStartedAt,
+                provider: provider.rawValue,
+                model: model,
+                streaming: false,
+                inputChars: logInputChars,
+                outputChars: logOutputChars,
+                promptTokens: logPromptTokens,
+                completionTokens: logCompletionTokens,
+                durationMs: Int(Date().timeIntervalSince(logStartedAt) * 1000),
+                success: logSucceeded,
+                error: nil
+            ))
+        }
+
         guard let apiKey = APIKeyManager.shared.getKey(for: provider) else {
             throw MetamorphiaError.apiError("No API key configured. Open Settings to enter your \(provider.config.displayName) API key.")
         }
@@ -128,12 +152,14 @@ public final class OpenAICompatibleService: LLMServiceProtocol, @unchecked Senda
             throw MetamorphiaError.apiError("\(provider.config.displayName) returned no response choices.")
         }
 
-        if let usage = decoded.usage, let tracker = costTracker {
-            tracker.record(
+        if let usage = decoded.usage {
+            logPromptTokens = usage.prompt_tokens
+            logCompletionTokens = usage.completion_tokens
+            costTracker?.record(
                 provider: provider.rawValue,
                 inputTokens: usage.prompt_tokens,
                 outputTokens: usage.completion_tokens,
-                agentId: tracker.activeAgentId
+                agentId: costTracker?.activeAgentId
             )
         }
 
@@ -141,6 +167,8 @@ public final class OpenAICompatibleService: LLMServiceProtocol, @unchecked Senda
         let text = (choice.message.content?.isEmpty == false ? choice.message.content : nil)
             ?? choice.message.reasoning_content
 
+        logOutputChars = text?.count ?? 0
+        logSucceeded = true
         return LLMResponse(
             text: text,
             toolCalls: choice.message.tool_calls,
@@ -254,6 +282,8 @@ public final class OpenAICompatibleService: LLMServiceProtocol, @unchecked Senda
         maxTokens: Int
     ) -> AsyncThrowingStream<StreamEvent, Error> {
         AsyncThrowingStream { [self] continuation in
+            let logStartedAt = Date()
+            let logInputChars = messages.reduce(0) { $0 + ($1.content?.count ?? 0) }
             let producer = Task {
                 do {
                     guard let apiKey = APIKeyManager.shared.getKey(for: provider) else {
@@ -368,9 +398,35 @@ public final class OpenAICompatibleService: LLMServiceProtocol, @unchecked Senda
                         toolCalls: finalToolCalls,
                         rawMessage: rawMessage
                     )
+                    APICallLog.shared.record(APICallLogEntry(
+                        date: logStartedAt,
+                        provider: provider.rawValue,
+                        model: model,
+                        streaming: true,
+                        inputChars: logInputChars,
+                        outputChars: accumulatedText.count,
+                        promptTokens: nil,
+                        completionTokens: nil,
+                        durationMs: Int(Date().timeIntervalSince(logStartedAt) * 1000),
+                        success: true,
+                        error: nil
+                    ))
                     continuation.yield(.done(response))
                     continuation.finish()
                 } catch {
+                    APICallLog.shared.record(APICallLogEntry(
+                        date: logStartedAt,
+                        provider: provider.rawValue,
+                        model: model,
+                        streaming: true,
+                        inputChars: logInputChars,
+                        outputChars: 0,
+                        promptTokens: nil,
+                        completionTokens: nil,
+                        durationMs: Int(Date().timeIntervalSince(logStartedAt) * 1000),
+                        success: false,
+                        error: (error as? MetamorphiaError)?.errorDescription ?? error.localizedDescription
+                    ))
                     continuation.finish(throwing: error)
                 }
             }

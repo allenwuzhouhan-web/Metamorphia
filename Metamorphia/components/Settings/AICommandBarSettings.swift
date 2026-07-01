@@ -13,6 +13,7 @@ struct AICommandBarSettings: View {
     @State private var apiKey: String = ""
     @State private var hasKey: Bool = false
     @State private var savedFlash = false
+    @ObservedObject private var apiLog = APICallLog.shared
 
     var body: some View {
         Section {
@@ -168,6 +169,34 @@ struct AICommandBarSettings: View {
         }
 
         Section {
+            HStack {
+                Image(systemName: "list.bullet.rectangle")
+                    .foregroundStyle(.tint)
+                Text("API Log")
+                    .font(.headline)
+                Spacer()
+                if !apiLog.entries.isEmpty {
+                    Button("Clear") { APICallLog.shared.clear() }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                }
+            }
+            Text("Every call to your LLM provider — the agent, writing tools, and copilots — newest first.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if apiLog.entries.isEmpty {
+                Text("No API calls yet. They'll appear here as you use the agent and writing tools.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(apiLog.entries.prefix(50)) { entry in
+                    APILogRow(entry: entry)
+                }
+            }
+        }
+
+        Section {
             Text("More AI sub-sections — Models / Agents / Voice / Learning / MCP / Developer — will land in a follow-on UI pass. The infrastructure is ready (see MetamorphiaAgentKit) and these will plug into the existing agent loop.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -287,5 +316,64 @@ struct VoiceSettingsSection: View {
 
     private var assistantName: String {
         AssistantNameManager.shared.name
+    }
+}
+
+// MARK: - API Log Row
+
+/// One row of the AI API log: an at-a-glance record of a single provider call —
+/// model, transport, size, latency, and outcome.
+private struct APILogRow: View {
+    let entry: APICallLogEntry
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(entry.success ? Color.green : Color.orange)
+                .frame(width: 6, height: 6)
+
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text(entry.model)
+                        .font(.system(size: 11, weight: .semibold))
+                        .lineLimit(1)
+                    Text(entry.provider)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                    if entry.streaming {
+                        Image(systemName: "dot.radiowaves.left.and.right")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(detailLine)
+                    .font(.system(size: 10))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            Text(entry.date, style: .time)
+                .font(.system(size: 10))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var detailLine: String {
+        var parts: [String] = []
+        if let prompt = entry.promptTokens, let completion = entry.completionTokens {
+            parts.append("\(prompt)→\(completion) tok")
+        } else {
+            parts.append("\(entry.inputChars)→\(entry.outputChars) ch")
+        }
+        parts.append("\(entry.durationMs) ms")
+        if let error = entry.error {
+            parts.append(error)
+        }
+        return parts.joined(separator: "  ·  ")
     }
 }

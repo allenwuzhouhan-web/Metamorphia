@@ -1204,7 +1204,9 @@ extension Defaults.Keys {
     static let didClearLegacyURLCacheV1 = Key<Bool>("didClearLegacyURLCacheV1", default: false)
     
     // MARK: Minimalistic UI Mode
-    static let enableMinimalisticUI = Key<Bool>("enableMinimalisticUI", default: false)
+    // Locked on: the app ships in minimalistic UI + v11 liquid glass, and the
+    // toggle that used to flip this lives in a now-hidden Settings tab.
+    static let enableMinimalisticUI = Key<Bool>("enableMinimalisticUI", default: true)
     
     // MARK: Lyrics Feature
     static let enableLyrics = Key<Bool>("enableLyrics", default: false)

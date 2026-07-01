@@ -30,6 +30,30 @@ public final class AnthropicService: LLMServiceProtocol, @unchecked Sendable {
         tools: [[String: AnyCodable]]?,
         maxTokens: Int = 2048
     ) async throws -> LLMResponse {
+        // Log this call at its boundary (covers Claude's default streaming shim,
+        // which routes through here). `defer` guarantees one entry on any exit.
+        let logStartedAt = Date()
+        let logInputChars = messages.reduce(0) { $0 + ($1.content?.count ?? 0) }
+        var logOutputChars = 0
+        var logPromptTokens: Int? = nil
+        var logCompletionTokens: Int? = nil
+        var logSucceeded = false
+        defer {
+            APICallLog.shared.record(APICallLogEntry(
+                date: logStartedAt,
+                provider: LLMProvider.claude.rawValue,
+                model: model,
+                streaming: false,
+                inputChars: logInputChars,
+                outputChars: logOutputChars,
+                promptTokens: logPromptTokens,
+                completionTokens: logCompletionTokens,
+                durationMs: Int(Date().timeIntervalSince(logStartedAt) * 1000),
+                success: logSucceeded,
+                error: nil
+            ))
+        }
+
         guard let apiKey = APIKeyManager.shared.getKey(for: .claude) else {
             throw MetamorphiaError.apiError("No API key configured. Open Settings to enter your Claude API key.")
         }
@@ -104,20 +128,24 @@ public final class AnthropicService: LLMServiceProtocol, @unchecked Sendable {
         }
 
         // Cost tracking if available.
-        if let tracker = costTracker,
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let usage = json["usage"] as? [String: Any] {
             let input = usage["input_tokens"] as? Int ?? 0
             let output = usage["output_tokens"] as? Int ?? 0
-            tracker.record(
+            logPromptTokens = input
+            logCompletionTokens = output
+            costTracker?.record(
                 provider: LLMProvider.claude.rawValue,
                 inputTokens: input,
                 outputTokens: output,
-                agentId: tracker.activeAgentId
+                agentId: costTracker?.activeAgentId
             )
         }
 
-        return try parseResponse(data)
+        let response = try parseResponse(data)
+        logOutputChars = response.text?.count ?? 0
+        logSucceeded = true
+        return response
     }
 
     // MARK: - Message Conversion (OpenAI → Anthropic)

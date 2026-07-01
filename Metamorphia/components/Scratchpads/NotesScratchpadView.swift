@@ -34,13 +34,13 @@ import AppKit
                     .padding(.vertical, 11)
                     .allowsHitTesting(false)
             }
-            TextEditor(text: $text)
-                .font(.system(size: 14))
-                .foregroundStyle(.white.opacity(0.95))
-                .scrollContentBackground(.hidden)
-                .tint(.white.opacity(0.7))
-                .onChange(of: text) { _, newValue in autoComplete(newValue) }
-                .padding(6)
+            SmartListTextView(
+                text: $text,
+                fontSize: 14,
+                textColor: NSColor.white.withAlphaComponent(0.95)
+            )
+            .onChange(of: text) { _, newValue in autoComplete(newValue) }
+            .padding(6)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(

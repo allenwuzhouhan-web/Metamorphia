@@ -96,7 +96,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .general: return String(localized: "General")
-        case .aiCommandBar: return String(localized: "Command Bar")
+        case .aiCommandBar: return String(localized: "AI")
         case .aiActivation: return String(localized: "Notch Activation")
         case .liveActivities: return String(localized: "Live Activities")
         case .appearance: return String(localized: "Appearance")
@@ -502,45 +502,11 @@ struct SettingsView: View {
     }
 
     private var availableTabs: [SettingsTab] {
-        // Ordered to match group layout: core → media & display → system →
-        // productivity → utilities → developer → integrations → info.
-        let ordered: [SettingsTab] = [
-            // Core
-            .general,
-            .appearance,
-            // AI
-            .aiCommandBar,
-            .aiActivation,
-            .continuum,
-            // Media & Display
-            .media,
-            .liveActivities,
-            .lockScreen,
-            .devices,
-            // System
-            .hudAndOSD,
-            .battery,
-            // Productivity
-            .timer,
-            .calendar,
-            .notes,
-            // Utilities
-            .clipboard,
-            .screenAssistant,
-            .colorPicker,
-            .shelf,
-            .downloads,
-            .shortcuts,
-            // Developer
-            .stats,
-            .terminal,
-            // Integrations
-            .extensions,
-            // Info
-            .about
-        ]
-
-        return ordered.filter { isTabVisible($0) }
+        // Gutted to a single surface: the AI panel + API log. Every other
+        // settings tab still exists in code (routed by `detailView`) but is
+        // intentionally unreachable — the app runs on its locked defaults
+        // (minimalistic UI, v11 liquid glass).
+        return [.aiCommandBar].filter { isTabVisible($0) }
     }
 
     /// Groups the filtered tabs into sidebar sections, preserving both
