@@ -51,21 +51,6 @@ final class ScratchpadWindow: NSObject, NSWindowDelegate {
         animateIn(panel, at: screenPoint)
     }
 
-    /// Float the tool PICKER (the tray of all scratchpads) — the "tear off from the
-    /// notch" target. Tapping a tool opens its scratchpad and dismisses the picker;
-    /// dragging a tool out drops it at the cursor.
-    func presentTray(at screenPoint: CGPoint?) {
-        let panel = makePanel(size: NSSize(width: 250, height: 190))
-        let root = ScratchpadTrayView(onActivate: { [weak self, weak panel] tool, point in
-            // Open the chosen tool where it was dropped, or beside the picker.
-            let origin = point ?? panel.map { NSPoint(x: $0.frame.minX, y: $0.frame.maxY) }
-            self?.present(tool: tool, at: origin)
-            if let panel { self?.close(panel) }
-        })
-        panel.contentViewController = NSHostingController(rootView: root)
-        animateIn(panel, at: screenPoint)
-    }
-
     // MARK: - Window plumbing
 
     private func makePanel(size: NSSize) -> FloatingScratchPanel {

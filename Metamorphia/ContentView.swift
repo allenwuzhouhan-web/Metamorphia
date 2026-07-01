@@ -161,9 +161,6 @@ struct ContentView: View {
     @State private var lastHapticTime: Date = Date()
     /// Stable token so a scratchpad tear-out drag keeps the notch open until release.
     @State private var scratchpadDragToken = UUID()
-    /// True while a downward pan that began on the CLOSED notch is in progress — a long
-    /// such pull tears off the scratchpad tools picker (drag-from-notch).
-    @State private var downDragStartedClosed = false
     @State private var stickyTerminalClickMonitor: Any?
     @State private var hiddenEdgeHoverGlobalMonitor: Any?
     @State private var hiddenEdgeHoverLocalMonitor: Any?
@@ -2272,26 +2269,6 @@ struct ContentView: View {
         // — the user is reading or scrolling the response transcript, not
         // asking to dismiss it. Dismissal is explicit (Esc / clear).
         if coordinator.currentView == .commandBar { return }
-
-        // Remember whether this downward pull began on the closed notch.
-        if phase == .began {
-            downDragStartedClosed = (vm.notchState == .closed)
-        }
-
-        // Drag-from-notch (option B): a pull that started on the closed notch and goes
-        // well past the open threshold tears off the scratchpad tools picker as a dark
-        // floating window at the cursor, instead of just opening the notch.
-        if phase == .ended,
-           downDragStartedClosed,
-           Defaults[.enableScratchpads],
-           translation > Defaults[.gestureSensitivity] * 1.8 {
-            if Defaults[.enableHaptics] { triggerHapticIfAllowed() }
-            ScratchpadWindow.shared.presentTray(at: NSEvent.mouseLocation)
-            withAnimation(.smooth) { gestureProgress = .zero }
-            if vm.notchState == .open { vm.close() }
-            downDragStartedClosed = false
-            return
-        }
 
         handleScrollGesture(isDownward: true, translation: translation, phase: phase)
     }
