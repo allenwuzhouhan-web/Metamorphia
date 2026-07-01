@@ -151,10 +151,6 @@ struct AICommandBarSettings: View {
                 .foregroundStyle(.secondary)
         }
 
-        Section("Voice Input") {
-            VoiceSettingsSection()
-        }
-
         Section("Costs") {
             if let tracker = MetamorphiaBootstrap.costTracker {
                 Text(tracker.dailyReport())
