@@ -8,6 +8,7 @@ import Foundation
 /// auth style, and default/available models. The config list is cached at
 /// first access so `.config` is constant-time.
 public enum LLMProvider: String, CaseIterable, Codable, Sendable {
+    case openRouter
     case openai
     case deepseek
     case claude
@@ -68,6 +69,29 @@ public extension LLMProvider {
 
     private func buildConfig() -> LLMProviderConfig {
         switch self {
+        case .openRouter:
+            return LLMProviderConfig(
+                displayName: "OpenRouter",
+                baseURL: "https://openrouter.ai/api/v1/chat/completions",
+                // Dynamic aliases resolve to each vendor's newest flagship, so the
+                // default never goes stale; concrete slugs are listed below them.
+                defaultModel: "~anthropic/claude-sonnet-latest",
+                availableModels: [
+                    "~anthropic/claude-sonnet-latest",
+                    "~anthropic/claude-opus-latest",
+                    "~openai/gpt-latest",
+                    "~google/gemini-pro-latest",
+                    "anthropic/claude-opus-4.8",
+                    "anthropic/claude-sonnet-5",
+                    "openai/gpt-5.5",
+                    "google/gemini-3.5-flash",
+                    "deepseek/deepseek-v4-pro",
+                    "x-ai/grok-4.3",
+                ],
+                authStyle: .bearer,
+                signupURL: "openrouter.ai/keys",
+                keyPlaceholder: "sk-or-v1-..."
+            )
         case .openai:
             return LLMProviderConfig(
                 displayName: "OpenAI",

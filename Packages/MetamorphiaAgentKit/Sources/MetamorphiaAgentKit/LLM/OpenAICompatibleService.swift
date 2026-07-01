@@ -73,6 +73,11 @@ public final class OpenAICompatibleService: LLMServiceProtocol, @unchecked Senda
         if provider == .kimiCN || provider == .kimi {
             request.setValue("claude-code/1.0", forHTTPHeaderField: "User-Agent")
         }
+        if provider == .openRouter {
+            // Optional attribution headers for OpenRouter's app leaderboard.
+            request.setValue("https://metamorphia.app", forHTTPHeaderField: "HTTP-Referer")
+            request.setValue("Metamorphia", forHTTPHeaderField: "X-OpenRouter-Title")
+        }
 
         // Use vision-aware serialization when any message carries image blocks.
         if messages.contains(where: { $0.contentBlocks != nil }) {
@@ -302,6 +307,11 @@ public final class OpenAICompatibleService: LLMServiceProtocol, @unchecked Senda
                     request.timeoutInterval = 120
                     if provider == .kimiCN || provider == .kimi {
                         request.setValue("claude-code/1.0", forHTTPHeaderField: "User-Agent")
+                    }
+                    if provider == .openRouter {
+                        // Optional attribution headers for OpenRouter's app leaderboard.
+                        request.setValue("https://metamorphia.app", forHTTPHeaderField: "HTTP-Referer")
+                        request.setValue("Metamorphia", forHTTPHeaderField: "X-OpenRouter-Title")
                     }
 
                     // Use vision-aware serialization when any message carries image blocks.

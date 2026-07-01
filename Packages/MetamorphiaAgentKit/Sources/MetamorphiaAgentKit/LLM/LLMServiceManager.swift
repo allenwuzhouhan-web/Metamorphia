@@ -158,8 +158,8 @@ public final class LLMServiceManager: @unchecked Sendable {
     // MARK: - Init
 
     private init() {
-        let savedProvider = UserDefaults.standard.string(forKey: "llm_provider") ?? LLMProvider.deepseek.rawValue
-        let provider = LLMProvider(rawValue: savedProvider) ?? .deepseek
+        let savedProvider = UserDefaults.standard.string(forKey: "llm_provider") ?? LLMProvider.openRouter.rawValue
+        let provider = LLMProvider(rawValue: savedProvider) ?? .openRouter
         _currentProvider = provider
         _currentModel = UserDefaults.standard.string(forKey: "llm_model") ?? provider.config.defaultModel
 
